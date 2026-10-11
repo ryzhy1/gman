@@ -2,6 +2,7 @@ import React, { useEffect, useState } from 'react';
 import { createRoot } from 'react-dom/client';
 import { get, type CurrentMetrics, type Overview } from './api';
 import { ConfigView, History, InstanceTable, type Placed } from './components';
+import { ConfigHistory } from './configs';
 import { ClusterCard, HostCard } from './hardware';
 import { date, stale } from './format';
 import { Resources } from './resources';
@@ -151,9 +152,13 @@ function App() {
               {tab === 'Ресурсы' && <Resources token={token} instances={own} grafanaLink={links!.grafana} />}
               {tab === 'Экземпляры' && <InstanceTable rows={own} metrics={metrics} />}
               {tab === 'Конфигурация' && <>
+                <h2>Текущая конфигурация</h2>
                 {own.map(i => <ConfigView key={i.source.source_id + i.id} instance={i} />)}
                 {!own.length && <div className="empty">Конфигурации еще не получены.</div>}
                 <p className="note">Значения переменных окружения, команды и команды проверок здоровья не собираются.</p>
+                <h2 className="subheading">История версий</h2>
+                <ConfigHistory key={service.id} token={token} serviceId={service.id}
+                  instances={all.filter(i => i.service_id === service.id)} refreshKey={data.server_time} />
               </>}
               {tab === 'История' && <History token={token} serviceId={service.id} refreshKey={data.server_time} />}
             </section>

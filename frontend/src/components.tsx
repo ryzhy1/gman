@@ -71,7 +71,7 @@ export function InstanceTable({ rows, metrics }: { rows: Placed[]; metrics?: Cur
   </div>;
 }
 
-const CONFIG_LABELS: [string, string, ((v: unknown) => string)?][] = [
+export const CONFIG_LABELS: [string, string, ((v: unknown) => string)?][] = [
   ['image', 'Образ'], ['image_id', 'Image ID'],
   ['cpu_request', 'CPU request, ядра'], ['cpu_limit', 'CPU limit, ядра'], ['cpuset', 'Привязка к CPU'],
   ['memory_request_bytes', 'Memory request', v => bytes(v as number | null)],

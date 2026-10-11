@@ -62,6 +62,23 @@ export type Audit = {
 export type Overview = { services: Service[]; sources: Source[]; events: Audit[]; server_time: string; grafana_url: string };
 export type EventPage = { events: Audit[]; next: string | null };
 
+/** One distinct configuration of an instance; returning to an older config is a new version. */
+export type ConfigVersion = {
+  id: number; service_id: string; source_id: string; instance_id: string;
+  /** Empty for versions recorded before migration 0002. */
+  instance_name: string; environment: string;
+  config_hash: string; first_seen_at: string; last_seen_at: string;
+  /** A currently observed instance runs this version. */
+  current: boolean;
+};
+export type ConfigVersionPage = { versions: ConfigVersion[]; next: string | null };
+/** Element-level list changes use the path "<field>[]". */
+export type ConfigChange = { path: string; op: 'added' | 'removed' | 'changed'; before: unknown; after: unknown };
+export type ConfigDiff = {
+  from: ConfigVersion; to: ConfigVersion; identical: boolean;
+  summary: Record<ConfigChange['op'], number>; changes: ConfigChange[];
+};
+
 export class ApiError extends Error {
   constructor(public status: number) {
     super(status === 401 ? 'Неверный токен просмотра' : `Ошибка API: ${status}`);

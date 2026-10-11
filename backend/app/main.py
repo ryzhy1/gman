@@ -9,12 +9,13 @@ from datetime import datetime, timezone
 from typing import Literal
 from urllib.parse import urlsplit
 
-from fastapi import Depends, FastAPI, Header, HTTPException, Query
+from fastapi import Depends, FastAPI, Header, HTTPException, Path, Query
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 from sqlalchemy import text
 from sqlalchemy.orm import Session
 
+from . import configs
 from . import db as store
 from . import metrics
 
@@ -368,6 +369,56 @@ def list_events(limit: int = Query(200, ge=1, le=1000), before: str = Query("", 
         return store.events(session, limit, service_id, before)
     except ValueError:
         raise HTTPException(422, "Invalid cursor")
+
+
+MAX_ID = 2 ** 63 - 1  # BIGINT on PostgreSQL
+
+
+def config_page(session, limit, before, **scope):
+    try:
+        return store.config_versions(session, limit, before=before, **scope)
+    except ValueError:
+        raise HTTPException(422, "Invalid cursor")
+
+
+@app.get("/api/services/{service_id}/configs", dependencies=[Depends(reader)])
+def service_configs(service_id: str, limit: int = Query(100, ge=1, le=1000), before: str = Query("", max_length=200),
+                    session: Session = Depends(db)):
+    """Config versions of all instances of a service, newest first; without the config bodies."""
+    if not store.service_known(session, service_id):
+        raise HTTPException(404, "Service not found")
+    return config_page(session, limit, before, service_id=service_id)
+
+
+@app.get("/api/instances/{source_id}/{instance_id}/configs", dependencies=[Depends(reader)])
+def instance_configs(source_id: str, instance_id: str, limit: int = Query(100, ge=1, le=1000),
+                     before: str = Query("", max_length=200), session: Session = Depends(db)):
+    if not store.instance_known(session, source_id, instance_id):
+        raise HTTPException(404, "Instance not found")
+    return config_page(session, limit, before, instance=(source_id, instance_id))
+
+
+def config_or_404(session, version_id):
+    found = store.config_snapshot(session, version_id)
+    if found is None:
+        raise HTTPException(404, f"Config version {version_id} not found")
+    return found
+
+
+# Declared before /api/configs/{version_id} so that "diff" is not taken for an ID.
+@app.get("/api/configs/diff", dependencies=[Depends(reader)])
+def config_diff(from_: int = Query(alias="from", ge=1, le=MAX_ID), to: int = Query(ge=1, le=MAX_ID),
+                session: Session = Depends(db)):
+    """Changes from version `from` to version `to`; any two versions may be compared."""
+    old, new = config_or_404(session, from_), config_or_404(session, to)
+    diff = configs.diff(old.pop("config"), new.pop("config"))
+    return {"from": old, "to": new, "identical": old["config_hash"] == new["config_hash"],
+            "summary": configs.summary(diff), "changes": diff}
+
+
+@app.get("/api/configs/{version_id}", dependencies=[Depends(reader)])
+def config_version(version_id: int = Path(ge=1, le=MAX_ID), session: Session = Depends(db)):
+    return config_or_404(session, version_id)
 
 
 @app.get("/api/metrics/current", dependencies=[Depends(reader)])
