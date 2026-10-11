@@ -82,6 +82,9 @@ class ConfigSnapshot(Base):
     source_id: Mapped[str] = mapped_column(String)
     instance_id: Mapped[str] = mapped_column(String)
     service_id: Mapped[str] = mapped_column(String, default="")
+    # Labels as of the first observation, so the history stays readable after the instance is gone.
+    instance_name: Mapped[str] = mapped_column(String, default="", server_default="")
+    environment: Mapped[str] = mapped_column(String, default="", server_default="")
     config_hash: Mapped[str] = mapped_column(String(64))
     config: Mapped[dict] = mapped_column(Json)
     first_seen_at: Mapped[datetime] = mapped_column(UTC)
@@ -205,7 +208,8 @@ def save_snapshot(session, data, received_at):
             unchanged.append(row.config_snapshot_id)
         else:
             row.config_snapshot = ConfigSnapshot(source_id=source_id, instance_id=item["id"],
-                                                 service_id=item["service_id"], config_hash=digest,
+                                                 service_id=item["service_id"], instance_name=item["name"],
+                                                 environment=item["environment"], config_hash=digest,
                                                  config=item["config"], first_seen_at=received_at,
                                                  last_seen_at=received_at)
         row.position, row.config_hash, row.data = position, digest, item
@@ -225,8 +229,8 @@ def event(data, received_at, occurred_at):
                  instance_id=data.get("instance_id", ""), data=data)
 
 
-def cursor(row):
-    raw = f"{row.received_at.isoformat()}|{row.id}"
+def cursor(row, at="received_at"):
+    raw = f"{getattr(row, at).isoformat()}|{row.id}"
     return base64.urlsafe_b64encode(raw.encode()).decode().rstrip("=")
 
 
@@ -257,6 +261,58 @@ def events(session, limit, service_id=None, before=None):
     rows = session.scalars(query.order_by(Event.received_at.desc(), Event.id.desc()).limit(limit + 1)).all()
     page = rows[:limit]
     return {"events": [ordered(r.data) for r in page], "next": cursor(page[-1]) if len(rows) > limit else None}
+
+
+def config_version(row, current):
+    return {"id": row.id, "service_id": row.service_id, "source_id": row.source_id, "instance_id": row.instance_id,
+            "instance_name": row.instance_name, "environment": row.environment, "config_hash": row.config_hash,
+            "first_seen_at": row.first_seen_at.isoformat(), "last_seen_at": row.last_seen_at.isoformat(),
+            "current": row.id in current}
+
+
+def current_configs(session, ids):
+    """IDs among `ids` that some currently observed instance runs."""
+    if not ids:
+        return set()
+    return set(session.scalars(select(Instance.config_snapshot_id).where(Instance.config_snapshot_id.in_(ids))))
+
+
+def config_versions(session, limit, service_id=None, instance=None, before=None):
+    """Distinct configurations, newest first by first observation; `next` is an opaque keyset cursor.
+
+    A config that returns after a change is a new version: versions are a timeline, not a set of hashes.
+    """
+    query = select(ConfigSnapshot)
+    if service_id is not None:
+        query = query.where(ConfigSnapshot.service_id == service_id)
+    if instance is not None:
+        query = query.where(ConfigSnapshot.source_id == instance[0], ConfigSnapshot.instance_id == instance[1])
+    if before:
+        query = query.where(tuple_(ConfigSnapshot.first_seen_at, ConfigSnapshot.id) < parse_cursor(before))
+    rows = session.scalars(query.order_by(ConfigSnapshot.first_seen_at.desc(), ConfigSnapshot.id.desc())
+                           .limit(limit + 1)).all()
+    page = rows[:limit]
+    current = current_configs(session, [r.id for r in page])
+    return {"versions": [config_version(r, current) for r in page],
+            "next": cursor(page[-1], "first_seen_at") if len(rows) > limit else None}
+
+
+def config_snapshot(session, version_id):
+    row = session.get(ConfigSnapshot, version_id)
+    return None if row is None else {**config_version(row, current_configs(session, [row.id])), "config": row.config}
+
+
+def service_known(session, service_id):
+    return (session.get(Service, service_id) is not None
+            or session.scalar(select(ConfigSnapshot.id).where(ConfigSnapshot.service_id == service_id).limit(1))
+            is not None)
+
+
+def instance_known(session, source_id, instance_id):
+    return (session.get(Instance, (source_id, instance_id)) is not None
+            or session.scalar(select(ConfigSnapshot.id).where(ConfigSnapshot.source_id == source_id,
+                                                              ConfigSnapshot.instance_id == instance_id).limit(1))
+            is not None)
 
 
 class Retention:

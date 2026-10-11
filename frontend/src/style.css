@@ -3,3 +3,4 @@
 @media(max-width:650px){dl.compact{grid-template-columns:1fr}dl.compact>div{grid-template-columns:minmax(0,1fr) auto}.gauges{grid-template-columns:repeat(2,minmax(0,1fr))}nav{flex-wrap:wrap}}
 .tabs{overflow-x:auto;scrollbar-width:thin}.tabs button{white-space:nowrap;flex:none}.gpu-numbers{grid-template-columns:repeat(auto-fit,minmax(100px,1fr))}
 @media(max-width:650px){.tabs{gap:18px}}
+.diff-head{display:flex;gap:10px;flex-wrap:wrap;align-items:center;font-size:12px;margin-bottom:12px}.diff-value{overflow-wrap:anywhere;max-width:420px}tr.picked td{background:#f7faff}td b+.badge{margin-left:8px}
