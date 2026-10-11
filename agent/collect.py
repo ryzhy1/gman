@@ -1,21 +1,33 @@
-"""One-shot, read-only inventory. Run periodically with a systemd timer/cron.
+"""Read-only inventory agent. Run periodically with a systemd timer/cron, or with --watch.
 
 Docker: python3 agent/collect.py --runtime docker --source-id server-01
 K8s: python3 agent/collect.py --runtime kubernetes --source-id cluster-01
 Default emits sanitized JSON; --send submits it to GMAN_URL using GMAN_AGENT_TOKEN.
+With --send, snapshots go through a bounded on-disk spool (oldest first, retried with backoff),
+and a non-blocking flock keeps runs from overlapping. --watch (Docker) follows `docker events`
+and sends a debounced snapshot after container changes, so short-lived containers are reported.
 """
 import argparse
+import copy
 import csv
+import errno
+import fcntl
 import json
 import os
+import queue
+import random
 import re
 import subprocess
-from datetime import datetime, timezone
+import sys
+import threading
+import time
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from urllib.error import HTTPError
+from http.client import HTTPException
+from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen
 
-AGENT_VERSION = "0.3.0"
+AGENT_VERSION = "0.4.0"
 
 # Only these labels are forwarded: they identify origin and never carry configuration values.
 ORIGIN_LABELS = {
@@ -456,31 +468,382 @@ def collect(runtime, source_id):
     return data
 
 
-def send(data):
+
+
+def log(message):
+    print(f"gman-agent: {message}", file=sys.stderr, flush=True)
+
+
+# --- Delivery -------------------------------------------------------------------------------------
+
+class Retryable(Exception):
+    """Transient failure (network, timeout, 5xx, 429): keep the snapshot and retry later."""
+
+
+class Blocked(Exception):
+    """The API refuses this agent (401/403): retrying now is pointless, but the snapshot is kept."""
+
+
+class Rejected(Exception):
+    """The API permanently rejects this snapshot (e.g. 422): drop it so it does not block the spool."""
+
+
+def endpoint():
     url = os.environ["GMAN_URL"].rstrip("/")
     if not (url.startswith("https://") or url.startswith("http://127.0.0.1:")):
         raise ValueError("HTTPS required except for local loopback")
-    request = Request(url + "/api/inventory", data=json.dumps(data).encode(),
-                      headers={"Content-Type": "application/json", "Authorization": "Bearer " + os.environ["GMAN_AGENT_TOKEN"]})
+    return url + "/api/inventory", os.environ["GMAN_AGENT_TOKEN"]
+
+
+def post(data, target):
+    url, token = target
+    request = Request(url, data=json.dumps(data).encode(),
+                      headers={"Content-Type": "application/json", "Authorization": "Bearer " + token})
     try:
         with urlopen(request, timeout=30) as response:
-            print(response.status, response.read(500).decode(errors="replace"))
+            # 200 with accepted=false means a duplicate or older snapshot: replay is idempotent.
+            print(response.status, response.read(500).decode(errors="replace"), flush=True)
     except HTTPError as error:
         # The API's own error body contains no inventory or credentials.
-        raise SystemExit(f"GMan rejected snapshot: HTTP {error.code} {error.read(1000).decode(errors='replace')}")
+        detail = f"HTTP {error.code} {error.read(1000).decode(errors='replace')}"
+        if error.code in (408, 425, 429) or error.code >= 500:
+            raise Retryable(detail)
+        if error.code in (401, 403):
+            raise Blocked(detail)
+        raise Rejected(detail)
+    except (URLError, OSError, HTTPException) as error:
+        raise Retryable(type(error).__name__)
 
 
-def main():
-    parser = argparse.ArgumentParser(description=__doc__)
+def backoff(attempt, base, cap, rng=random.random):
+    # Exponential backoff with "equal jitter": at least half of the step, so delays still grow.
+    step = min(cap, base * 2 ** attempt)
+    return step / 2 + rng() * step / 2
+
+
+def send_with_retry(data, deliver, retries=3, base=2.0, cap=30.0, sleep=time.sleep, rng=random.random):
+    for attempt in range(retries + 1):
+        try:
+            return deliver(data)
+        except Retryable as error:
+            if attempt == retries:
+                raise
+            delay = backoff(attempt, base, cap, rng)
+            log(f"delivery failed ({error}); retry {attempt + 1}/{retries} in {delay:.1f}s")
+            sleep(delay)
+
+
+# --- Spool ----------------------------------------------------------------------------------------
+
+class Spool:
+    """Unsent snapshots, one JSON file each, named by a monotonic sequence and sent oldest first.
+
+    Bounded by file count and total bytes. The oldest snapshots are dropped first (the server
+    ignores snapshots older than the latest accepted one anyway); the drop is reported in the
+    errors of the snapshot being added, so the gap is visible in the portal.
+    """
+
+    def __init__(self, directory, max_files=100, max_bytes=50 * 1024 ** 2):
+        self.directory, self.max_files, self.max_bytes = Path(directory), max(1, max_files), max_bytes
+        self.directory.mkdir(mode=0o700, parents=True, exist_ok=True)
+        for stale in self.directory.glob("*.tmp"):
+            stale.unlink(missing_ok=True)
+
+    def items(self):
+        return sorted(p for p in self.directory.glob("*.json") if p.stem.isdigit())
+
+    def put(self, data):
+        files = self.items()
+        sequence = max(time.time_ns(), int(files[-1].stem) + 1 if files else 0)
+        sizes = [p.stat().st_size for p in files]
+        payload = json.dumps(data).encode()
+        dropped = 0
+        # The newest snapshot is always kept, even if it alone exceeds max_bytes. Once something is
+        # dropped, room is reserved for the overflow note appended below.
+        while dropped < len(files) and (len(files) - dropped + 1 > self.max_files or sum(sizes[dropped:])
+                                        + len(payload) + (128 if dropped else 0) > self.max_bytes):
+            files[dropped].unlink(missing_ok=True)
+            dropped += 1
+        if dropped:
+            log(f"spool full: dropped {dropped} oldest unsent snapshot(s)")
+            data = dict(data, errors=list(data.get("errors") or [])[:49]
+                        + [f"agent spool overflow: dropped {dropped} oldest unsent snapshot(s)"])
+            payload = json.dumps(data).encode()
+        path = self.directory / f"{sequence:020d}.json"
+        temporary = path.with_suffix(".tmp")
+        fd = os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+        with os.fdopen(fd, "wb") as handle:
+            handle.write(payload)
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(temporary, path)
+        return path
+
+    def flush(self, deliver):
+        """Send spooled snapshots in order, stopping at the first that cannot be delivered now.
+
+        Returns the number of snapshots still waiting.
+        """
+        items = self.items()
+        for index, path in enumerate(items):
+            try:
+                data = json.loads(path.read_bytes())
+            except (OSError, ValueError):
+                log(f"dropping unreadable spool file {path.name}")
+                path.unlink(missing_ok=True)
+                continue
+            try:
+                deliver(data)
+            except Rejected as error:
+                log(f"snapshot {path.name} rejected, dropped: {error}")
+            except (Retryable, Blocked) as error:
+                log(f"delivery failed, {len(items) - index} snapshot(s) kept in spool: {error}")
+                return len(items) - index
+            path.unlink(missing_ok=True)
+        return 0
+
+
+# --- Run lock -------------------------------------------------------------------------------------
+
+def acquire_lock(path):
+    """Non-blocking exclusive flock. Returns the open fd (held until exit), or None if busy."""
+    fd = os.open(path, os.O_RDWR | os.O_CREAT, 0o600)
+    try:
+        fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except OSError as error:
+        os.close(fd)
+        if error.errno in (errno.EWOULDBLOCK, errno.EAGAIN, errno.EACCES):
+            return None
+        raise
+    return fd
+
+
+# --- Watch mode -----------------------------------------------------------------------------------
+
+# Container events that change what a snapshot shows. exec_* (healthchecks), attach, resize, top
+# and similar are ignored: they would trigger a snapshot every healthcheck interval.
+WATCH_TRIGGERS = {"create", "start", "restart", "die", "oom", "kill", "stop", "pause", "unpause",
+                  "update", "rename", "destroy", "health_status"}
+# On these the container is inspected immediately: it may be gone by the next snapshot.
+WATCH_CAPTURE = {"start", "die"}
+EVENT_ATTRIBUTES = {"image", "name", "exitCode", "signal", "execDuration"}
+
+
+def event_id(event):
+    return (event.get("Actor") or {}).get("ID") or event.get("id")
+
+
+def event_time(event):
+    nanoseconds = event.get("timeNano") or int(event.get("time") or 0) * 10 ** 9
+    return datetime.fromtimestamp(nanoseconds / 1e9, timezone.utc).isoformat() if nanoseconds else None
+
+
+def event_instance(event, previous):
+    """Best-effort state of a container that could not be inspected (e.g. `docker run --rm`)."""
+    attributes = (event.get("Actor") or {}).get("Attributes") or {}
+    when = event_time(event)
+    if previous:
+        instance = copy.deepcopy(previous)
+    else:
+        # Event attributes are the container labels plus a few fields; only allowlisted labels are used.
+        labels = {k: v for k, v in attributes.items() if k not in EVENT_ATTRIBUTES}
+        instance = docker_instance({"Id": event_id(event), "Name": attributes.get("name", ""),
+                                    "Config": {"Image": attributes.get("image", ""), "Labels": labels},
+                                    "State": {"Status": "running"}})
+        instance["started_at"] = when
+    if event.get("Action") == "die":
+        code = str(attributes.get("exitCode", ""))
+        instance.update(status="exited", health="", finished_at=when,
+                        exit_code=int(code) if code.lstrip("-").isdigit() else None)
+    return instance
+
+
+def capture(event, previous):
+    try:
+        return docker_instance(json.loads(command(["docker", "inspect", event_id(event)]))[0])
+    except (subprocess.SubprocessError, OSError, ValueError, IndexError, KeyError):
+        return event_instance(event, previous)
+
+
+class Watcher:
+    """Debounce for `docker events`.
+
+    A snapshot is due after `debounce` s without events, at most `max_delay` s after the first
+    pending event, and at least every `interval` s. Containers captured on start/die are kept
+    until the next snapshot so that short-lived ones can still be reported.
+    """
+
+    def __init__(self, now, debounce=2.0, max_delay=10.0, interval=60.0, capture=capture):
+        self.debounce, self.max_delay, self.interval, self.capture = debounce, max_delay, interval, capture
+        self.first = self.last = None
+        self.next_poll = now  # full snapshot right after start
+        self.seen = {}
+
+    def handle(self, event, now):
+        if event.get("Type", "container") != "container":
+            return
+        action = (event.get("Action") or event.get("status") or "").split(":")[0].strip()
+        if action not in WATCH_TRIGGERS:
+            return
+        cid = event_id(event)
+        if action in WATCH_CAPTURE and cid:
+            self.seen[cid] = self.capture(event, self.seen.get(cid))
+        self.last = now
+        if self.first is None:
+            self.first = now
+
+    def resync(self, now):
+        self.next_poll = min(self.next_poll, now)
+
+    def deadline(self):
+        if self.last is None:
+            return self.next_poll
+        return min(self.next_poll, self.last + self.debounce, self.first + self.max_delay)
+
+    def due(self, now):
+        return now >= self.deadline()
+
+    def take(self, now):
+        seen, self.seen = self.seen, {}
+        self.first = self.last = None
+        self.next_poll = now + self.interval
+        return seen
+
+    def retry(self, seen, now, delay):
+        self.seen = {**seen, **self.seen}
+        self.next_poll = min(self.next_poll, now + delay)
+
+
+def with_ephemeral(data, seen):
+    """Snapshots to send for one collection.
+
+    Containers seen in events but absent now (removed, e.g. --rm) go into an interim snapshot with
+    their last captured state, followed 1 ms later by the real one, so the API records both their
+    appearance/exit and their removal.
+    """
+    present = {i["id"] for i in data["instances"]}
+    gone = [instance for cid, instance in seen.items() if cid not in present]
+    if not gone:
+        return [data]
+    interim = dict(data, instances=data["instances"] + gone)
+    observed = datetime.fromisoformat(data["observed_at"])
+    return [interim, dict(data, observed_at=(observed + timedelta(milliseconds=1)).isoformat())]
+
+
+def docker_events(lines, reconnect=5.0, popen=subprocess.Popen, sleep=time.sleep, restarts=None):
+    """Feed `docker events` lines into a queue; None marks a broken stream (resync needed)."""
+    while restarts is None or restarts > 0:
+        try:
+            process = popen(["docker", "events", "--format", "{{json .}}", "--filter", "type=container"],
+                            stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True)
+            for line in process.stdout:
+                lines.put(line)
+            process.wait()
+        except OSError as error:
+            log(f"docker events unavailable: {type(error).__name__}")
+        lines.put(None)
+        if restarts is not None:
+            restarts -= 1
+        sleep(reconnect)
+
+
+def watch(collect_snapshot, spool, deliver, watcher, lines=None, clock=time.monotonic,
+          retry_delay=10.0, cycles=None):
+    if lines is None:
+        lines = queue.Queue()
+        threading.Thread(target=docker_events, args=(lines,), daemon=True).start()
+    done = 0
+    while cycles is None or done < cycles:
+        try:
+            line = lines.get(timeout=max(0.0, watcher.deadline() - clock()))
+        except queue.Empty:
+            line = ""
+        now = clock()
+        if line is None:
+            watcher.resync(now)  # events may have been missed while the stream was down
+        elif line.strip():
+            try:
+                watcher.handle(json.loads(line), now)
+            except ValueError:
+                log("ignoring malformed docker event")
+        if not watcher.due(now):
+            continue
+        done += 1
+        seen = watcher.take(now)
+        try:
+            data = collect_snapshot()
+        except Exception as error:
+            # As in one-shot mode, a failed collection is never sent as an empty snapshot.
+            log(f"collection failed: {type(error).__name__}; retry in {retry_delay:g}s")
+            watcher.retry(seen, now, retry_delay)
+            continue
+        for snapshot in with_ephemeral(data, seen):
+            spool.put(snapshot)
+        spool.flush(deliver)
+
+
+# --- CLI ------------------------------------------------------------------------------------------
+
+def default_state_dir():
+    if os.environ.get("GMAN_AGENT_STATE_DIR"):
+        return os.environ["GMAN_AGENT_STATE_DIR"]
+    return "/var/lib/gman-agent" if os.geteuid() == 0 else str(Path.home() / ".local/state/gman-agent")
+
+
+def run_once(collect_snapshot, spool, deliver):
+    try:
+        data = collect_snapshot()
+    except Exception:
+        # A failed collection is never submitted as an empty, authoritative snapshot;
+        # snapshots spooled earlier are still delivered.
+        spool.flush(deliver)
+        raise
+    spool.put(data)
+    remaining = spool.flush(deliver)
+    if remaining:
+        raise SystemExit(f"Submission failed: {remaining} snapshot(s) kept in spool for retry")
+
+
+def main(argv=None):
+    parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("--runtime", choices=["docker", "kubernetes"], required=True)
     parser.add_argument("--source-id", required=True)
     parser.add_argument("--send", action="store_true")
-    args = parser.parse_args()
-    data = collect(args.runtime, args.source_id)
-    if args.send:
-        send(data)
+    parser.add_argument("--watch", action="store_true", help="follow docker events (requires --send, docker)")
+    parser.add_argument("--state-dir", help="spool and lock directory (default: GMAN_AGENT_STATE_DIR, "
+                                            "/var/lib/gman-agent as root, else ~/.local/state/gman-agent)")
+    parser.add_argument("--spool-max-files", type=int, default=100)
+    parser.add_argument("--spool-max-bytes", type=int, default=50 * 1024 ** 2)
+    parser.add_argument("--retries", type=int, default=3, help="delivery retries with exponential backoff")
+    parser.add_argument("--debounce", type=float, default=2.0, help="--watch: seconds of quiet before a snapshot")
+    parser.add_argument("--max-delay", type=float, default=10.0, help="--watch: max seconds an event waits")
+    parser.add_argument("--interval", type=float, default=60.0, help="--watch: full snapshot at least this often")
+    args = parser.parse_args(argv)
+    if not re.fullmatch(r"[A-Za-z0-9_.-]{1,100}", args.source_id) or not args.source_id.strip("."):
+        parser.error("invalid --source-id")
+    if args.watch and (args.runtime != "docker" or not args.send):
+        parser.error("--watch requires --runtime docker and --send")
+    if not args.send:
+        print(json.dumps(collect(args.runtime, args.source_id), indent=2))
+        return
+    target = endpoint()  # validate the configuration before collecting anything
+    state = Path(args.state_dir or default_state_dir())
+    state.mkdir(mode=0o700, parents=True, exist_ok=True)
+    if acquire_lock(state / f"{args.source_id}.lock") is None:
+        log("another run for this source holds the lock; skipping")
+        return
+    spool = Spool(state / f"spool-{args.source_id}", args.spool_max_files, args.spool_max_bytes)
+
+    def deliver(data):
+        return send_with_retry(data, lambda d: post(d, target), retries=args.retries)
+
+    def snapshot():
+        return collect(args.runtime, args.source_id)
+
+    if args.watch:
+        watch(snapshot, spool, deliver, Watcher(time.monotonic(), args.debounce, args.max_delay, args.interval))
     else:
-        print(json.dumps(data, indent=2))
+        run_once(snapshot, spool, deliver)
 
 
 if __name__ == "__main__":
