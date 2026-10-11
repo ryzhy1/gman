@@ -42,6 +42,11 @@ NVIDIA на серверах, Bitbucket/GitLab для исходного код�
   записывается одним событием source-connected. Автор runtime-изменения неизвестен.
 - GET /api/events с постраничной выдачей (limit, before) и фильтром service_id.
 - Endpoint событий Bamboo и скрипт отправки из deployment job, дедупликация событий.
+- Релизы: событие Bamboo сверяется с runtime по image digest или версии/тегу и окну
+  времени. Статусы started → rolling-out → succeeded / failed (Bamboo failed, тайм-аут,
+  crash loop/OOM новых экземпляров) / superseded. Runtime-изменения релиза получают
+  инициатора из Bamboo; без совпадения — «ручной запуск / инициатор неизвестен».
+  Вкладка «Релизы» в карточке сервиса и ссылка на релиз из истории.
 - Интерфейс каталога, экземпляров, конфигураций, серверов/GPU и постраничного журнала.
   Отметка устаревания после трех минут, обновление интерфейса раз в 30 секунд.
 - Ресурсы в портале: CPU (в ядрах) и память экземпляров против лимитов, нагрузка хостов
@@ -140,21 +145,55 @@ tasks; GMAN_* переопределяет любое значение:
 | Поле | GMAN_* | Переменная Bamboo |
 | --- | --- | --- |
 | environment | GMAN_ENVIRONMENT | bamboo_deploy_environment |
-| build_id | GMAN_BUILD_ID | bamboo_buildResultKey |
-| release | GMAN_RELEASE | bamboo_deploy_release |
-| actor | GMAN_ACTOR | bamboo_ManualBuildTriggerReason_userName |
-| commit | GMAN_COMMIT | bamboo_planRepository_revision |
+| build_id | GMAN_BUILD_ID | bamboo_buildResultKey (сборка, из которой создан релиз) |
+| release | GMAN_RELEASE | bamboo_deploy_release, затем bamboo_deploy_version |
 | build_url | GMAN_BUILD_URL | bamboo_resultsUrl |
+| deployment_id | GMAN_DEPLOYMENT_ID | deploymentResultId из bamboo_resultsUrl |
+| actor | GMAN_ACTOR | bamboo_ManualBuildTriggerReason_userName при ручном запуске |
+| actor_kind | GMAN_ACTOR_KIND | по bamboo_triggerReason_key |
+| commit | GMAN_COMMIT | bamboo_planRepository_revision, затем bamboo_planRepository_1_revision |
+| version | GMAN_VERSION | — (по умолчанию сервер берет release) |
+| image | GMAN_IMAGE | — |
+| image_digest | GMAN_IMAGE_DIGEST | — |
 
-Наличие этих переменных зависит от версии Bamboo и типа запуска: проверьте их
-задачей `env | grep ^bamboo_` перед подключением. Если пользователь Bamboo известен,
-actor_kind = human, иначе unknown (GMAN_ACTOR_KIND переопределяет). Сведения об авторе —
-утверждение доверенной CI-интеграции; они не подтверждаются запросом к Bamboo.
+Сверено с [документацией Bamboo по переменным](https://confluence.atlassian.com/bamboo/bamboo-variables-289277087.html):
+в script task точки заменяются на подчеркивания; для deployment документированы
+deploy.environment, deploy.project, deploy.release / deploy.version (синонимы),
+deploy.release.previous, deploy.rollback, resultsUrl и triggerReason.key; buildResultKey,
+planKey, buildNumber — переменные релиза (сборка, из которой он создан);
+planRepository.&lt;position&gt;.revision без позиции означает первый репозиторий.
+ManualBuildTriggerReason.userName документирован только для сборок. Поэтому:
 
-GMAN_EVENT_ID по умолчанию строится из build, release, environment и status, поэтому
-повтор той же задачи дает тот же payload и не создает второе событие. GMAN_OCCURRED_AT
-необязателен: без него используется время получения сервером. Задавайте его только
-фиксированным значением, иначе повтор вернет 409.
+- имя пользователя берется, только если triggerReason.key ручной или отсутствует;
+  при автоматическом триггере (например, после успешной сборки) это имя автора сборки,
+  а не деплоя, и инициатор остается unknown; Scheduled → actor_kind = schedule;
+- buildResultKey одинаков для всех деплоев одного релиза, поэтому прежний event_id
+  (build, release, environment, status) склеивал повторный деплой того же релиза с первым.
+  Теперь event_id = bamboo:bamboo-deploy-&lt;deploymentResultId&gt;:&lt;status&gt;, если
+  bamboo_resultsUrl содержит deploymentResultId (формат URL результата деплоя не
+  документирован как контракт — при его отсутствии используется прежняя схема).
+
+Проверьте переменные задачей `env | grep ^bamboo_` перед подключением. Сведения об
+авторе — утверждение доверенной CI-интеграции; они не подтверждаются запросом к Bamboo.
+
+Для сверки релиза с runtime передайте GMAN_IMAGE_DIGEST (после push: digest из
+`docker buildx imagetools inspect` для Kubernetes; для Docker-хостов — ID образа
+`docker image inspect --format '{{.Id}}'`, так как агент видит ID, а не manifest digest)
+или GMAN_VERSION, совпадающий с тегом образа либо меткой
+org.opencontainers.image.version / app.kubernetes.io/version. Окружение Bamboo должно
+совпадать с меткой gman.environment экземпляров (иначе задайте GMAN_ENVIRONMENT).
+Параметры: GMAN_RELEASE_TIMEOUT_MINUTES (30), GMAN_RELEASE_LEAD_MINUTES (10),
+GMAN_RELEASE_CRASH_RESTARTS (3). Правила статусов — в docs/architecture.md, «Релизы».
+Новые поля payload (deployment_id, version, image) требуют обновленного API:
+старый сервер ответит 422; скрипт и API обновляйте вместе.
+
+API: GET /api/releases?service_id=&environment=&status=&limit=&before= (новые сначала,
+курсор `next`), GET /api/releases/{id} — релиз, связанные события и текущие экземпляры
+раскатки. Нужен токен просмотра. Ответ POST /api/deployments содержит release_id.
+
+GMAN_EVENT_ID по умолчанию стабилен для повтора той же задачи (тот же payload, второе
+событие не создается). GMAN_OCCURRED_AT необязателен: без него используется время
+получения сервером. Задавайте его только фиксированным значением, иначе повтор вернет 409.
 
 Сбой отправки печатает предупреждение и не валит деплой. Чтобы сделать отправку
 обязательной, задайте GMAN_REQUIRED=true.
@@ -214,10 +253,11 @@ Docker end-to-end, Kubernetes, NVIDIA/DCGM и настоящий Bamboo еще �
 PostgreSQL со схемой из Alembic-миграций (backend/migrations), применяются при старте API
 под advisory lock, поэтому несколько реплик могут стартовать одновременно. Таблицы:
 services, sources (последний снимок), instances (текущее состояние), config_snapshots
-(история различающихся конфигураций экземпляра по хешу — основа для diff версий), events,
-deployments. Новые поля снимков хранятся в JSON и не требуют миграций.
+(история различающихся конфигураций экземпляра по хешу — основа для diff версий), events
+(с release_id), deployments, releases. Новые поля снимков хранятся в JSON и не требуют миграций.
 GMAN_RETENTION_DAYS (по умолчанию 180, 0 — отключить) удаляет события и неиспользуемые
-снимки конфигурации старше срока; деплои не удаляются.
+снимки конфигурации старше срока, а также завершенные релизы; запросы деплоев (deployments)
+не удаляются.
 
 Переход с первой версии каркаса: старая таблица records не переносится. Агенты пришлют
 снимки заново (по одному событию source-connected), сервисы каталога нужно загрузить

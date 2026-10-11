@@ -17,6 +17,7 @@ from sqlalchemy.orm import Session
 
 from . import db as store
 from . import metrics
+from . import releases
 
 logger = logging.getLogger("gman")
 
@@ -280,7 +281,12 @@ class Deployment(Strict):
     status: Literal["started", "succeeded", "failed"]
     commit: str = Field(default="", max_length=200)
     image_digest: str = Field(default="", max_length=1000)
+    # Image reference and artifact version the deployment rolls out; used to correlate with runtime.
+    image: str = Field(default="", max_length=1000)
+    version: str = Field(default="", max_length=300)
     release: str = Field(default="", max_length=300)
+    # One Bamboo deployment run; started/succeeded/failed of the same run share it.
+    deployment_id: str = Field(default="", pattern=r"^[a-zA-Z0-9_.:-]{0,200}$")
     build_id: str = Field(max_length=300)
     build_url: str = Field(default="", max_length=2000)
 
@@ -419,6 +425,7 @@ def ingest(value: Snapshot, source_id: str = Depends(agent), session: Session = 
     base = {"source_id": value.source_id, "occurred_at": data["observed_at"], "received_at": data["received_at"],
             "actor": "unknown", "actor_source": "runtime observation"}
     old = store.save_snapshot(session, data, received)
+    added = []
     if previous is None:
         # The first snapshot describes pre-existing workloads; it is neither a deployment nor N changes.
         session.add(store.event({**base, "type": "source-connected", "service_id": "", "instance_count": len(new)},
@@ -437,7 +444,13 @@ def ingest(value: Snapshot, source_id: str = Depends(agent), session: Session = 
             else:
                 diff = changes(before, after)
                 event.update(type=classify(diff), changes=diff)
-            session.add(store.event(event, received, value.observed_at))
+            added.append(store.event(event, received, value.observed_at))
+            session.add(added[-1])
+    # Releases of every service/environment whose instances changed; the first snapshot may finish
+    # a rollout as well, since it is the first time these instances are seen.
+    touched = {(x["service_id"], x["environment"]) for x in old.values() if new.get(x["id"]) != x}
+    touched |= {(x["service_id"], x["environment"]) for x in new.values() if old.get(x["id"]) != x}
+    releases.on_snapshot(session, added, touched, received)
     session.commit()
     try:
         retention.run(engine)
@@ -453,7 +466,9 @@ def deployment(value: Deployment, session: Session = Depends(db)):
     lock(session, "ci:" + value.event_id)
     existing = session.get(store.Deployment, value.event_id)
     if existing:
-        if existing.request != request:
+        # Requests stored before optional fields were added lack them; compare with their defaults.
+        defaults = {k: f.default for k, f in Deployment.model_fields.items() if not f.is_required()}
+        if {**defaults, **existing.request} != request:
             raise HTTPException(409, "Event ID reused with different payload")
         return {"accepted": False, "reason": "duplicate"}
     received_at = datetime.now(timezone.utc)
@@ -461,6 +476,31 @@ def deployment(value: Deployment, session: Session = Depends(db)):
     session.add(store.Deployment(event_id=value.event_id, request=request, received_at=received_at))
     event = {**request, "occurred_at": request["occurred_at"] or received, "type": "deployment",
              "received_at": received, "actor_source": "Bamboo integration assertion"}
-    session.add(store.event(event, received_at, value.occurred_at or received_at))
+    row = store.event(event, received_at, value.occurred_at or received_at)
+    session.add(row)
+    release = releases.on_deployment(session, request, row, received_at)
     session.commit()
-    return {"accepted": True}
+    return {"accepted": True, "release_id": release.id}
+
+
+@app.get("/api/releases", dependencies=[Depends(reader)])
+def list_releases(service_id: str | None = Query(None, max_length=100),
+                  environment: str | None = Query(None, max_length=100),
+                  status: Literal[releases.STATUSES] | None = None,
+                  limit: int = Query(50, ge=1, le=500), before: str = Query("", max_length=200),
+                  session: Session = Depends(db)):
+    """Newest first by start; pass `next` as `before` for the next page."""
+    try:
+        return releases.listing(session, limit, service_id, environment, status, before,
+                                datetime.now(timezone.utc))
+    except ValueError:
+        raise HTTPException(422, "Invalid cursor")
+
+
+@app.get("/api/releases/{release_id}", dependencies=[Depends(reader)])
+def release_detail(release_id: int, session: Session = Depends(db)):
+    """Release with its correlated events and the current instances of its rollout."""
+    result = releases.detail(session, release_id, datetime.now(timezone.utc))
+    if result is None:
+        raise HTTPException(404, "Release not found")
+    return result

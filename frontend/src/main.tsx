@@ -4,6 +4,7 @@ import { get, type CurrentMetrics, type Overview } from './api';
 import { ConfigView, History, InstanceTable, type Placed } from './components';
 import { ClusterCard, HostCard } from './hardware';
 import { date, stale } from './format';
+import { Releases } from './releases';
 import { Resources } from './resources';
 import './style.css';
 
@@ -36,6 +37,7 @@ function App() {
   const [selected, setSelected] = useState('');
   const [tab, setTab] = useState('Обзор');
   const [environment, setEnvironment] = useState(ALL);
+  const [release, setRelease] = useState<number | null>(null);
 
   useEffect(() => {
     if (!token) return;
@@ -67,6 +69,10 @@ function App() {
   const unknown = instances.filter(i => !data?.services.some(s => s.id === i.service_id));
   const gpuCount = (data?.sources ?? []).reduce((n, s) => n + s.gpus.length + (s.nodes ?? []).reduce((m, x) => m + x.gpu_capacity, 0), 0);
   const openService = (id: string) => { if (data?.services.some(s => s.id === id)) { setPage('Сервисы'); setSelected(id); setTab('Обзор'); } };
+  const openRelease = (id: number, serviceId: string) => {
+    if (!data?.services.some(s => s.id === serviceId)) return;
+    setPage('Сервисы'); setSelected(serviceId); setTab('Релизы'); setRelease(id);
+  };
   const open = (p: string) => { setPage(p); setSelected(''); setQuery(''); };
   const grafana = data?.grafana_url ?? '';
   const serviceDashboard = service && grafana ? `${grafana}/d/gman-service/gman-service?var-service=${encodeURIComponent(service.id)}` : '';
@@ -131,13 +137,13 @@ function App() {
           </section>}
 
           {service && <>
-            <button className="back" onClick={() => setSelected('')}>← Все сервисы</button>
+            <button className="back" onClick={() => { setSelected(''); setRelease(null); }}>← Все сервисы</button>
             <div className="links">{LINKS.map(([k, label]) => links![k]
               ? <a key={k} href={links![k]} target="_blank" rel="noreferrer">{label} ↗</a>
               : <span key={k} title="Ссылка не задана в каталоге">{label} · не настроен</span>)}
             </div>
-            <div className="tabs">{['Обзор', 'Ресурсы', 'Экземпляры', 'Конфигурация', 'История'].map(t =>
-              <button key={t} className={tab === t ? 'chosen' : ''} onClick={() => setTab(t)}>{t}</button>)}
+            <div className="tabs">{['Обзор', 'Ресурсы', 'Экземпляры', 'Конфигурация', 'Релизы', 'История'].map(t =>
+              <button key={t} className={tab === t ? 'chosen' : ''} onClick={() => { setTab(t); setRelease(null); }}>{t}</button>)}
             </div>
             <section>
               {tab === 'Обзор' && <>
@@ -155,7 +161,9 @@ function App() {
                 {!own.length && <div className="empty">Конфигурации еще не получены.</div>}
                 <p className="note">Значения переменных окружения, команды и команды проверок здоровья не собираются.</p>
               </>}
-              {tab === 'История' && <History token={token} serviceId={service.id} refreshKey={data.server_time} />}
+              {tab === 'Релизы' && <Releases token={token} serviceId={service.id} environment={environment === ALL ? undefined : environment}
+                refreshKey={data.server_time} selected={release} onSelect={setRelease} />}
+              {tab === 'История' && <History token={token} serviceId={service.id} refreshKey={data.server_time} onRelease={openRelease} />}
             </section>
           </>}
 
@@ -166,7 +174,7 @@ function App() {
             {!data.sources.length && <section className="empty">Источники еще не подключены. Начните с одного Docker-хоста или Kubernetes-кластера.</section>}
           </div>}
 
-          {page === 'Аудит' && <section><h2>Журнал событий</h2><History token={token} refreshKey={data.server_time} /></section>}
+          {page === 'Аудит' && <section><h2>Журнал событий</h2><History token={token} refreshKey={data.server_time} onRelease={openRelease} /></section>}
 
           <footer>Обновление каждые 30 секунд · Получено: {date(data.server_time)} · Время браузера: {Intl.DateTimeFormat().resolvedOptions().timeZone}</footer>
         </>}

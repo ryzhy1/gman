@@ -108,6 +108,27 @@ def test_bamboo_defaults_are_stable_across_retries(monkeypatch):
     assert (first["actor"], first["actor_kind"]) == ("ivanov", "human")
 
 
+def test_bamboo_deployment_run_and_trigger(monkeypatch):
+    for key, value in {"GMAN_SERVICE_ID": "api", "GMAN_DEPLOYMENT_STATUS": "started",
+                       "bamboo_deploy_environment": "prod", "bamboo_buildResultKey": "PRJ-PLAN-12",
+                       "bamboo_deploy_version": "release-8", "bamboo_planRepository_1_revision": "abc123",
+                       "bamboo_resultsUrl": "https://bamboo.example/deploy/viewDeploymentResult.action?deploymentResultId=4242",
+                       "bamboo_triggerReason_key": "com.atlassian.bamboo.plugin.system.triggerReason:DependencyTriggerReason",
+                       "bamboo_ManualBuildTriggerReason_userName": "ivanov",
+                       "GMAN_IMAGE_DIGEST": "sha256:" + "b" * 64}.items():
+        monkeypatch.setenv(key, value)
+    value = bamboo_event.payload()
+    # A redeploy of the same release is a different deployment result, hence a different event.
+    assert (value["event_id"], value["deployment_id"]) == ("bamboo:bamboo-deploy-4242:started", "bamboo-deploy-4242")
+    assert (value["release"], value["commit"]) == ("release-8", "abc123")
+    # Automatic trigger: the user name belongs to the build, not to this deployment.
+    assert (value["actor"], value["actor_kind"]) == ("unknown", "unknown")
+    monkeypatch.setenv("bamboo_triggerReason_key", "com.atlassian.bamboo.plugin.system.triggerReason:ManualBuildTriggerReason")
+    assert (bamboo_event.payload()["actor"], bamboo_event.payload()["actor_kind"]) == ("ivanov", "human")
+    monkeypatch.setenv("bamboo_triggerReason_key", "com.atlassian.bamboo.plugin.system.triggerReason:ScheduledTriggerReason")
+    assert bamboo_event.payload()["actor_kind"] == "schedule"
+
+
 def test_nvidia_details_and_process_attribution(monkeypatch, tmp_path):
     base = "GPU-1, NVIDIA A100-SXM4-80GB, 00000000:3B:00.0, 550.54.15, P0, 37, 12, 81920, 40960, 61, 251.50"
     extended = ", 70, 400.00, 1410, 1593, 1410, [N/A], 0x0000000000000044, 0, 4, 16, Disabled, Enabled"

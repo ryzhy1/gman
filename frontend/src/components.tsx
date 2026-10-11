@@ -146,13 +146,24 @@ function title(e: Audit) {
   return `${TITLES[e.type] ?? e.type} · ${e.instance_name ?? e.instance_id}`;
 }
 
-function EventItem({ e }: { e: Audit }) {
+/** Runtime changes a deployment causes; without a correlated release their initiator is unknown. */
+const LAUNCHES = ['instance-appeared', 'config-changed'];
+
+function actorLabel(e: Audit) {
+  if (e.actor !== 'unknown') return `${e.actor} (${e.actor_kind})`;
+  return LAUNCHES.includes(e.type) ? 'Ручной запуск / инициатор неизвестен' : 'Автор неизвестен';
+}
+
+export function EventItem({ e, onRelease }: { e: Audit; onRelease?: (id: number, serviceId: string) => void }) {
   const tone = e.type === 'deployment' && e.status === 'failed' || e.type === 'instance-removed' ? 'bad'
     : e.type === 'state-changed' || e.type === 'instance-restarted' ? 'warn' : '';
   return <details className="event">
     <summary>
       <span className={`dot ${tone}`} /><b>{title(e)}</b>
-      <span>{e.actor === 'unknown' ? 'Автор неизвестен' : `${e.actor} (${e.actor_kind})`}</span>
+      <span>{actorLabel(e)}</span>
+      {e.release_id != null && (onRelease
+        ? <button className="badge info" onClick={ev => { ev.preventDefault(); onRelease(e.release_id!, e.service_id); }}>Релиз #{e.release_id} →</button>
+        : <span className="badge info">Релиз #{e.release_id}</span>)}
       <time>{date(e.occurred_at)}</time>
     </summary>
     <p>{e.actor_source} · получено {date(e.received_at)}</p>
@@ -173,7 +184,9 @@ function EventItem({ e }: { e: Audit }) {
 }
 
 /** Paged history straight from the API, so a quiet service is not crowded out by busy ones. */
-export function History({ token, serviceId, refreshKey }: { token: string; serviceId?: string; refreshKey: string }) {
+export function History({ token, serviceId, refreshKey, onRelease }: {
+  token: string; serviceId?: string; refreshKey: string; onRelease?: (id: number, serviceId: string) => void;
+}) {
   const [events, setEvents] = useState<Audit[]>([]);
   const [next, setNext] = useState<string | null>(null);
   const [error, setError] = useState('');
@@ -200,7 +213,7 @@ export function History({ token, serviceId, refreshKey }: { token: string; servi
   return <div>
     <label className="toggle"><input type="checkbox" checked={hideState} onChange={e => setHideState(e.target.checked)} /> Скрыть изменения health/ready</label>
     {error && <div role="alert" className="alert">{error}</div>}
-    {shown.map(e => <EventItem key={e.received_at + (e.instance_id ?? '') + (e.build_id ?? '') + e.type} e={e} />)}
+    {shown.map(e => <EventItem key={e.received_at + (e.instance_id ?? '') + (e.build_id ?? '') + e.type} e={e} onRelease={onRelease} />)}
     {!shown.length && <div className="empty">Событий пока нет. История появляется после подключения источников.</div>}
     {next && <button className="more" onClick={more}>Показать еще</button>}
   </div>;

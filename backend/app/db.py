@@ -122,10 +122,13 @@ class Event(Base):
     service_id: Mapped[str] = mapped_column(String, default="")
     source_id: Mapped[str] = mapped_column(String, default="")
     instance_id: Mapped[str] = mapped_column(String, default="")
+    # Release this event was correlated with (see releases.py); also mirrored in data["release_id"].
+    release_id: Mapped[int | None] = mapped_column(Id, nullable=True)
     data: Mapped[dict] = mapped_column(Json)
 
     __table_args__ = (Index("ix_events_received", received_at.desc(), id.desc()),
-                      Index("ix_events_service", "service_id", received_at.desc(), id.desc()))
+                      Index("ix_events_service", "service_id", received_at.desc(), id.desc()),
+                      Index("ix_events_release", "release_id"))
 
 
 class Deployment(Base):
@@ -134,6 +137,44 @@ class Deployment(Base):
     event_id: Mapped[str] = mapped_column(String, primary_key=True)
     request: Mapped[dict] = mapped_column(Json)
     received_at: Mapped[datetime] = mapped_column(UTC)
+
+
+class Release(Base):
+    """A Bamboo deployment of one service/environment, with its status derived from runtime observations."""
+    __tablename__ = "releases"
+    id: Mapped[int] = mapped_column(Id, Identity(), primary_key=True)
+    service_id: Mapped[str] = mapped_column(String)
+    environment: Mapped[str] = mapped_column(String)
+    # Bamboo deployment result ID when known, otherwise "<build_id>|<release>".
+    key: Mapped[str] = mapped_column(String)
+    release: Mapped[str] = mapped_column(String, default="")
+    version: Mapped[str] = mapped_column(String, default="")
+    build_id: Mapped[str] = mapped_column(String, default="")
+    build_url: Mapped[str] = mapped_column(String, default="")
+    commit: Mapped[str] = mapped_column(String, default="")
+    image: Mapped[str] = mapped_column(String, default="")
+    image_digest: Mapped[str] = mapped_column(String, default="")
+    initiator: Mapped[str] = mapped_column(String, default="unknown")
+    initiator_kind: Mapped[str] = mapped_column(String, default="unknown")
+    # started | rolling-out | succeeded | failed | superseded
+    status: Mapped[str] = mapped_column(String)
+    status_reason: Mapped[str] = mapped_column(String, default="")
+    # Last status Bamboo reported: started | succeeded | failed.
+    bamboo_status: Mapped[str] = mapped_column(String, default="")
+    correlation: Mapped[str] = mapped_column(String, default="")  # digest | version, once instances match
+    started_at: Mapped[datetime] = mapped_column(UTC)
+    # Runtime changes from this moment on may belong to the release (clock skew, runtime ahead of Bamboo).
+    window_start: Mapped[datetime] = mapped_column(UTC)
+    rollout_started_at: Mapped[datetime | None] = mapped_column(UTC, nullable=True)
+    bamboo_finished_at: Mapped[datetime | None] = mapped_column(UTC, nullable=True)
+    finished_at: Mapped[datetime | None] = mapped_column(UTC, nullable=True)
+    superseded_by: Mapped[int | None] = mapped_column(Id, nullable=True)
+    progress: Mapped[dict] = mapped_column(Json, default=dict)
+    updated_at: Mapped[datetime] = mapped_column(UTC, default=utcnow, onupdate=utcnow)
+
+    __table_args__ = (Index("ix_releases_service", "service_id", "environment", started_at.desc(), id.desc()),
+                      Index("ix_releases_key", "service_id", "environment", "key"),
+                      Index("ix_releases_status", "status", "started_at"))
 
 
 def connect(url):
@@ -262,12 +303,19 @@ def events(session, limit, service_id=None, before=None):
 class Retention:
     """Deletes history older than GMAN_RETENTION_DAYS, at most once per interval per process."""
 
-    def __init__(self, interval=timedelta(hours=1)):
+    def __init__(self, interval=timedelta(hours=1), release_interval=timedelta(minutes=1)):
         self.interval = interval
         self.last = None
+        self.release_interval = release_interval
+        self.release_last = None
 
     def run(self, engine, now=None):
+        """Called after each accepted snapshot; also times out stuck releases (no separate daemon)."""
         now = now or utcnow()
+        if self.release_last is None or now - self.release_last >= self.release_interval:
+            self.release_last = now
+            from . import releases
+            releases.expire(engine, now)
         if self.last is not None and now - self.last < self.interval:
             return False
         self.last = now
@@ -279,4 +327,5 @@ class Retention:
             connection.execute(delete(Event).where(Event.received_at < cutoff))
             # Current configs stay: every accepted snapshot refreshes their last_seen_at.
             connection.execute(delete(ConfigSnapshot).where(ConfigSnapshot.last_seen_at < cutoff))
+            connection.execute(delete(Release).where(Release.started_at < cutoff, Release.finished_at.is_not(None)))
         return True

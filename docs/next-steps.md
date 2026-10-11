@@ -15,8 +15,19 @@
    о хосте, узлы Kubernetes с ёмкостью и requests, OTel DaemonSet для кластера.
 4. Хранилище: нормализованная схема PostgreSQL, Alembic, история конфигураций по хешу,
    retention. Проверено на PostgreSQL 17.
+5. ~~Inventory и аудит: сверка событий Bamboo с runtime и сущность релиза со статусами~~ —
+   сделано: таблица releases (миграция 0002_releases), статусы started → rolling-out →
+   succeeded / failed / superseded, сверка по digest или версии/тегу и окну времени,
+   атрибуция runtime-изменений инициатору из Bamboo, тайм-ауты в housekeeping после
+   снимков, GET /api/releases и /api/releases/{id}, вкладка «Релизы», ссылка из истории.
+   bamboo_event.py сверен с документацией Bamboo: deployment_id из deploymentResultId
+   (повторный деплой того же релиза больше не склеивается), автор только при ручном
+   триггере, deploy.version и planRepository.1.revision как запасные.
+   Не проверено с настоящим Bamboo: формат resultsUrl деплоя и наличие
+   ManualBuildTriggerReason.userName / triggerReason.key в deployment job.
 
-Тесты: 31 passed, 1 skipped (тест конкурентности только для PostgreSQL).
+Тесты: 44 passed, 1 skipped на SQLite (тест конкурентности только для PostgreSQL);
+45 passed на PostgreSQL 17.
 Frontend: `npm run build` проходит. Подробности — в README.
 
 ## Подготовка на новой машине
