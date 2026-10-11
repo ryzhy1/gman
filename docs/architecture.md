@@ -148,7 +148,8 @@ OOM kill. В Kubernetes last_oom_at берется из termination state (curre
    kube-state-metrics (deploy/kube-state-metrics.yaml, v2.20.0, list/watch только pods,
    nodes, deployments, statefulsets, daemonsets, replicasets, jobs; allowlist метрик)
    забирает Collector узла его pod-а, отдельным pipeline без host.id и k8s_attributes, с
-   метками source_id и k8s_cluster_name кластера.
+   k8s_cluster_name кластера (в production — из клиентского сертификата); Prometheus копирует
+   его в source_id рядов kube_*.
 3. Узловые Collector отправляют OTLP gRPC в gateway (в production — mTLS, порт 4317).
 4. Gateway (memory_limiter, batch) отдает метрики через prometheus exporter
    (resource_to_telemetry_conversion; ряды молчащих источников удаляются через 90 с).
@@ -184,10 +185,10 @@ API отдает на `/metrics` состояние inventory (backend/app/expos
 Recording rules объединяют DCGM и nvidia-smi (DCGM важнее), выбирают порог перегрева по
 модели GPU (таблица gman-gpu-thresholds, по умолчанию 85/90 °C) и связывают pod-ы
 kube-state-metrics с workload (Deployment через ReplicaSet) и сервисом (метки gman.* pod-ов).
-24 алерта: узел, источник, телеметрия, gateway и kube-state-metrics молчат, узел Kubernetes
-NotReady, GPU XID/ECC/перегрев/троттлинг, OOMKilled (включая время последнего OOM kill), CrashLoopBackOff, частые перезапуски,
-образ не скачивается, недоступные реплики, застрявший rollout, Pending, упавшая Job,
-DaemonSet не на своих узлах. Inhibition: упавший узел скрывает алерты своих GPU и
+25 алертов: узел, источник, телеметрия, gateway и kube-state-metrics молчат, узел Kubernetes
+NotReady, GPU XID/ECC/перегрев/троттлинг, OOMKilled (включая время последнего OOM kill),
+CrashLoopBackOff, частые перезапуски, образ не скачивается, недоступные реплики, застрявший
+rollout, Pending, упавшая Job, DaemonSet не на своих узлах, последний релиз failed. Inhibition: упавший узел скрывает алерты своих GPU и
 контейнеров, молчащий источник — алерты своих экземпляров, NotReady узла — недоступные
 pod-ы DaemonSet-ов кластера, Pending/rollout — warning о репликах того же workload.
 Runbook — страница портала `#alerts/<имя>`. Silence — в UI Alertmanager.

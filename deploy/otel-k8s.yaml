@@ -128,10 +128,6 @@ data:
                 - source_labels: [__meta_kubernetes_pod_container_port_name]
                   regex: http-metrics
                   action: keep
-              metric_relabel_configs:
-                # The cluster's inventory source_id: alerts group and join on it like inventory alerts.
-                - target_label: source_id
-                  replacement: ${env:K8S_CLUSTER_NAME}
     processors:
       memory_limiter:
         check_interval: 1s
@@ -167,6 +163,7 @@ data:
             action: upsert
       # kube-state-metrics describes the whole cluster, not the node that scrapes it: no host.id
       # (GManNodeDown/NotReady of that node must not inhibit workload alerts) and no k8s_attributes.
+      # Prometheus copies k8s.cluster.name into source_id (deploy/prometheus.yaml).
       resource/ksm:
         attributes:
           - key: k8s.cluster.name

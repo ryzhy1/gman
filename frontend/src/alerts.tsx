@@ -62,6 +62,9 @@ const RUNBOOKS: [string, string, string[]][] = [
   ['GManInstanceImagePullFailing', 'Образ не скачивается', [
     'kubectl describe pod: имя образа, ошибка registry, imagePullSecrets.',
     'Проверить, что тег/digest существует и registry доступен с узла.']],
+  ['GManReleaseFailed', 'Релиз завершился ошибкой', [
+    'Открыть сервис, вкладка «Релизы»: причина (ошибка Bamboo, сбой новых экземпляров, тайм-аут выката) и экземпляры.',
+    'Решить: исправить и выпустить новый релиз или откатить через Bamboo; алерт снимается следующим релизом окружения.']],
   ['GManKubeStateMetricsAbsent', 'Нет метрик kube-state-metrics', [
     'kubectl -n gman-otel get pods -l app.kubernetes.io/name=kube-state-metrics -o wide; логи pod-а (ошибки RBAC, OOM).',
     'Проверить pod gman-otel на том же узле: его Collector забирает kube-state-metrics и отправляет в gateway.',

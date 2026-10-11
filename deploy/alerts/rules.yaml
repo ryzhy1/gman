@@ -495,3 +495,17 @@ groups:
             Кластер {{ $labels.source_id }}{{ with $labels.service_id }}, сервис {{ . }}{{ end }}: pod-ы DaemonSet
             работают на узлах, где по nodeSelector/affinity/taints их быть не должно.
           runbook_url: '{{ $externalLabels.gman_portal }}/#alerts/GManDaemonSetMisscheduled'
+
+  # Releases (backend/app/releases.py): gman_release_status has one series per service/environment for its
+  # latest release. The alert stays while that release is failed and resolves with the next release.
+  - name: gman-releases
+    rules:
+      - alert: GManReleaseFailed
+        expr: max by (service_id, environment) (gman_release_status{status="failed"}) == 1
+        labels: {severity: warning, scope: release}
+        annotations:
+          summary: 'Релиз {{ $labels.service_id }} в {{ $labels.environment }} завершился ошибкой'
+          description: >-
+            Последний релиз (начат {{ with printf "gman_release_started_timestamp_seconds{service_id='%s',environment='%s'}" $labels.service_id $labels.environment | query }}{{ . | first | value | humanizeTimestamp }}{{ end }})
+            в статусе failed: ошибка в Bamboo, сбой новых экземпляров или тайм-аут выката. Причина — на вкладке «Релизы» сервиса.
+          runbook_url: '{{ $externalLabels.gman_portal }}/#alerts/GManReleaseFailed'

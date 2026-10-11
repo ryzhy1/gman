@@ -69,6 +69,7 @@
     пороги перегрева по модели GPU (по умолчанию 85/90 °C). Ссылки Grafana из портала несут
     окружение и период. Исправлено: правила читали ECC без суффикса `_total`, а
     GManTelemetryGatewayDown срабатывал бы на `up` упавшего DCGM Exporter, переотданный gateway.
+    Алерт GManReleaseFailed по gman_release_status (последний релиз окружения failed).
 
 Проверено:
 - Тесты: 195 passed на PostgreSQL 17 (включая запросы истории конфигураций и тест

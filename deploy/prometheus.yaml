@@ -14,6 +14,13 @@ scrape_configs:
   - job_name: otel
     static_configs:
       - targets: ['otel:8889']
+    metric_relabel_configs:
+      # kube-state-metrics: source_id (the cluster, as the inventory source_id) is k8s_cluster_name, which the
+      # production gateway takes from the cluster's client certificate, not a label its Collector could set.
+      - source_labels: [__name__, k8s_cluster_name]
+        regex: 'kube_.+;(.+)'
+        target_label: source_id
+        replacement: '$1'
   # Inventory state for alerts (backend/app/exposition.py). Internal network only: nginx does not proxy /metrics.
   - job_name: gman-api
     static_configs:

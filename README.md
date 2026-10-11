@@ -600,7 +600,7 @@ API: GET /api/releases?service_id=&environment=&status=&limit=&before= (новы
 раскатки. Нужен доступ просмотра (роль viewer по SSO или GMAN_READ_TOKEN). Ответ
 POST /api/deployments содержит release_id. /metrics API отдает gman_release_status
 (1 для статуса последнего релиза каждой пары сервис/окружение) и
-gman_release_started_timestamp_seconds — для правила алерта на failed (правило пока не добавлено).
+gman_release_started_timestamp_seconds; по ним алерт GManReleaseFailed (раздел «Алерты»).
 
 GMAN_EVENT_ID по умолчанию стабилен для повтора той же задачи (тот же payload, второе
 событие не создается). GMAN_OCCURRED_AT необязателен: без него используется время
@@ -706,8 +706,10 @@ Prometheus не ходит в кластер: kube-state-metrics забирае�
 узла, где работает его pod (prometheus/ksm в otel-k8s.yaml: обнаружение pod-ов gman-otel
 своего узла, порт http-metrics), поэтому каждый ряд приходит один раз. Отдельный pipeline
 metrics/ksm не добавляет host.id и k8s_attributes (ряды описывают весь кластер, а не узел
-сборщика) и ставит метки source_id = K8S_CLUSTER_NAME (как source_id inventory-агента
-кластера) и k8s_cluster_name. Порт 8080 kube-state-metrics не закрыт NetworkPolicy:
+сборщика) и ставит k8s_cluster_name = K8S_CLUSTER_NAME (в production gateway заменяет его
+кластером из клиентского сертификата). Prometheus копирует k8s_cluster_name рядов kube_* в
+метку source_id (deploy/prometheus.yaml) — это source_id inventory-агента кластера, на нем
+построены группировка и подавление; Collector сам задать source_id не может. Порт 8080 kube-state-metrics не закрыт NetworkPolicy:
 Collector работает в hostNetwork, и правило пришлось бы писать по CIDR узлов кластера;
 отдаются только метаданные перечисленных объектов и метки gman.*.
 
@@ -792,6 +794,7 @@ Prometheus rules + Alertmanager, а не Grafana alerting: правила леж
 | GManInstanceCrashLoopBackOff | pod в CrashLoopBackOff 5 минут | warning |
 | GManInstanceRestartLoop | не менее 3 перезапусков за 30 минут | warning |
 | GManInstanceImagePullFailing | ImagePullBackOff/ErrImagePull 10 минут | warning |
+| GManReleaseFailed | последний релиз сервиса в окружении в статусе failed; снимается следующим релизом | warning |
 | GManKubeStateMetricsAbsent | кластер присылал ряды kube-state-metrics за 6 часов, а сейчас нет 5 минут | warning |
 | GManWorkloadReplicasUnavailable | Deployment/StatefulSet/DaemonSet: желаемых реплик больше доступных 10 минут; ни одной доступной 5 минут — critical | warning / critical |
 | GManWorkloadRolloutStuck | Deployment: Progressing=false (reason ProgressDeadlineExceeded); generation не обработана контроллером 15 минут (reason GenerationNotObserved) | warning |
@@ -809,7 +812,7 @@ workload и, если у pod-ов есть gman.*, service_id/environment. API �
 gman_source_last_snapshot_timestamp_seconds,
 gman_k8s_node_ready, gman_instance_restarts_total, gman_instance_state_reason,
 gman_instance_last_termination_reason (reason только из фиксированного списка),
-gman_instance_last_oom_timestamp_seconds, gman_gpu_*. Путь /metrics без токена, но nginx его не проксирует: Prometheus читает
+gman_instance_last_oom_timestamp_seconds, gman_gpu_*, gman_release_*. Путь /metrics без токена, но nginx его не проксирует: Prometheus читает
 api:8000 внутри сети Compose, снаружи endpoint недоступен.
 
 Подавление: GManNodeDown и GManK8sNodeNotReady скрывают алерты GPU, контейнеров и
@@ -822,7 +825,8 @@ Pending-pod-ы или застрявший rollout workload — его warning �
 StatefulSet при падении узла не подавляются: их реплики должны переехать. При
 недоступном gateway алерты об отсутствии метрик хостов и GPU не создаются вовсе
 (иначе они подавили бы алерты по inventory всех узлов). Группировка по объекту
-(alertname, source_id, host_id, UUID, instance_id, namespace, workload_kind, workload); повтор через 4 часа, critical — через час.
+(alertname, source_id, host_id, UUID, instance_id, namespace, workload_kind, workload,
+service_id, environment); повтор через 4 часа, critical — через час.
 
 Получатели задаются в .env и применяются при пересоздании контейнера alertmanager:
 GMAN_ALERT_WEBHOOK_URL (JSON Alertmanager, send_resolved) и/или GMAN_ALERT_EMAIL_TO с

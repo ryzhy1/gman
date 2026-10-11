@@ -758,3 +758,36 @@ tests:
       - eval_time: 40m
         alertname: GManInstanceOOMKilled
         exp_alerts: []
+
+  # api/prod: latest release fails at 2 minutes, the next release (rolling-out) replaces it at 10 minutes.
+  # web/dev: succeeded. Labels as backend/app/exposition.py renders them.
+  - name: release failed
+    external_labels: {gman_portal: https://gman.example}
+    interval: 1m
+    input_series:
+      - series: 'gman_release_status{job="gman-api", instance="api:8000", service_id="api", environment="prod", status="rolling-out"}'
+        values: '1 1 _ _ _ _ _ _ _ _ _ _ _ _ _'
+      - series: 'gman_release_status{job="gman-api", instance="api:8000", service_id="api", environment="prod", status="failed"}'
+        values: '_ _ 1 1 1 1 1 1 1 1 _ _ _ _ _'
+      - series: 'gman_release_status{job="gman-api", instance="api:8000", service_id="api", environment="prod", status="started"}'
+        values: '_ _ _ _ _ _ _ _ _ _ 1 1 1 1 1'
+      - series: 'gman_release_started_timestamp_seconds{job="gman-api", instance="api:8000", service_id="api", environment="prod"}'
+        values: '60x9 600x5'
+      - series: 'gman_release_status{job="gman-api", instance="api:8000", service_id="web", environment="dev", status="succeeded"}'
+        values: '1x14'
+    alert_rule_test:
+      - eval_time: 1m
+        alertname: GManReleaseFailed
+        exp_alerts: []
+      - eval_time: 3m
+        alertname: GManReleaseFailed
+        exp_alerts:
+          - exp_labels: {severity: warning, scope: release, service_id: api, environment: prod}
+            exp_annotations:
+              summary: 'Релиз api в prod завершился ошибкой'
+              description: 'Последний релиз (начат 1970-01-01 00:01:00 +0000 UTC) в статусе failed: ошибка в Bamboo, сбой новых экземпляров или тайм-аут выката. Причина — на вкладке «Релизы» сервиса.'
+              runbook_url: https://gman.example/#alerts/GManReleaseFailed
+      # Without staleness markers in tests the failed series stays visible for the 5-minute lookback.
+      - eval_time: 14m
+        alertname: GManReleaseFailed
+        exp_alerts: []

@@ -3,8 +3,8 @@
 # (Alertmanager itself does not expand variables in its config).
 route:
   receiver: gman
-  # One notification per object: a node, a GPU, an instance or a Kubernetes workload.
-  group_by: [alertname, source_id, host_id, UUID, instance_id, namespace, workload_kind, workload]
+  # One notification per object: a node, a GPU, an instance, a Kubernetes workload or a service release.
+  group_by: [alertname, source_id, host_id, UUID, instance_id, namespace, workload_kind, workload, service_id, environment]
   # Prometheus re-sends firing alerts once a minute per rule group. After an Alertmanager restart, waiting
   # longer than that lets inhibiting alerts (node down) arrive before their children are notified.
   group_wait: 90s
