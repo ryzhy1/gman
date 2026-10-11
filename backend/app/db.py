@@ -125,10 +125,25 @@ class Event(Base):
     service_id: Mapped[str] = mapped_column(String, default="")
     source_id: Mapped[str] = mapped_column(String, default="")
     instance_id: Mapped[str] = mapped_column(String, default="")
+    # Release this event was correlated with (see releases.py); also mirrored in data["release_id"].
+    release_id: Mapped[int | None] = mapped_column(Id, nullable=True)
     data: Mapped[dict] = mapped_column(Json)
 
     __table_args__ = (Index("ix_events_received", received_at.desc(), id.desc()),
-                      Index("ix_events_service", "service_id", received_at.desc(), id.desc()))
+                      Index("ix_events_service", "service_id", received_at.desc(), id.desc()),
+                      Index("ix_events_release", "release_id"))
+
+
+class RuntimeEventMark(Base):
+    """The latest recorded count and time of each Kubernetes Event, to record repeats once (migration 0004)."""
+    __tablename__ = "runtime_event_marks"
+    source_id: Mapped[str] = mapped_column(String, primary_key=True)
+    uid: Mapped[str] = mapped_column(String, primary_key=True)
+    count: Mapped[int] = mapped_column(Integer)
+    last_at: Mapped[datetime] = mapped_column(UTC)
+    received_at: Mapped[datetime] = mapped_column(UTC)
+
+    __table_args__ = (Index("ix_runtime_event_marks_received", "received_at"),)
 
 
 class Deployment(Base):
@@ -137,6 +152,44 @@ class Deployment(Base):
     event_id: Mapped[str] = mapped_column(String, primary_key=True)
     request: Mapped[dict] = mapped_column(Json)
     received_at: Mapped[datetime] = mapped_column(UTC)
+
+
+class Release(Base):
+    """A Bamboo deployment of one service/environment, with its status derived from runtime observations."""
+    __tablename__ = "releases"
+    id: Mapped[int] = mapped_column(Id, Identity(), primary_key=True)
+    service_id: Mapped[str] = mapped_column(String)
+    environment: Mapped[str] = mapped_column(String)
+    # Bamboo deployment result ID when known, otherwise "<build_id>|<release>".
+    key: Mapped[str] = mapped_column(String)
+    release: Mapped[str] = mapped_column(String, default="")
+    version: Mapped[str] = mapped_column(String, default="")
+    build_id: Mapped[str] = mapped_column(String, default="")
+    build_url: Mapped[str] = mapped_column(String, default="")
+    commit: Mapped[str] = mapped_column(String, default="")
+    image: Mapped[str] = mapped_column(String, default="")
+    image_digest: Mapped[str] = mapped_column(String, default="")
+    initiator: Mapped[str] = mapped_column(String, default="unknown")
+    initiator_kind: Mapped[str] = mapped_column(String, default="unknown")
+    # started | rolling-out | succeeded | failed | superseded
+    status: Mapped[str] = mapped_column(String)
+    status_reason: Mapped[str] = mapped_column(String, default="")
+    # Last status Bamboo reported: started | succeeded | failed.
+    bamboo_status: Mapped[str] = mapped_column(String, default="")
+    correlation: Mapped[str] = mapped_column(String, default="")  # digest | version, once instances match
+    started_at: Mapped[datetime] = mapped_column(UTC)
+    # Runtime changes from this moment on may belong to the release (clock skew, runtime ahead of Bamboo).
+    window_start: Mapped[datetime] = mapped_column(UTC)
+    rollout_started_at: Mapped[datetime | None] = mapped_column(UTC, nullable=True)
+    bamboo_finished_at: Mapped[datetime | None] = mapped_column(UTC, nullable=True)
+    finished_at: Mapped[datetime | None] = mapped_column(UTC, nullable=True)
+    superseded_by: Mapped[int | None] = mapped_column(Id, nullable=True)
+    progress: Mapped[dict] = mapped_column(Json, default=dict)
+    updated_at: Mapped[datetime] = mapped_column(UTC, default=utcnow, onupdate=utcnow)
+
+    __table_args__ = (Index("ix_releases_service", "service_id", "environment", started_at.desc(), id.desc()),
+                      Index("ix_releases_key", "service_id", "environment", "key"),
+                      Index("ix_releases_status", "status", "started_at"))
 
 
 class UserSession(Base):
@@ -209,18 +262,28 @@ def config_hash(config):
     return hashlib.sha256(json.dumps(config, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
 
 
+def keep_latest(item, before, field):
+    """A past fact the runtime forgets (Docker clears OOMKilled on restart; an agent restart loses the time of
+    an `oom` event) stays as observed, unless a newer one is reported. Modifies `item` in place."""
+    old, new = before.get(field), item.get(field)
+    if old and (not new or datetime.fromisoformat(new) < datetime.fromisoformat(old)):
+        item[field] = old
+
+
 def save_snapshot(session, data, received_at):
     """Store an accepted snapshot; returns the previously observed instances by ID."""
     source_id = data["source_id"]
     session.merge(Source(source_id=source_id, source_type=data["source_type"], hostname=data["hostname"],
                          observed_at=datetime.fromisoformat(data["observed_at"]), received_at=received_at,
-                         snapshot={k: v for k, v in data.items() if k not in ("instances", "received_at")}))
+                         snapshot={k: v for k, v in data.items() if k not in ("instances", "received_at", "events")}))
     rows = {r.instance_id: r for r in session.scalars(select(Instance).where(Instance.source_id == source_id))}
     old = {key: row.data for key, row in rows.items()}
     unchanged = []
     for position, item in enumerate(data["instances"]):
         digest = config_hash(item["config"])
         row = rows.pop(item["id"], None)
+        if row is not None:
+            keep_latest(item, row.data, "last_oom_at")
         if row is None:
             row = Instance(source_id=source_id, instance_id=item["id"])
             session.add(row)
@@ -338,12 +401,19 @@ def instance_known(session, source_id, instance_id):
 class Retention:
     """Deletes history older than GMAN_RETENTION_DAYS, at most once per interval per process."""
 
-    def __init__(self, interval=timedelta(hours=1)):
+    def __init__(self, interval=timedelta(hours=1), release_interval=timedelta(minutes=1)):
         self.interval = interval
         self.last = None
+        self.release_interval = release_interval
+        self.release_last = None
 
     def run(self, engine, now=None):
+        """Called after each accepted snapshot; also times out stuck releases (no separate daemon)."""
         now = now or utcnow()
+        if self.release_last is None or now - self.release_last >= self.release_interval:
+            self.release_last = now
+            from . import releases
+            releases.expire(engine, now)
         if self.last is not None and now - self.last < self.interval:
             return False
         self.last = now
@@ -357,6 +427,9 @@ class Retention:
         cutoff = now - timedelta(days=days)
         with engine.begin() as connection:
             connection.execute(delete(Event).where(Event.received_at < cutoff))
+            # Kubernetes keeps Events for an hour by default: older marks no longer dedupe anything.
+            connection.execute(delete(RuntimeEventMark).where(RuntimeEventMark.received_at < cutoff))
             # Current configs stay: every accepted snapshot refreshes their last_seen_at.
             connection.execute(delete(ConfigSnapshot).where(ConfigSnapshot.last_seen_at < cutoff))
+            connection.execute(delete(Release).where(Release.started_at < cutoff, Release.finished_at.is_not(None)))
         return True

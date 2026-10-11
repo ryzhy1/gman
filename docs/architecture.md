@@ -89,8 +89,8 @@ flowchart LR
 ### Inventory
 
 1. Агент на Docker-хосте читает `docker ps -aq` и `docker inspect` (allowlist полей),
-   nvidia-smi или AMD sysfs, сведения о хосте. Агент кластера читает pods и nodes через
-   kubectl (или API с service account). Агент GPU-узла (`kubernetes-node`) читает nvidia-smi,
+   nvidia-smi или AMD sysfs, сведения о хосте. Агент кластера читает pods, nodes и pod Events
+   через kubectl (или API с service account). Агент GPU-узла (`kubernetes-node`) читает nvidia-smi,
    `/proc/<pid>/cgroup` и pods своего узла.
 2. Снимок пишется в spool на диске и отправляется `POST /api/inventory` с Bearer-токеном
    источника. Повторы с backoff; неотправленное остается в spool.
@@ -99,18 +99,44 @@ flowchart LR
    (`accepted=false`).
 4. Снимок заменяет текущее состояние источника (sources, instances); новая конфигурация
    экземпляра создает строку config_snapshots. Разница с прошлым снимком записывается
-   событиями (см. «Кем и когда запущено»).
+   событиями (см. «Кем и когда запущено»); новые повторения Kubernetes Events — событиями
+   runtime-event; молчание источника дольше GMAN_HISTORY_GAP_SECONDS (300 с) или отброшенные
+   агентом снимки — событием history-gap.
 5. Портал получает `GET /api/overview` (каталог, источники с экземплярами, последние 200
    событий) раз в 30 секунд.
 
-Сбор — периодический опрос (systemd timer раз в минуту) либо `docker events` в режиме
-`--watch`: снимок через 2 с тишины, не позже 10 с от первого события и не реже 60 с;
-контейнер, исчезнувший до снимка, отправляется промежуточным снимком. После разрыва потока
-событий — полная сверка. Пропущенные во время разрыва короткие события не восстанавливаются.
+Сбор — периодический опрос (systemd timer раз в минуту) либо режим `--watch`: `docker events`
+или watch API Kubernetes. Снимок через 2 с тишины, не позже 10 с от первого события и не реже
+60 с; контейнер или pod, исчезнувший до снимка, отправляется промежуточным снимком. После
+разрыва потока событий — полная сверка. Пропущенные во время разрыва короткие события не
+восстанавливаются.
 
-Отличие от проекта: Kubernetes опрашивается целиком раз в минуту, watch API и Kubernetes
-Events не используются; доступ к Docker — через Docker CLI с группой docker, а не через
-ограничивающий proxy.
+Kubernetes `--watch` (KubeWatcher в agent/collect.py): два потока — pods и pod Events. Каждый
+делает list (`kubectl get --raw`, чтобы сохранить resourceVersion списка; без kubectl — API с
+service account) и watch от этой версии с allowWatchBookmarks и timeoutSeconds; по истечении
+watch продолжается с последней версии (BOOKMARK ее сдвигает). 410 Gone — версия удалена
+compaction: немедленный повторный list. Прочие сбои — маркер сверки и повторный list с
+экспоненциальным backoff до 60 с. Снимок строится из кэша pod-ов, узлы читаются при каждом
+снимке. Удаленные pod-ы помнятся 10 минут, чтобы сопоставить их поздние Events.
+
+Kubernetes Events (allowlist): только involvedObject.kind = Pod, pod с меткой gman.service,
+reason из списка OOMKilling, BackOff, FailedScheduling, Unhealthy, Killing, Failed, Evicted,
+FailedMount, FailedCreatePodSandBox, Preempting. Поля: uid, reason, type, count (с учетом
+series), first/last time, namespace/pod/контейнер (из fieldPath) → instance_id, компонент.
+message не передается — в нем бывают вывод проб, адреса registry и ошибки команд; вместо него
+detail из фиксированных фраз (вид пробы, причины FailedScheduling, ресурс Evicted, ошибка
+образа). API проверяет тот же allowlist и записывает событие один раз на новое повторение:
+runtime_event_marks хранит последний count и время по (source_id, uid).
+
+Docker OOM: restart policy сбрасывает State.OOMKilled, а OOM kill дочернего процесса не
+останавливает контейнер. Watcher запоминает время события `oom` и проставляет его в
+last_oom_at экземпляра в каждом снимке, пока контейнер существует. API сохраняет последнее
+известное last_oom_at (поле не сбрасывается пропуском), пишет событие instance-oom и отдает
+gman_instance_last_oom_timestamp_seconds; GManInstanceOOMKilled срабатывает 30 минут после
+OOM kill. В Kubernetes last_oom_at берется из termination state (current и lastState).
+
+Отличие от проекта: доступ к Docker — через Docker CLI с группой docker, а не через
+ограничивающий proxy. Без `--watch` Kubernetes опрашивается целиком раз в минуту.
 
 ### Телеметрия
 
@@ -149,7 +175,8 @@ API отдает на `/metrics` состояние inventory (backend/app/expos
 (не старше 5 минут). Путь не проксируется nginx и читается Prometheus внутри сети Compose.
 Recording rules объединяют DCGM и nvidia-smi (DCGM важнее). 18 алертов: узел, источник,
 телеметрия и gateway молчат, узел Kubernetes NotReady, GPU XID/ECC/перегрев/троттлинг,
-OOMKilled, CrashLoopBackOff, частые перезапуски, образ не скачивается. Inhibition: упавший
+OOMKilled (включая время последнего OOM kill), CrashLoopBackOff, частые перезапуски, образ
+не скачивается. Inhibition: упавший
 узел скрывает алерты своих GPU и контейнеров, молчащий источник — алерты своих экземпляров.
 Runbook — страница портала `#alerts/<имя>`. Silence — в UI Alertmanager.
 
@@ -174,12 +201,13 @@ GMAN_CI_TOKEN для Bamboo. OTLP — клиентские сертификат�
 
 Script task `agent/bamboo_event.py` в deployment job отправляет `POST /api/deployments`
 (started/succeeded/failed): build, release, environment, commit, image digest, инициатор,
-build URL. Значения по умолчанию берутся из переменных `bamboo_*`. event_id детерминирован,
-повтор с тем же payload не создает второе событие, с другим — 409. Сбой отправки не валит
-деплой (кроме GMAN_REQUIRED=true).
+build URL, а также deployment_id (deploymentResultId), version и image для сверки.
+Значения по умолчанию берутся из документированных переменных `bamboo_*` (см. README).
+event_id детерминирован, повтор с тем же payload не создает второе событие, с другим — 409.
+Сбой отправки не валит деплой (кроме GMAN_REQUIRED=true).
 
-Отличие от проекта: событие деплоя хранится как утверждение CI и запись журнала; автоматической
-корреляции с runtime (по digest/времени) и сущности «релиз» со статусами нет.
+Событие создает или обновляет релиз, статус которого выводится из runtime-сверки
+(раздел «Релизы: сверка Bamboo и runtime»).
 
 Обнаружение сервисов основано на фактическом состоянии Docker/Kubernetes. Bamboo —
 дополнительный источник сведений о деплое, а не условие включения сервиса в мониторинг.
@@ -189,7 +217,7 @@ build URL. Значения по умолчанию берутся из пере
 ## Модель данных
 
 PostgreSQL, схема из Alembic-миграций (0001 — нормализованная схема, 0002 — имя и окружение
-экземпляра в config_snapshots, 0003 — sessions). Миграции применяются при старте API под
+экземпляра в config_snapshots, 0003 — sessions, 0004 — releases и events.release_id, 0005 — runtime_event_marks). Миграции применяются при старте API под
 advisory lock. Снимки, экземпляры и конфигурации хранятся как проверенный JSON (JSONB);
 колонками вынесено только то, по чему фильтруют и сортируют, поэтому новые поля схемы API
 не требуют миграций. Время хранится в UTC (timestamptz).
@@ -200,9 +228,11 @@ advisory lock. Снимки, экземпляры и конфигурации х
 | sources | source_id | Последний принятый снимок источника без экземпляров: тип, hostname, observed_at, received_at, сведения о хосте, GPU, узлы Kubernetes, ошибки сбора |
 | instances | source_id + instance_id | Текущие экземпляры источника: service_id, environment, runtime, status, хеш и ссылка на текущую конфигурацию, полный JSON экземпляра |
 | config_snapshots | id | Различающиеся конфигурации экземпляра по хешу: service_id, instance_name, environment, config, first_seen_at/last_seen_at |
-| events | id | Журнал: тип, service/source/instance, received_at, occurred_at, JSON события с actor и changes |
+| events | id | Журнал: тип, service/source/instance, received_at, occurred_at, release_id, JSON события с actor и changes |
 | deployments | event_id | Исходный запрос CI для идемпотентности |
+| releases | id | Прогон деплоя Bamboo для сервиса/окружения: версия, image/digest, commit, инициатор, статус и причина, окно, прогресс экземпляров |
 | sessions | sha256 cookie | SSO-сессии: subject, роль, email/имя/группы на момент входа, CSRF-токен, срок |
+| runtime_event_marks | source_id + uid | Последний записанный count и время Kubernetes Event — дедупликация повторов; удаляется по GMAN_RETENTION_DAYS |
 
 Соответствие сущностям исходного проекта:
 
@@ -215,7 +245,7 @@ advisory lock. Снимки, экземпляры и конфигурации х
 | Host | sources (docker-host) с ОС, ядром, CPU, Docker, uptime; узлы Kubernetes — список nodes в снимке кластера |
 | GPU | Список gpus в снимке источника (UUID, PCI, модель, драйвер, показатели, процессы); MIG — только режим |
 | ConfigSnapshot | config_snapshots |
-| Deployment | deployments + событие deployment |
+| Deployment | releases (статус из сверки с runtime) + deployments + событие deployment |
 | AuditEvent | events |
 
 Один сервис может иметь несколько реплик на нескольких узлах и разные версии при rollout:
@@ -266,7 +296,11 @@ gman_service/gman_environment, k8s.namespace/pod; command, env, пользова
 | source-connected | первый снимок источника, одно событие с числом экземпляров | unknown, runtime observation |
 | instance-appeared / instance-removed | разница снимков | unknown |
 | config-changed / instance-restarted / state-changed | разница снимков, changes «было/стало» | unknown |
-| deployment | Bamboo | из CI, actor_source = Bamboo integration assertion |
+| instance-oom | новое last_oom_at экземпляра (Docker `oom` или OOMKilled, Kubernetes termination) | unknown |
+| runtime-event | новое повторение Kubernetes Event pod-а: reason, event_type, count, occurrences, detail | unknown, Kubernetes Event |
+| history-gap | источник молчал дольше GMAN_HISTORY_GAP_SECONDS или агент отбросил снимки (spool overflow): gap_from/gap_to, reasons, dropped_snapshots; по событию на каждый затронутый сервис | unknown |
+| deployment | Bamboo | из CI, actor_source = Bamboo integration assertion; release_id |
+| instance-appeared / config-changed, связанные с релизом | разница снимков + сверка с релизом | инициатор релиза, actor_source = Bamboo, correlated by digest/version |
 | service-created / service-updated | изменение каталога через API | email/логин SSO (human) или GMAN_ADMIN_TOKEN (unknown), с ролью и subject |
 
 Первый снимок не считается деплоем. Происхождение (compose project/service/working dir,
@@ -274,7 +308,59 @@ OCI source/revision/version, app.kubernetes.io/*, helm chart, Kubernetes field m
 сохраняется как подсказка о способе запуска, а не как автор.
 
 Docker events не дают надежного человека-инициатора; для Kubernetes нужен audit log control
-plane, а не Events. Ни то, ни другое не реализовано: автор runtime-изменения — «неизвестно».
+plane, а не Events. Ни то, ни другое не реализовано: автор runtime-изменения — «неизвестно»,
+кроме изменений, сопоставленных с релизом Bamboo (см. ниже); в портале несопоставленные
+появления и изменения конфигурации показываются как «ручной запуск / инициатор неизвестен».
+
+### Релизы: сверка Bamboo и runtime
+
+Реализовано в backend/app/releases.py, таблица `releases` (миграция 0004_releases),
+ссылка `events.release_id`. Релиз — один прогон deployment Bamboo для пары
+сервис/окружение: версия и релиз Bamboo, image ref и digest, commit, сборка,
+инициатор из Bamboo, время начала, статус и причина, прогресс экземпляров.
+Прогон определяется `deployment_id` (deploymentResultId из bamboo_resultsUrl);
+без него — `build_id|release`, и новый started после завершенного прогона того же
+build/release считается повторным деплоем.
+
+Статусы (выводятся, а не утверждаются CI):
+
+- started — Bamboo сообщил о начале, ни один экземпляр не запущен с целевым образом;
+- rolling-out — хотя бы один экземпляр сервиса/окружения на целевой версии;
+- succeeded — все экземпляры целевого image repository в окружении на целевой версии
+  и здоровы (running, health пусто/healthy, ready не false, без reason) либо
+  завершились с exit 0; кроме того, хотя бы один из них создан в окне релиза или
+  Bamboo сообщил succeeded (иначе повторный деплой той же версии «успешен» мгновенно);
+- failed — Bamboo сообщил failed (перекрывает даже succeeded), новый экземпляр
+  в окне релиза перезапускался GMAN_RELEASE_CRASH_RESTARTS (3) раза, CrashLoopBackOff
+  или OOMKilled, либо раскатка не сошлась за GMAN_RELEASE_TIMEOUT_MINUTES (30);
+- superseded — до завершения начат более новый релиз той же пары. Поздно пришедшее
+  событие более старого деплоя сразу получает superseded.
+
+Сопоставление экземпляра с релизом: сначала image digest (sha256 в image или image_id),
+затем версия — тег образа, org.opencontainers.image.version или
+app.kubernetes.io/version против version/release/тега image из Bamboo; тег latest
+не используется. Если runtime знает manifest digest (Kubernetes imageID, образ
+по @sha256) и он другой, совпадение тега не засчитывается. На Docker image_id —
+это ID образа (config digest), а не manifest digest из registry: для сверки по digest
+передавайте из Bamboo `docker image inspect --format '{{.Id}}'` или запускайте образ
+по digest; иначе работает сверка по версии. Sidecar-контейнеры с другим репозиторием
+образа в прогресс не входят.
+
+Окно релиза: от начала минус GMAN_RELEASE_LEAD_MINUTES (10; расхождение часов и
+runtime раньше события Bamboo) до завершения или тайм-аута. Если первым пришло
+финальное событие, окно начинается за тайм-аут до него. Runtime-события окна
+связываются с релизом: появление экземпляра и изменение конфигурации на целевой
+версии получают инициатора релиза с actor_source «Bamboo, correlated by digest|version»;
+удаление прежней версии, перезапуски и изменения состояния связываются без смены
+автора. События вне окна или без совпадения остаются «ручной запуск / инициатор
+неизвестен». Связь с более новым релизом не перезаписывает уже связанные события.
+
+Пересчет: в транзакции приема снимка (для затронутых пар) и события Bamboo, под
+advisory lock `release:<service>|<env>` на PostgreSQL; тайм-ауты — в существующем
+шаге housekeeping после снимков (не чаще раза в минуту, без отдельного демона),
+поэтому при молчащих агентах тайм-аут наступит со следующим снимком любого
+источника. Повторы снимков и событий отбрасываются раньше, повторный пересчет
+неизменных данных ничего не меняет. Завершенные релизы старше retention удаляются.
 
 ### Ручные запуски
 
@@ -313,13 +399,15 @@ plane, а не Events. Ни то, ни другое не реализовано:
    CPU/память, VRAM процессов, рестарты, время создания и старта, ссылка на логи экземпляра.
 4. Конфигурация: текущая конфигурация каждого экземпляра, процессы GPU, происхождение;
    история версий с фильтром по экземпляру и diff «Было/Стало».
-5. История: события сервиса.
+5. Релизы: деплои Bamboo со статусом из runtime-сверки, инициатор, версия, прогресс,
+   длительность; карточка релиза с экземплярами и связанными событиями.
+6. История: события сервиса; у связанных с релизом — ссылка «Релиз #N».
 
 CPU контейнера — в ядрах (1.0 = одно ядро), процент — от лимита контейнера. VRAM — память
 процессов контейнера, не доля загрузки GPU. Нет метрик — «—» и предупреждение, а не ноль.
 
 Отличие от проекта: отдельных экранов «состояние интеграций» и списка «последние деплои»
-нет (деплои — в истории); открытые проблемы сервиса на карточке не показываются (только
+нет (деплои — во вкладке «Релизы» и в истории); открытые проблемы сервиса на карточке не показываются (только
 на странице «Алерты»); ссылка в Grafana передает service_id, но не окружение и период.
 
 ## Метрики
@@ -344,7 +432,7 @@ CPU контейнера — в ядрах (1.0 = одно ядро), проце
 контейнером/pod-ом дает VRAM процесса, загрузка по pod-ам — только для карт, выделенных
 через device plugin.
 
-Не собираются: PSI, OOM-события как метрика, SMART/NVMe, hwmon хоста, BMC/IPMI/Redfish,
+Не собираются: PSI, OOM-события хоста (вне контейнеров) как метрика, SMART/NVMe, hwmon хоста, BMC/IPMI/Redfish,
 PCIe/NVLink-счетчики, retired pages, SM/tensor profiling, метрики MIG-инстансов,
 kube-state-metrics (desired/available replicas, Pending, rollout).
 
@@ -369,9 +457,15 @@ kube-state-metrics (desired/available replicas, Pending, rollout).
 observed_at, а не время доставки.
 
 Collector: memory_limiter, batch, in-memory sending_queue и retry_on_failure.
-Отличие от проекта: постоянная очередь Collector на диске (file_storage) не настроена,
-явная отметка пробела в истории после переподключения не создается (видна только по
-ошибкам spool и времени снимков). Самонаблюдение pipeline ограничено up{job} gateway и API
+Пробел в истории отмечается явно: если между принятыми снимками источника прошло больше
+GMAN_HISTORY_GAP_SECONDS (300 с — пять интервалов агента, как GManSourceSilent) или снимок
+сообщает «agent spool overflow», API пишет history-gap для каждого сервиса с экземплярами на
+источнике до и после пробела (и без сервиса — для неразмеченных); портал показывает «Данные
+за период могут быть неполными», в журнале аудита копии одного пробела сворачиваются.
+Снимки, отправленные из spool после восстановления связи, пробела не образуют.
+
+Отличие от проекта: постоянная очередь Collector на диске (file_storage) не настроена.
+Самонаблюдение pipeline ограничено up{job} gateway и API
 и метриками источников; lag, dropped и размер очередей Collector не собираются.
 Внешнего мониторинга самого сервера GMan нет.
 
@@ -469,7 +563,7 @@ Prometheus и Grafana не бэкапятся: дашборды и datasource о
 | 1. Стек, контракты inventory/deployment, каталог, идентификаторы, локальный стенд | Сделано |
 | 2. Один Docker-host и один Kubernetes namespace: обнаружение, привязка, конфигурации, diff | Реализовано; на реальных Docker и Kubernetes не проверено |
 | 3. NVIDIA-узел и метрики через OTel, сверка с источником | Реализовано; проверено на эмуляции DCGM/Docker API/kubelet, не на NVIDIA |
-| 4. Bamboo: успешный/неудачный деплой, инициатор, commit, digest; ручной запуск без Bamboo и меток | Endpoint и скрипт сделаны, проверены против локального API; настоящий Bamboo и корреляция с runtime — нет |
+| 4. Bamboo: успешный/неудачный деплой, инициатор, commit, digest; ручной запуск без Bamboo и меток | Endpoint, скрипт и релизы со сверкой с runtime сделаны, проверены тестами и против локального API; настоящий Bamboo — нет |
 | 5. Каталог, карточки, исторические графики, внешние ссылки | Сделано (Grafana, Splunk); браузерная проверка новых страниц не завершена |
 | 6. Остальные серверы, SSO и роли, разрыв связи, повторная доставка, устаревание, рестарт агента, backup/restore | SSO и роли — против mock IdP; надежность агента — тестами; backup/restore — на PostgreSQL 17 вне контейнера; на реальной инфраструктуре не проверено |
 | Алерты (вне исходного плана) | Правила проверены promtool, доставка — локальными бинарными релизами; на реальных DCGM/SMTP нет |

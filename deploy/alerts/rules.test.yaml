@@ -401,3 +401,35 @@ tests:
               description: "Pod dev/web-1/web: ImagePullBackOff дольше 10 минут."
               runbook_url: "https://gman.example/#alerts/GManInstanceImagePullFailing"
               summary: "web-1/web не может скачать образ"
+
+  - name: docker oom under restart policy
+    external_labels: {gman_portal: https://gman.example}
+    interval: 1m
+    input_series:
+      # OOM kill at 5m (agent --watch `oom` event); the restart policy restarted the container, so its
+      # state carries no OOMKilled reason. Same kill also reported as state while it was stopped (5m-6m).
+      - series: 'gman_instance_last_oom_timestamp_seconds{source_id="server-01", host_id="server-01", instance_id="c2", instance_name="trainer", namespace="", service_id="ml", environment="prod", runtime="docker", reason="OOMKilled"}'
+        values: '_x5 300x50'
+      - series: 'gman_instance_state_reason{source_id="server-01", host_id="server-01", instance_id="c2", instance_name="trainer", namespace="", service_id="ml", environment="prod", runtime="docker", reason="OOMKilled"}'
+        values: '_x5 1 1'
+    alert_rule_test:
+      - eval_time: 5m
+        alertname: GManInstanceOOMKilled
+        exp_alerts:
+          - exp_labels: {severity: warning, scope: instance, source_id: server-01, host_id: server-01, instance_id: c2, instance_name: trainer, service_id: ml, environment: prod, runtime: docker, reason: OOMKilled}
+            exp_annotations:
+              summary: trainer завершен по OOMKilled
+              description: "Контейнер trainer (сервис ml, server-01) превысил лимит памяти. Проверить лимит и потребление на вкладке «Ресурсы»."
+              runbook_url: https://gman.example/#alerts/GManInstanceOOMKilled
+      - eval_time: 20m
+        alertname: GManInstanceOOMKilled
+        exp_alerts:
+          - exp_labels: {severity: warning, scope: instance, source_id: server-01, host_id: server-01, instance_id: c2, instance_name: trainer, service_id: ml, environment: prod, runtime: docker, reason: OOMKilled}
+            exp_annotations:
+              summary: trainer завершен по OOMKilled
+              description: "Контейнер trainer (сервис ml, server-01) превысил лимит памяти. Проверить лимит и потребление на вкладке «Ресурсы»."
+              runbook_url: https://gman.example/#alerts/GManInstanceOOMKilled
+      # 30 minutes after the kill the alert resolves.
+      - eval_time: 40m
+        alertname: GManInstanceOOMKilled
+        exp_alerts: []

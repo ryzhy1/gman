@@ -163,7 +163,9 @@ def test_overlapping_run_exits_cleanly(tmp_path, monkeypatch, capsys):
 
 
 def test_cli_validation():
-    for argv in (["--runtime", "kubernetes", "--source-id", "c", "--send", "--watch"],
+    for argv in (["--runtime", "kubernetes-node", "--node", "n", "--cluster", "c", "--source-id", "c.n", "--send",
+                  "--watch"],
+                 ["--runtime", "kubernetes", "--source-id", "c", "--watch"],
                  ["--runtime", "docker", "--source-id", "c", "--watch"],
                  ["--runtime", "docker", "--source-id", "..", "--send"]):
         with pytest.raises(SystemExit):

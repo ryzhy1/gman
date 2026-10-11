@@ -195,12 +195,15 @@ groups:
   - name: gman-instances
     rules:
       # Kubernetes keeps OOMKilled as the last termination reason until the next one: count it only while
-      # the restart counter grows. Docker reports OOMKilled while the container stays stopped.
+      # the restart counter grows. Docker reports OOMKilled while the container stays stopped; a container
+      # restarted by its restart policy (or one whose child process was killed) is caught by the time of the
+      # last OOM kill from the agent's --watch `oom` event, alerting for 30 minutes after it.
       - alert: GManInstanceOOMKilled
         expr: |
           gman_instance_state_reason{reason="OOMKilled"} == 1
           or (gman_instance_last_termination_reason{reason="OOMKilled"} == 1
               and on (source_id, instance_id) increase(gman_instance_restarts_total[30m]) > 0)
+          or (time() - gman_instance_last_oom_timestamp_seconds < 1800)
         labels: {severity: warning, scope: instance}
         annotations:
           summary: '{{ $labels.instance_name }} завершен по OOMKilled'

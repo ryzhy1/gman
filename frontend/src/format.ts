@@ -69,3 +69,10 @@ export function podContainer(id: string) {
   const at = id.indexOf(':');
   return { pod_uid: id.slice(0, at), container_name: id.slice(at + 1) };
 }
+
+/** "45 с" / "12 мин 5 с" / "2 ч 10 мин"; null stays unknown. */
+export function duration(seconds: number | null | undefined) {
+  if (seconds == null) return '—';
+  const s = Math.max(0, Math.round(seconds)), h = Math.floor(s / 3600), m = Math.floor(s % 3600 / 60);
+  return h ? `${h} ч ${m} мин` : m ? `${m} мин ${s % 60} с` : `${s} с`;
+}

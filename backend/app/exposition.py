@@ -11,7 +11,8 @@ or the Kubernetes node name, UUID is the NVIDIA GPU UUID (as in DCGM Exporter).
 """
 from datetime import datetime, timezone
 
-from sqlalchemy import select
+from sqlalchemy import and_, exists, or_, select
+from sqlalchemy.orm import aliased
 
 from . import db as store
 
@@ -32,10 +33,25 @@ HELP = {
     "gman_instance_restarts_total": ("counter", "Restart count of the container as reported by the runtime."),
     "gman_instance_state_reason": ("gauge", "1 for the current state reason of the container (allowlisted)."),
     "gman_instance_last_termination_reason": ("gauge", "1 for the reason of the previous termination (Kubernetes)."),
+    "gman_instance_last_oom_timestamp_seconds": ("gauge", "Time of the latest OOM kill of the container (Docker oom "
+                                                          "event or OOMKilled, Kubernetes termination)."),
     "gman_gpu_temperature_celsius": ("gauge", "GPU core temperature from nvidia-smi."),
     "gman_gpu_ecc_uncorrected_errors": ("gauge", "Volatile uncorrected ECC errors from nvidia-smi."),
     "gman_gpu_clock_event_reasons": ("gauge", "Active clock throttle reasons from nvidia-smi as a DCGM bitmask."),
+    "gman_release_status": ("gauge", "1 for the status of the latest release of a service/environment (releases.py)."),
+    "gman_release_started_timestamp_seconds": ("gauge", "Start of the latest release of a service/environment."),
 }
+
+
+def latest_releases(session):
+    """Latest release per service/environment: one series each, whatever the release history length."""
+    newer = aliased(store.Release)
+    release = store.Release
+    return session.scalars(select(release).where(~exists().where(
+        newer.service_id == release.service_id, newer.environment == release.environment,
+        or_(newer.started_at > release.started_at,
+            and_(newer.started_at == release.started_at, newer.id > release.id))))
+        .order_by(release.service_id, release.environment)).all()
 
 
 def escape(value):
@@ -94,6 +110,16 @@ def render(session):
         last = (item.get("last_termination_reason") or "").split(" ")[0]
         if last in STATE_REASONS:
             add("gman_instance_last_termination_reason", {**labels, "reason": last}, 1)
+        if item.get("last_oom_at"):
+            # reason="OOMKilled" gives the series the label set of gman_instance_state_reason, so that
+            # GManInstanceOOMKilled raises one alert when both report the same kill.
+            add("gman_instance_last_oom_timestamp_seconds", {**labels, "reason": "OOMKilled"},
+                datetime.fromisoformat(item["last_oom_at"]).timestamp())
+
+    for release in latest_releases(session):
+        labels = {"service_id": release.service_id, "environment": release.environment}
+        add("gman_release_status", {**labels, "status": release.status}, 1)
+        add("gman_release_started_timestamp_seconds", labels, release.started_at.timestamp())
 
     output = []
     for name, (kind, text) in HELP.items():

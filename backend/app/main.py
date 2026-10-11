@@ -23,6 +23,7 @@ from . import db as store
 from . import exposition
 from . import k8s_tokens
 from . import metrics
+from . import releases
 from . import splunk
 
 logger = logging.getLogger("gman")
@@ -240,6 +241,9 @@ class Instance(Strict):
     started_at: datetime | None = None
     finished_at: datetime | None = None
     restarts: int = Field(default=0, ge=0)
+    # Latest OOM kill: Docker `oom` event (--watch) or OOMKilled state; Kubernetes last/current termination.
+    # Kept by the API once observed, since Docker clears OOMKilled when the container restarts.
+    last_oom_at: datetime | None = None
     origin: Origin = Field(default_factory=Origin)
     config: Config
 
@@ -318,6 +322,39 @@ class Node(Strict):
     created_at: datetime | None = None
 
 
+# Same allowlist as agent/collect.py KUBE_EVENT_REASONS; anything else is rejected rather than stored.
+KUBE_EVENT_REASONS = {"OOMKilling", "BackOff", "FailedScheduling", "Unhealthy", "Killing", "Failed", "Evicted",
+                      "FailedMount", "FailedCreatePodSandBox", "Preempting"}
+
+
+class RuntimeEvent(Strict):
+    """A Kubernetes Event of a pod, without its free-text message (see agent/collect.py kube_event)."""
+    uid: str = Field(pattern=r"^[a-zA-Z0-9_.:-]{1,100}$")
+    reason: str = Field(max_length=100)
+    type: Literal["Normal", "Warning"] = "Warning"
+    count: int = Field(default=1, ge=1)
+    first_at: datetime | None = None
+    last_at: datetime
+    service_id: str = Field(default="", max_length=100)
+    environment: str = Field(default="unknown", max_length=100)
+    namespace: str = Field(default="", max_length=300)
+    pod: str = Field(default="", max_length=300)
+    container: str = Field(default="", max_length=300)
+    instance_id: str = Field(default="", max_length=700)
+    instance_name: str = Field(default="", max_length=700)
+    component: str = Field(default="", max_length=100)
+    detail: str = Field(default="", max_length=300)
+
+    _time = field_validator("last_at")(not_future)
+
+    @field_validator("reason")
+    @classmethod
+    def allowlisted(cls, value):
+        if value not in KUBE_EVENT_REASONS:
+            raise ValueError("Event reason is not allowlisted")
+        return value
+
+
 class Snapshot(Strict):
     source_id: str = Field(pattern=r"^[a-zA-Z0-9_.-]{1,100}$")
     observed_at: datetime
@@ -338,6 +375,8 @@ class Snapshot(Strict):
     nodes: list[Node] = Field(default_factory=list, max_length=1000)
     instances: list[Instance] = Field(default_factory=list, max_length=10000)
     errors: list[str] = Field(default_factory=list, max_length=50)
+    # kubernetes-cluster: pod Events since the agent's previous report; the API dedupes repeats.
+    events: list[RuntimeEvent] = Field(default_factory=list, max_length=1000)
 
     _time = field_validator("observed_at")(not_future)
 
@@ -369,7 +408,12 @@ class Deployment(Strict):
     status: Literal["started", "succeeded", "failed"]
     commit: str = Field(default="", max_length=200)
     image_digest: str = Field(default="", max_length=1000)
+    # Image reference and artifact version the deployment rolls out; used to correlate with runtime.
+    image: str = Field(default="", max_length=1000)
+    version: str = Field(default="", max_length=300)
     release: str = Field(default="", max_length=300)
+    # One Bamboo deployment run; started/succeeded/failed of the same run share it.
+    deployment_id: str = Field(default="", pattern=r"^[a-zA-Z0-9_.:-]{0,200}$")
     build_id: str = Field(max_length=300)
     build_url: str = Field(default="", max_length=2000)
 
@@ -382,8 +426,15 @@ class Deployment(Strict):
 
 
 # Changes to these fields are runtime state, not configuration.
-STATE_FIELDS = {"status", "health", "ready", "reason", "exit_code", "last_termination_reason", "finished_at"}
+STATE_FIELDS = {"status", "health", "ready", "reason", "exit_code", "last_termination_reason", "finished_at",
+                "last_oom_at"}
 RESTART_FIELDS = {"restarts", "started_at"}
+SPOOL_OVERFLOW = re.compile(r"^agent spool overflow: dropped (\d+)")
+
+
+def gap_seconds():
+    """A source silent for longer than this (5 agent intervals, as GManSourceSilent) leaves a gap in history."""
+    return float(os.getenv("GMAN_HISTORY_GAP_SECONDS", "300"))
 
 
 def changes(before, after):
@@ -404,6 +455,8 @@ def classify(fields):
     names = {f.split(".")[0] for f in fields}
     if names - STATE_FIELDS - RESTART_FIELDS:
         return "config-changed"
+    if "last_oom_at" in names and fields["last_oom_at"][1]:
+        return "instance-oom"
     if names & RESTART_FIELDS:
         return "instance-restarted"
     return "state-changed"
@@ -681,6 +734,51 @@ def metrics_range(scope: Literal["host", "container", "gpu", "k8s_container", "k
         raise HTTPException(503, "Metrics store unavailable: " + str(error))
 
 
+def history_gap(session, base, since, value, old, new, received):
+    """Marks a period whose changes may be missing: the source was silent, or its agent dropped spooled snapshots.
+
+    One event per affected service (and one without a service for unlabeled instances), so that both the
+    service history and the audit show it; the portal collapses the copies in the audit.
+    """
+    reasons, dropped = [], 0
+    silent = (value.observed_at - since).total_seconds()
+    if silent > gap_seconds():
+        reasons.append("source-silent")
+    for error in value.errors:
+        match = SPOOL_OVERFLOW.match(error)
+        if match:
+            dropped += int(match[1])
+    if dropped:
+        reasons.append("spool-overflow")
+    if not reasons:
+        return
+    services = sorted({i["service_id"] for i in [*old.values(), *new.values()]}) or [""]
+    for service_id in services:
+        session.add(store.event({**base, "type": "history-gap", "service_id": service_id, "reasons": reasons,
+                                 "gap_from": since.isoformat(), "gap_to": base["occurred_at"],
+                                 "gap_seconds": round(silent), "dropped_snapshots": dropped},
+                                received, value.observed_at))
+
+
+def runtime_events(session, base, events, received):
+    """Kubernetes Events as history entries, once per new occurrence (uid + count/last time)."""
+    for item in {e["uid"]: e for e in events}.values():
+        last_at = datetime.fromisoformat(item["last_at"])
+        mark = session.get(store.RuntimeEventMark, (base["source_id"], item["uid"]))
+        if mark is not None and mark.count >= item["count"] and mark.last_at >= last_at:
+            continue  # already recorded: the agent reports Events again after a relist
+        occurrences = item["count"] - mark.count if mark is not None and item["count"] > mark.count else (
+            1 if mark is not None else item["count"])
+        if mark is None:
+            mark = store.RuntimeEventMark(source_id=base["source_id"], uid=item["uid"], count=0, last_at=last_at)
+            session.add(mark)
+        mark.count, mark.last_at, mark.received_at = max(mark.count, item["count"]), max(mark.last_at, last_at), received
+        fields = {key: value for key, value in item.items() if key != "type"}
+        session.add(store.event({**base, **fields, "type": "runtime-event", "event_type": item["type"],
+                                 "occurred_at": item["last_at"], "occurrences": occurrences,
+                                 "actor_source": "Kubernetes Event"}, received, last_at))
+
+
 @app.post("/api/inventory")
 def ingest(value: Snapshot, source_id: str = Depends(agent), session: Session = Depends(db)):
     if value.source_id != source_id:
@@ -698,7 +796,9 @@ def ingest(value: Snapshot, source_id: str = Depends(agent), session: Session = 
     data["received_at"] = received.isoformat()
     base = {"source_id": value.source_id, "occurred_at": data["observed_at"], "received_at": data["received_at"],
             "actor": "unknown", "actor_source": "runtime observation"}
+    since = previous.observed_at if previous else None  # save_snapshot merges the new values into `previous`
     old = store.save_snapshot(session, data, received)
+    added = []
     if previous is None:
         # The first snapshot describes pre-existing workloads; it is neither a deployment nor N changes.
         session.add(store.event({**base, "type": "source-connected", "service_id": "", "instance_count": len(new)},
@@ -717,7 +817,15 @@ def ingest(value: Snapshot, source_id: str = Depends(agent), session: Session = 
             else:
                 diff = changes(before, after)
                 event.update(type=classify(diff), changes=diff)
-            session.add(store.event(event, received, value.observed_at))
+            added.append(store.event(event, received, value.observed_at))
+            session.add(added[-1])
+        history_gap(session, base, since, value, old, new, received)
+    runtime_events(session, base, data["events"], received)
+    # Releases of every service/environment whose instances changed; the first snapshot may finish
+    # a rollout as well, since it is the first time these instances are seen.
+    touched = {(x["service_id"], x["environment"]) for x in old.values() if new.get(x["id"]) != x}
+    touched |= {(x["service_id"], x["environment"]) for x in new.values() if old.get(x["id"]) != x}
+    releases.on_snapshot(session, added, touched, received)
     session.commit()
     try:
         retention.run(engine)
@@ -733,7 +841,9 @@ def deployment(value: Deployment, session: Session = Depends(db)):
     lock(session, "ci:" + value.event_id)
     existing = session.get(store.Deployment, value.event_id)
     if existing:
-        if existing.request != request:
+        # Requests stored before optional fields were added lack them; compare with their defaults.
+        defaults = {k: f.default for k, f in Deployment.model_fields.items() if not f.is_required()}
+        if {**defaults, **existing.request} != request:
             raise HTTPException(409, "Event ID reused with different payload")
         return {"accepted": False, "reason": "duplicate"}
     received_at = datetime.now(timezone.utc)
@@ -741,6 +851,31 @@ def deployment(value: Deployment, session: Session = Depends(db)):
     session.add(store.Deployment(event_id=value.event_id, request=request, received_at=received_at))
     event = {**request, "occurred_at": request["occurred_at"] or received, "type": "deployment",
              "received_at": received, "actor_source": "Bamboo integration assertion"}
-    session.add(store.event(event, received_at, value.occurred_at or received_at))
+    row = store.event(event, received_at, value.occurred_at or received_at)
+    session.add(row)
+    release = releases.on_deployment(session, request, row, received_at)
     session.commit()
-    return {"accepted": True}
+    return {"accepted": True, "release_id": release.id}
+
+
+@app.get("/api/releases", dependencies=[Depends(reader)])
+def list_releases(service_id: str | None = Query(None, max_length=100),
+                  environment: str | None = Query(None, max_length=100),
+                  status: Literal[releases.STATUSES] | None = None,
+                  limit: int = Query(50, ge=1, le=500), before: str = Query("", max_length=200),
+                  session: Session = Depends(db)):
+    """Newest first by start; pass `next` as `before` for the next page."""
+    try:
+        return releases.listing(session, limit, service_id, environment, status, before,
+                                datetime.now(timezone.utc))
+    except ValueError:
+        raise HTTPException(422, "Invalid cursor")
+
+
+@app.get("/api/releases/{release_id}", dependencies=[Depends(reader)])
+def release_detail(release_id: int, session: Session = Depends(db)):
+    """Release with its correlated events and the current instances of its rollout."""
+    result = releases.detail(session, release_id, datetime.now(timezone.utc))
+    if result is None:
+        raise HTTPException(404, "Release not found")
+    return result

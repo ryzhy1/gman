@@ -12,6 +12,10 @@ rules:
   - apiGroups: ['']
     resources: ['pods', 'nodes']
     verbs: ['get', 'list']
+  # collect.py --watch: watch API for pods; pod Events (reason/count/time only, messages are not sent).
+  - apiGroups: ['']
+    resources: ['pods', 'events']
+    verbs: ['list', 'watch']
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRoleBinding

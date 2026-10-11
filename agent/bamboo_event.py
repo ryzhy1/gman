@@ -1,14 +1,20 @@
 """Send an explicit deployment assertion from a Bamboo deployment task.
 
 GMAN_* variables override the defaults. Without them the script reads the variables
-Bamboo exports to script tasks (bamboo_deploy_environment etc.); verify their presence
-on your Bamboo version with `env | grep ^bamboo_` in a test task.
+Bamboo exports to script tasks: every dot becomes an underscore, so bamboo.deploy.environment
+is $bamboo_deploy_environment. Documented deployment/release variables used here
+(https://confluence.atlassian.com/bamboo/bamboo-variables-289277087.html):
+deploy.environment, deploy.release (alias deploy.version), resultsUrl, triggerReason.key,
+buildResultKey (the build the release was created from) and planRepository.revision.
+ManualBuildTriggerReason.userName is documented for builds only; verify it on your Bamboo
+version with `env | grep ^bamboo_` in a test task.
 
 Monitoring must not break deployments: a failed submission prints a warning and exits 0
 unless GMAN_REQUIRED=true.
 """
 import json
 import os
+import re
 import sys
 from urllib.error import HTTPError
 from urllib.request import Request, urlopen
@@ -21,27 +27,57 @@ def var(name, *bamboo, default=""):
     return default
 
 
+def initiator():
+    """(actor, actor_kind). bamboo.triggerReason.key is documented for deployments; the manual
+    trigger user name only for builds, so it is trusted only when the trigger was manual."""
+    if var("ACTOR"):
+        return var("ACTOR"), var("ACTOR_KIND", default="human")
+    trigger = var("TRIGGER_REASON", "triggerReason_key")
+    user = var("BAMBOO_USER", "ManualBuildTriggerReason_userName")
+    if "Scheduled" in trigger:
+        return "bamboo-schedule", var("ACTOR_KIND", default="schedule")
+    if user and (not trigger or "Manual" in trigger):
+        return user, var("ACTOR_KIND", default="human")
+    # Triggered automatically (e.g. after a successful build): a user name, if any, is the build's.
+    return "unknown", var("ACTOR_KIND", default="unknown")
+
+
+def deployment_id(results_url):
+    """One Bamboo deployment run: deploymentResultId from the deployment results URL."""
+    if var("DEPLOYMENT_ID"):
+        return var("DEPLOYMENT_ID")
+    found = re.search(r"[?&]deploymentResultId=(\d+)", results_url)
+    return "bamboo-deploy-" + found.group(1) if found else ""
+
+
 def payload():
     status = var("DEPLOYMENT_STATUS")
     environment = var("ENVIRONMENT", "deploy_environment")
     build_id = var("BUILD_ID", "buildResultKey")
-    release = var("RELEASE", "deploy_release")
-    actor = var("ACTOR", "ManualBuildTriggerReason_userName")
+    release = var("RELEASE", "deploy_release", "deploy_version")
+    build_url = var("BUILD_URL", "resultsUrl")
+    run = re.sub(r"[^a-zA-Z0-9_.:-]", "-", deployment_id(build_url))[:150]
+    actor, actor_kind = initiator()
     if not (status and environment and build_id and var("SERVICE_ID")):
         raise ValueError("GMAN_SERVICE_ID, GMAN_DEPLOYMENT_STATUS, environment and build ID are required")
+    # Stable across retries of the same step, distinct for started/succeeded/failed. With a
+    # deployment result ID a redeploy of the same release is a new event, not a duplicate.
+    default_id = (f"bamboo:{run}:{status}" if run
+                  else ":".join(filter(None, ("bamboo", build_id, release, environment, status))))
     result = {
-        # Stable across retries of the same step, distinct for started/succeeded/failed.
-        "event_id": var("EVENT_ID", default=":".join(filter(None, ("bamboo", build_id, release, environment, status)))),
+        "event_id": var("EVENT_ID", default=default_id),
+        "deployment_id": run,
         "service_id": var("SERVICE_ID"),
         "environment": environment,
         "build_id": build_id,
-        "build_url": var("BUILD_URL", "resultsUrl"),
+        "build_url": build_url,
         "release": release,
+        "version": var("VERSION"),
         "status": status,
-        "actor": actor or "unknown",
-        # A Bamboo user name means a person triggered it; otherwise the trigger is not asserted.
-        "actor_kind": var("ACTOR_KIND", default="human" if actor else "unknown"),
-        "commit": var("COMMIT", "planRepository_revision"),
+        "actor": actor,
+        "actor_kind": actor_kind,
+        "commit": var("COMMIT", "planRepository_revision", "planRepository_1_revision"),
+        "image": var("IMAGE"),
         "image_digest": var("IMAGE_DIGEST"),
     }
     result["event_id"] = "".join(ch if ch.isalnum() or ch in "_.:-" else "-" for ch in result["event_id"])[:200]
