@@ -7,13 +7,17 @@
 #                                GMAN_ALERT_SMTP_SMARTHOST (host:port); optional GMAN_ALERT_SMTP_USERNAME,
 #                                GMAN_ALERT_SMTP_PASSWORD, GMAN_ALERT_SMTP_REQUIRE_TLS (default true).
 #   GMAN_ALERTMANAGER_URL        address of Alertmanager as people reach it, for links in notifications.
+#   GMAN_ALERT_HEARTBEAT_URL     dead man's switch: ping URL of an external check (healthchecks.io, Dead Man's
+#                                Snitch, Uptime Kuma push monitor...) that alerts when pings stop. Receives only
+#                                GManWatchdog as a webhook POST every ~5 minutes; empty = no heartbeat is sent.
 # Check without starting: alertmanager.sh --render <file>; then amtool check-config <file>.
 set -eu
 here=$(dirname "$0")
 
 # Values are written as YAML double-quoted scalars and must be single-line.
-for name in GMAN_ALERT_WEBHOOK_URL GMAN_ALERT_EMAIL_TO GMAN_ALERT_EMAIL_FROM GMAN_ALERT_SMTP_SMARTHOST \
-            GMAN_ALERT_SMTP_USERNAME GMAN_ALERT_SMTP_PASSWORD; do
+for name in GMAN_ALERT_WEBHOOK_URL GMAN_ALERT_HEARTBEAT_URL GMAN_ALERT_EMAIL_TO GMAN_ALERT_EMAIL_FROM \
+            GMAN_ALERT_SMTP_SMARTHOST GMAN_ALERT_SMTP_USERNAME GMAN_ALERT_SMTP_PASSWORD; do
+  value=
   eval "value=\${$name:-}"
   case $value in *"
 "*) echo "alertmanager.sh: $name must be a single line" >&2; exit 1 ;; esac
@@ -46,6 +50,12 @@ render() {
       printf '        auth_password: %s\n' "$(q "${GMAN_ALERT_SMTP_PASSWORD:-}")"
     fi
     printf '        send_resolved: true\n'
+  fi
+  # Always present: alertmanager.yaml routes GManWatchdog here; without a URL the heartbeat is discarded.
+  printf '  - name: gman-heartbeat\n'
+  if [ -n "${GMAN_ALERT_HEARTBEAT_URL:-}" ]; then
+    printf '    webhook_configs:\n'
+    printf '      - url: %s\n        send_resolved: false\n' "$(q "$GMAN_ALERT_HEARTBEAT_URL")"
   fi
 }
 

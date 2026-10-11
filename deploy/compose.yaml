@@ -97,6 +97,8 @@ services:
     entrypoint: ["/bin/sh", "/etc/gman-alerts/alertmanager.sh"]
     environment:
       GMAN_ALERT_WEBHOOK_URL: ${GMAN_ALERT_WEBHOOK_URL:-}
+      # Dead man's switch: ping URL of an external check for GManWatchdog (README, «Внешний мониторинг»).
+      GMAN_ALERT_HEARTBEAT_URL: ${GMAN_ALERT_HEARTBEAT_URL:-}
       GMAN_ALERT_EMAIL_TO: ${GMAN_ALERT_EMAIL_TO:-}
       GMAN_ALERT_EMAIL_FROM: ${GMAN_ALERT_EMAIL_FROM:-}
       GMAN_ALERT_SMTP_SMARTHOST: ${GMAN_ALERT_SMTP_SMARTHOST:-}

@@ -4,6 +4,8 @@
 # `deploy/pki/issue.sh cluster <K8S_CLUSTER_NAME>`: the gateway sets k8s.cluster.name from its CN.
 # host.id is the node name: GMan joins node metrics with nodes from the inventory agent.
 # kube-state-metrics (deploy/kube-state-metrics.yaml) is scraped by the Collector of its node.
+# Persistent sending queue: hostPath /var/lib/gman-otel on every node (created by the init container, owned by
+# the Collector's uid 10001), so unsent batches survive a pod restart, a DaemonSet rollout and a node reboot.
 apiVersion: v1
 kind: Namespace
 metadata:
@@ -128,6 +130,15 @@ data:
                 - source_labels: [__meta_kubernetes_pod_container_port_name]
                   regex: http-metrics
                   action: keep
+    extensions:
+      # Persistent sending queue on the node (volume queue below): README, «Очередь Collector на диске».
+      file_storage:
+        directory: /var/lib/gman-otel
+        compaction:
+          on_start: true
+          on_rebound: true
+          # Defaults to /var/lib/otelcol/file_storage, which does not exist in the read-only root filesystem.
+          directory: /var/lib/gman-otel
     processors:
       memory_limiter:
         check_interval: 1s
@@ -177,9 +188,19 @@ data:
           ca_file: /etc/gman/ca.pem
           cert_file: /etc/gman/client.pem
           key_file: /etc/gman/client-key.pem
-        sending_queue: {queue_size: 1000}
-        retry_on_failure: {enabled: true}
+        # Queue on disk, capped by size of the serialized data; when full, new batches are dropped.
+        sending_queue:
+          storage: file_storage
+          sizer: bytes
+          queue_size: 268435456
+        # Retry until the gateway is back (the default drops a batch after 5 minutes).
+        retry_on_failure:
+          enabled: true
+          initial_interval: 5s
+          max_interval: 60s
+          max_elapsed_time: 0
     service:
+      extensions: [file_storage]
       pipelines:
         metrics:
           receivers: [host_metrics, kubelet_stats, prometheus/gpu]
@@ -208,6 +229,21 @@ spec:
       dnsPolicy: ClusterFirstWithHostNet
       # Run on GPU and control-plane nodes too.
       tolerations: [{operator: Exists}]
+      # hostPath DirectoryOrCreate creates the queue directory as root:root 0755; the Collector runs as 10001.
+      initContainers:
+        - name: queue-dir
+          image: busybox:1.37
+          command: ['sh', '-c', 'chown 10001:10001 /var/lib/gman-otel && chmod 0700 /var/lib/gman-otel']
+          securityContext:
+            runAsUser: 0
+            readOnlyRootFilesystem: true
+            allowPrivilegeEscalation: false
+            capabilities: {drop: [ALL], add: [CHOWN, FOWNER]}
+          resources:
+            requests: {cpu: 10m, memory: 16Mi}
+            limits: {cpu: 100m, memory: 32Mi}
+          volumeMounts:
+            - {name: queue, mountPath: /var/lib/gman-otel}
       containers:
         - name: otelcol
           image: otel/opentelemetry-collector-contrib:0.162.0
@@ -231,6 +267,7 @@ spec:
             - {name: config, mountPath: /etc/otelcol}
             - {name: tls, mountPath: /etc/gman, readOnly: true}
             - {name: hostfs, mountPath: /hostfs, readOnly: true, mountPropagation: HostToContainer}
+            - {name: queue, mountPath: /var/lib/gman-otel}
       volumes:
         - name: config
           configMap: {name: gman-otel}
@@ -238,3 +275,5 @@ spec:
           secret: {secretName: gman-otel-tls}
         - name: hostfs
           hostPath: {path: /}
+        - name: queue
+          hostPath: {path: /var/lib/gman-otel, type: DirectoryOrCreate}

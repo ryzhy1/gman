@@ -8,8 +8,8 @@
 # The gateway re-exports `up` of the Collectors' own scrapes (DCGM, kube-state-metrics) with exported_job set:
 # the gateway's own target is up{job="otel", exported_job=""}.
 # Labels used by Alertmanager (deploy/alerts/alertmanager.yaml):
-#   severity  critical | warning
-#   scope     pipeline | node | gpu | instance | workload | release | tls: inhibition suppresses gpu/instance
+#   severity  critical | warning | none (GManWatchdog only: the dead man's switch, routed to its own receiver)
+#   scope     pipeline | node | gpu | instance | workload | release | tls | heartbeat: inhibition suppresses gpu/instance
 #             alerts of a node that is down (GManNodeDown, GManK8sNodeNotReady) and instance alerts of a silent
 #             inventory source.
 # runbook_url opens the portal's alerts page; GMAN_PORTAL_URL reaches it as external label gman_portal.
@@ -73,6 +73,21 @@ groups:
             gman:gpu_model:info * on (model) group_left () gman:gpu_model_temperature_threshold_celsius{severity="critical"})
           or max by (host_id, UUID) (gman:gpu_temperature_celsius:max) * 0 + 90
         labels: {severity: critical}
+
+  # Dead man's switch: always firing. Alertmanager sends it every ~5 minutes to the external heartbeat service
+  # only (GMAN_ALERT_HEARTBEAT_URL, deploy/alerts/alertmanager.sh), which alerts when the pings stop: the server,
+  # Prometheus, rule evaluation, Alertmanager or its outbound network is down. Not shown in the portal.
+  - name: gman-heartbeat
+    rules:
+      - alert: GManWatchdog
+        expr: vector(1)
+        labels: {severity: none, scope: heartbeat}
+        annotations:
+          summary: Сигнал жизни конвейера алертов GMan
+          description: >-
+            Срабатывает всегда. Внешний сервис (GMAN_ALERT_HEARTBEAT_URL) поднимает тревогу, если сигнал перестал
+            приходить: сервер GMan, Prometheus или Alertmanager не работают либо нет исходящей сети.
+          runbook_url: '{{ $externalLabels.gman_portal }}/#alerts/GManWatchdog'
 
   - name: gman-pipeline
     rules:

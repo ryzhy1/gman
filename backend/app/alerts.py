@@ -20,7 +20,7 @@ def base_url():
 
 
 def active():
-    """Firing alerts that are neither silenced nor inhibited, critical first, then oldest first."""
+    """Firing alerts that are neither silenced nor inhibited (without the heartbeat), critical first, then oldest first."""
     params = {"active": "true", "silenced": "false", "inhibited": "false"}
     try:
         response = client.get(base_url() + "/api/v2/alerts", params=params)
@@ -32,6 +32,9 @@ def active():
     result = []
     for item in body:
         labels, annotations = item.get("labels") or {}, item.get("annotations") or {}
+        # GManWatchdog (the dead man's switch) always fires; it is for the external heartbeat check, not people.
+        if labels.get("scope") == "heartbeat":
+            continue
         result.append({"name": labels.get("alertname", ""), "starts_at": item.get("startsAt"),
                        "labels": {k: labels[k] for k in LABELS if labels.get(k)},
                        "summary": annotations.get("summary", ""), "description": annotations.get("description", ""),

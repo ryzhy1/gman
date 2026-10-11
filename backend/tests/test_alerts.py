@@ -127,7 +127,10 @@ def test_active_alerts_are_read_from_alertmanager(client, alertmanager):
              "annotations": {"summary": "hot", "runbook_url": "https://gman.example/#alerts/GManGpuOverheating"},
              "startsAt": "2026-10-11T10:00:00Z"},
             {"labels": {"alertname": "GManSourceSilent", "severity": "critical", "source_id": "s"},
-             "annotations": {"summary": "silent"}, "startsAt": "2026-10-11T11:00:00Z"}])
+             "annotations": {"summary": "silent"}, "startsAt": "2026-10-11T11:00:00Z"},
+            # The always-firing dead man's switch is not shown.
+            {"labels": {"alertname": "GManWatchdog", "severity": "none", "scope": "heartbeat"},
+             "annotations": {"summary": "heartbeat"}, "startsAt": "2026-10-11T09:00:00Z"}])
     alertmanager(handler)
     data = client.get("/api/alerts", headers=auth("read")).json()
     assert data["error"] is None

@@ -78,9 +78,18 @@
     GManTlsCrlExpired (подавляет алерты отсутствия телеметрии), GManTlsCertExpiring (30/7 дней),
     GManTlsCertExpired, GManTlsFileError; runbook в портале, unit-тесты promtool.
 
+16. Очередь Collector на диске и внешний мониторинг сервера: Collector узлов (Docker-хост и
+    DaemonSet) держит sending_queue в file_storage (256 МиБ по объему, повторы без предела по
+    времени, compaction), systemd StateDirectory /var/lib/gman-otelcol, в Kubernetes hostPath
+    /var/lib/gman-otel с init-контейнером для прав. Gateway остался pull-экспортером без очереди.
+    Dead man's switch: всегда активный GManWatchdog уходит отдельным маршрутом только на
+    GMAN_ALERT_HEARTBEAT_URL (healthchecks.io и аналоги) каждые 5 минут и не показывается в
+    портале; deploy/monitoring/probe.sh для cron на другой машине (healthz, API, сроки
+    сертификатов 443 и 4317).
+
 Проверено:
 - Тесты: 195 passed на PostgreSQL 17 (включая запросы истории конфигураций и тест
-  конкурентности; прогон до п. 15), 203 passed и 1 skipped на SQLite; миграции upgrade → downgrade base →
+  конкурентности; прогон до п. 15), 205 passed и 1 skipped на SQLite; миграции upgrade → downgrade base →
   upgrade и `alembic check` на PostgreSQL 17. Frontend: `npm run build`.
 - Kubernetes watch и Events — на fixtures потоков (ADDED/MODIFIED/DELETED, BOOKMARK, ERROR 410,
   сбой kubectl, HTTP 410 in-cluster), Docker `oom` — на fixtures событий; правило OOM —
@@ -107,6 +116,13 @@
   просроченный DER), созданных cryptography; битый, пустой, отсутствующий файл и путь ключа
   (не открывается); `promtool test rules` для порогов 30/7 дней и истечения.
 - SSO — против mock IdP в тестах; bamboo_event.py — против локального API; чтение AMD sysfs.
+- Очередь на диске: otelcol-contrib 0.162.0 `validate` всех конфигураций; прогон Collector →
+  gateway, gateway остановлен, Collector перезапущен, gateway запущен — точки, собранные до
+  перезапуска, доставлены с исходными метками времени. Dead man's switch: Prometheus 3.5.0 +
+  Alertmanager 0.28.1 с конфигурацией из alertmanager.sh — сигнал на тестовый приемник сразу и
+  повтор через 5–6 минут, в общий webhook не попадает; `amtool config routes test`. probe.sh —
+  shellcheck и локальные HTTPS-серверы (истекающий сертификат, чужой CA, недоступность, mTLS-порт).
+  Не проверены: systemd-юнит и DaemonSet на реальных узлах, реальный healthchecks.io.
 - Привязка OTLP к сертификату: nginx 1.31 (OTLP-блок deploy/nginx/gman.conf) + otelcol-contrib
   0.162.0 (deploy/otel-gateway.prod.yaml) + отправляющие otelcol с сертификатами issue.sh:
   server-01 → host.id=server-01 принят; сертификат server-01 с host.id=server-02 и
@@ -206,7 +222,12 @@ deploy/alerts/alertmanager.sh --render /tmp/am.yml && amtool check-config /tmp/a
 - ~~Projected token на каждый GPU-узел в deploy/gpu-attribution-k8s.yaml~~ Сделано (п. 13, TokenReview).
 - ~~Выгрузка бэкапов за пределы сервера; регулярная проверка восстановления~~ Сделано (п. 13)
   (BACKUP_UPLOAD_CMD, `--restore-check`); подключить реальное хранилище.
-- Внешний мониторинг самого сервера GMan; постоянная очередь Collector на диске (file_storage).
+- ~~Внешний мониторинг самого сервера GMan; постоянная очередь Collector на диске (file_storage).~~
+  Сделано (п. 16: GManWatchdog → GMAN_ALERT_HEARTBEAT_URL, probe.sh, file_storage на узлах).
+  Остается: история за время недоступности gateway не восполняется — pull-экспортер gateway
+  отдает Prometheus только последнее значение ряда; нужна push-доставка (remote write или OTLP
+  receiver Prometheus с out_of_order_time_window) с переносом `up`/relabel-логики правил.
+  Самонаблюдение Collector узлов (otelcol_exporter_queue_size, enqueue_failed) не собирается.
 
 Inventory и аудит:
 - ~~`--watch` для Kubernetes (watch API вместо опроса раз в минуту), Kubernetes Events.~~ Сделано (п. 12).

@@ -113,3 +113,40 @@ def test_watched_tls_files_are_mounted_into_the_api_without_keys():
     # The CRL nginx checks OTLP clients against is among them; private keys never reach the API container.
     assert "/etc/gman/tls/crl.pem" in watched and "ssl_crl /etc/nginx/tls/crl.pem;" in (DEPLOY / "nginx/gman.conf").read_text()
     assert not any("key" in source or "key" in target for source, target in mounted)
+
+
+def test_node_collectors_queue_on_disk():
+    # Persistent sending queue (file_storage): the extension is enabled, the exporter's queue uses it, compaction
+    # writes into the same writable directory (its default /var/lib/otelcol is not writable) and retries do not
+    # give up after the default 5 minutes. Verified with otelcol-contrib 0.162.0 (README, «Очередь Collector на диске»).
+    agent = (DEPLOY / "otel-agent.example.yaml").read_text()
+    k8s = (DEPLOY / "otel-k8s.yaml").read_text()
+    for config, directory in ((agent, "${env:GMAN_OTEL_STORAGE_DIR:-/var/lib/gman-otelcol}"), (k8s, "/var/lib/gman-otel")):
+        assert config.count(f"directory: {directory}") == 2
+        assert "extensions: [file_storage]" in config
+        assert re.search(r"sending_queue:\n\s+storage: file_storage\n\s+sizer: bytes\n\s+queue_size: \d+", config)
+        assert "max_elapsed_time: 0" in config
+    unit = (DEPLOY / "systemd/gman-otelcol.service").read_text()
+    assert "StateDirectory=gman-otelcol" in unit and "ProtectSystem=strict" in unit
+    # Kubernetes: the queue survives pod restarts on the node, owned by the Collector's uid.
+    assert "hostPath: {path: /var/lib/gman-otel, type: DirectoryOrCreate}" in k8s
+    assert "{name: queue, mountPath: /var/lib/gman-otel}" in k8s and "chown 10001:10001 /var/lib/gman-otel" in k8s
+
+
+def test_watchdog_goes_only_to_the_heartbeat_receiver():
+    rules = (DEPLOY / "alerts/rules.yaml").read_text()
+    watchdog = rules[rules.index("- alert: GManWatchdog"):]
+    assert "expr: vector(1)" in watchdog[:200] and "scope: heartbeat" in watchdog[:300]
+    config = (DEPLOY / "alerts/alertmanager.yaml").read_text()
+    routes = config[config.index("  routes:"):config.index("inhibit_rules:")]
+    # First child route, no continue: the heartbeat never reaches people, and nothing else reaches the heartbeat.
+    first = routes[routes.index("    - matchers:"):]
+    first = first[:first.index("    - matchers:", 1)]
+    assert "['alertname=\"GManWatchdog\"']" in first and "receiver: gman-heartbeat" in first
+    assert "repeat_interval: 5m" in first and "continue:" not in routes
+    # No inhibition rule can hide it: none targets scope heartbeat or severity none.
+    assert "heartbeat" not in config[config.index("inhibit_rules:"):] and 'severity="none"' not in config
+    script = (DEPLOY / "alerts/alertmanager.sh").read_text()
+    assert "printf '  - name: gman-heartbeat\\n'" in script and "GMAN_ALERT_HEARTBEAT_URL" in script
+    compose = (DEPLOY / "compose.yaml").read_text()
+    assert "GMAN_ALERT_HEARTBEAT_URL: ${GMAN_ALERT_HEARTBEAT_URL:-}" in compose

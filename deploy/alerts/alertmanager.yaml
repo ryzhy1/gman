@@ -11,6 +11,15 @@ route:
   group_interval: 5m
   repeat_interval: 4h
   routes:
+    # Dead man's switch (GManWatchdog): first and without continue, so it reaches only the heartbeat receiver and
+    # never people. Alone in its group; resent every repeat_interval (on a group_interval tick: every 5–6 minutes).
+    # No inhibition rule matches it (severity none). Set the external check's period to 5 min, grace to 10 min.
+    - matchers: ['alertname="GManWatchdog"']
+      receiver: gman-heartbeat
+      group_by: [alertname]
+      group_wait: 0s
+      group_interval: 1m
+      repeat_interval: 5m
     - matchers: ['severity="critical"']
       receiver: gman
       repeat_interval: 1h

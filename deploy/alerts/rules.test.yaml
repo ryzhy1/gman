@@ -27,6 +27,22 @@ tests:
         alertname: GManApiMetricsDown
         exp_alerts: []
 
+  - name: dead man's switch fires without any input
+    external_labels: {gman_portal: https://gman.example}
+    interval: 30s
+    input_series: []
+    alert_rule_test:
+      - eval_time: 0m
+        alertname: GManWatchdog
+        exp_alerts:
+          - exp_labels: {severity: none, scope: heartbeat}
+            exp_annotations:
+              summary: Сигнал жизни конвейера алертов GMan
+              description: >-
+                Срабатывает всегда. Внешний сервис (GMAN_ALERT_HEARTBEAT_URL) поднимает тревогу, если сигнал перестал
+                приходить: сервер GMan, Prometheus или Alertmanager не работают либо нет исходящей сети.
+              runbook_url: https://gman.example/#alerts/GManWatchdog
+
   - name: inventory source silent
     external_labels: {gman_portal: https://gman.example}
     interval: 1m

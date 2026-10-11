@@ -478,7 +478,11 @@ BMC/IPMI/Redfish, NVLink-счетчики, retired pages, SM/tensor profiling, �
 Сервер принимает снимки идемпотентно и не затирает новый старым; события получают время
 observed_at, а не время доставки.
 
-Collector: memory_limiter, batch, in-memory sending_queue и retry_on_failure.
+Collector узлов: memory_limiter, batch, sending_queue на диске (file_storage: 256 МиБ, переживает
+перезапуск Collector и узла) и retry_on_failure без предела по времени. Gateway отдает метрики
+Prometheus pull-экспортером: после восстановления связи накопленная очередь доходит до gateway,
+но Prometheus видит только последнее значение каждого ряда — история за время простоя не
+восполняется (счетчики не теряют приращение).
 Пробел в истории отмечается явно: если между принятыми снимками источника прошло больше
 GMAN_HISTORY_GAP_SECONDS (300 с — пять интервалов агента, как GManSourceSilent) или снимок
 сообщает «agent spool overflow», API пишет history-gap для каждого сервиса с экземплярами на
@@ -486,10 +490,13 @@ GMAN_HISTORY_GAP_SECONDS (300 с — пять интервалов агента,
 за период могут быть неполными», в журнале аудита копии одного пробела сворачиваются.
 Снимки, отправленные из spool после восстановления связи, пробела не образуют.
 
-Отличие от проекта: постоянная очередь Collector на диске (file_storage) не настроена.
-Самонаблюдение pipeline ограничено up{job} gateway и API
-и метриками источников; lag, dropped и размер очередей Collector не собираются.
-Внешнего мониторинга самого сервера GMan нет.
+Отличие от проекта: история метрик за время недоступности gateway не восполняется (нужна
+push-доставка в Prometheus). Самонаблюдение pipeline ограничено up{job} gateway и API
+и метриками источников; lag, dropped и размер очередей Collector узлов не собираются.
+Внешний мониторинг сервера GMan: dead man's switch — всегда активный GManWatchdog, который
+Alertmanager отдельным маршрутом каждые 5 минут шлет на GMAN_ALERT_HEARTBEAT_URL (внешний
+сервис тревожит, когда сигналы прекращаются: сервер, Prometheus или Alertmanager не работают),
+и deploy/monitoring/probe.sh для cron на другой машине (healthz, API, сроки сертификатов).
 
 Предварительный бюджет для измерений, не гарантия: узловой Collector 0.25–0.5 CPU и
 256–512 MiB RAM (systemd MemoryMax=512M); центральный стенд — 4 vCPU и 8–16 GiB RAM.
