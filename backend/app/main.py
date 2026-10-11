@@ -1,4 +1,4 @@
-"""Inventory API. Credentials are scoped independently for readers, agents and CI."""
+"""Inventory API. Humans sign in via OIDC (auth.py) or shared Bearer tokens; agents and CI have their own tokens."""
 import hashlib
 import hmac
 import json
@@ -7,15 +7,16 @@ import os
 import re
 from contextlib import asynccontextmanager
 from datetime import datetime, timezone
-from typing import Literal
+from typing import Annotated, Literal
 from urllib.parse import urlsplit
 
-from fastapi import Depends, FastAPI, Header, HTTPException, Path, Query
-from fastapi.responses import JSONResponse
+from fastapi import Depends, FastAPI, Header, HTTPException, Path, Query, Request
+from fastapi.responses import JSONResponse, RedirectResponse
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 from sqlalchemy import text
 from sqlalchemy.orm import Session
 
+from . import auth
 from . import configs
 from . import db as store
 from . import metrics
@@ -47,12 +48,42 @@ def authenticate(authorization, expected):
         raise HTTPException(401, "Invalid credential")
 
 
-def reader(authorization: str = Header(default="")):
-    authenticate(authorization, os.getenv("GMAN_READ_TOKEN"))
+def token_principal(authorization):
+    """Shared Bearer tokens for API automation (and for people while SSO is not configured)."""
+    if matches(authorization, os.getenv("GMAN_ADMIN_TOKEN")):
+        return auth.Principal(kind="token", role="admin", subject="GMAN_ADMIN_TOKEN")
+    if matches(authorization, os.getenv("GMAN_READ_TOKEN")):
+        return auth.Principal(kind="token", role="viewer", subject="GMAN_READ_TOKEN")
+    return None
 
 
-def admin(authorization: str = Header(default="")):
-    authenticate(authorization, os.getenv("GMAN_ADMIN_TOKEN"))
+def principal(request: Request, authorization: str = Header(default=""), session: Session = Depends(db)):
+    """An explicit Authorization header is authoritative; otherwise the SSO session cookie is used."""
+    if authorization:
+        found = token_principal(authorization)
+    else:
+        found = auth.from_session(session, request.cookies.get(auth.session_cookie())) if auth.enabled() else None
+    if found is None:
+        raise HTTPException(401, "Invalid credential")
+    return found
+
+
+def reader(user: auth.Principal = Depends(principal)):
+    return user
+
+
+def editor(user: auth.Principal = Depends(principal), x_csrf_token: str = Header(default="")):
+    """Mutating requests: CSRF token for cookie sessions, then at least the service owner role.
+    A read token stays a 401 for writes: tokens are scoped credentials, not identities."""
+    if user.kind == "token":
+        if user.role != "admin":
+            raise HTTPException(401, "Invalid credential")
+        return user
+    if not auth.csrf_ok(user, x_csrf_token):
+        raise HTTPException(403, "CSRF token missing or invalid")
+    if not user.at_least("owner"):
+        raise HTTPException(403, "Read-only role")
+    return user
 
 
 def ci(authorization: str = Header(default="")):
@@ -129,6 +160,9 @@ class Service(Strict):
     splunk: str = Field(default="", max_length=2000)
     bamboo: str = Field(default="", max_length=2000)
     logs: Logs | None = None
+    # Who may edit this entry with the service owner role: IdP subject, email, username or "group:<name>".
+    # Kept in services.extra (no migration); only platform admins change it.
+    owners: list[Annotated[str, Field(min_length=1, max_length=300)]] = Field(default_factory=list, max_length=50)
 
     _urls = field_validator("repository", "grafana", "splunk", "bamboo")(http_url)
 
@@ -368,6 +402,8 @@ def classify(fields):
 async def lifespan(app):
     # Migrating here rather than in the container command keeps one code path for Docker,
     # local runs and tests; concurrent replicas are serialized by a PostgreSQL advisory lock.
+    auth.check_config()
+    auth.reset()
     store.migrate(engine)
     yield
 
@@ -386,16 +422,115 @@ def health():
     return {"status": "ok"}
 
 
-@app.put("/api/services/{service_id}", dependencies=[Depends(admin)])
-def put_service(service_id: str, value: Service, session: Session = Depends(db)):
+def set_cookie(response, name, value, max_age, path="/"):
+    response.set_cookie(name, value, max_age=max_age, path=path, httponly=True, secure=auth.secure(), samesite="lax")
+
+
+def drop_cookie(response, name, path="/"):
+    response.delete_cookie(name, path=path, secure=auth.secure(), httponly=True, samesite="lax")
+
+
+@app.get("/api/auth/info")
+def auth_info():
+    """Public: tells the portal whether to redirect to SSO or to ask for a token."""
+    return {"oidc": auth.enabled()}
+
+
+@app.get("/api/auth/login")
+def login(next: str = Query("/", max_length=2000)):
+    if not auth.enabled():
+        raise HTTPException(404, "SSO is not configured")
+    try:
+        url, state = auth.start_login(next)
+    except auth.Failure as error:
+        logger.warning("SSO login unavailable: %s", error)
+        raise HTTPException(503, "Identity provider unavailable")
+    response = RedirectResponse(url, status_code=302)
+    set_cookie(response, auth.LOGIN_COOKIE, state, auth.LOGIN_TTL, path="/api/auth")
+    return response
+
+
+@app.get("/api/auth/callback")
+def callback(request: Request, code: str = Query("", max_length=4000), state: str = Query("", max_length=500),
+             error: str = Query("", max_length=200), session: Session = Depends(db)):
+    if not auth.enabled():
+        raise HTTPException(404, "SSO is not configured")
+    cookie = request.cookies.get(auth.LOGIN_COOKIE)
+    try:
+        if error:
+            # Without a matching state the error may come from a forged link; treat it as a bad state.
+            pending = auth.unsign(cookie or "") or {}
+            if not state or pending.get("state") != state:
+                raise auth.Failure("state", "IdP error without valid state")
+            raise auth.Failure("idp_error", "IdP returned error " + error)
+        value, target = auth.complete_login(session, code, state, cookie)
+    except auth.Failure as failure:
+        logger.warning("SSO sign-in failed: %s", failure)
+        if failure.code == "state":
+            raise HTTPException(400, "Login state missing, expired or mismatched; start the sign-in again")
+        response = RedirectResponse("/?auth_error=" + failure.code, status_code=302)
+        drop_cookie(response, auth.LOGIN_COOKIE, path="/api/auth")
+        return response
+    response = RedirectResponse(target, status_code=302)
+    drop_cookie(response, auth.LOGIN_COOKIE, path="/api/auth")
+    set_cookie(response, auth.session_cookie(), value, int(auth.session_hours() * 3600))
+    return response
+
+
+@app.post("/api/auth/logout")
+def logout(user: auth.Principal = Depends(principal), x_csrf_token: str = Header(default=""),
+           session: Session = Depends(db)):
+    if user.kind != "session":
+        raise HTTPException(400, "Bearer tokens have no session to end")
+    if not auth.csrf_ok(user, x_csrf_token):
+        raise HTTPException(403, "CSRF token missing or invalid")
+    auth.end_session(session, user)
+    response = JSONResponse({"redirect": auth.logout_url()})
+    drop_cookie(response, auth.session_cookie())
+    return response
+
+
+@app.get("/api/me")
+def me(user: auth.Principal = Depends(reader)):
+    """Who is signed in and what the portal may offer them; identities are matched against service owners."""
+    return {"auth": "oidc" if user.kind == "session" else "token", "role": user.role, "subject": user.subject,
+            "email": user.email, "name": user.name or user.username or user.email or user.subject,
+            "identities": user.identities() if user.kind == "session" else [],
+            "csrf_token": user.csrf_token or None}
+
+
+@app.put("/api/services/{service_id}")
+def put_service(service_id: str, value: Service, user: auth.Principal = Depends(editor),
+                session: Session = Depends(db)):
+    """Platform admins create and edit any entry; service owners edit entries listing them, except `owners`."""
     if service_id != value.id:
         raise HTTPException(422, "ID mismatch")
     lock(session, "service:" + value.id)
+    before = store.service(session, value.id)
     # Optional nested sections (logs) are omitted when unset rather than stored as null.
-    data = value.model_dump(exclude_none=True)
-    store.put_service(session, data)
+    after = value.model_dump(exclude_none=True)
+    if user.role != "admin":
+        if before is None:
+            raise HTTPException(403, "Only platform admins register new services")
+        if not user.can_edit(before):
+            raise HTTPException(403, "You are not an owner of this service")
+        if sorted(before.get("owners") or []) != sorted(value.owners):
+            raise HTTPException(403, "Only platform admins change service owners")
+    store.put_service(session, after)
+    diff = changes(before or {}, after)
+    if before is None or diff:
+        received = datetime.now(timezone.utc)
+        human = user.kind == "session"
+        # A shared admin token may be used by a person or a script: its actor is not a known human.
+        session.add(store.event({
+            "type": "service-created" if before is None else "service-updated", "service_id": value.id,
+            "actor": user.actor, "actor_kind": "human" if human else "unknown",
+            "actor_source": "OIDC session" if human else "shared admin token",
+            "actor_subject": user.subject, "actor_role": user.role,
+            "occurred_at": received.isoformat(), "received_at": received.isoformat(), "changes": diff},
+            received, received))
     session.commit()
-    return data
+    return after
 
 
 @app.get("/api/overview", dependencies=[Depends(reader)])

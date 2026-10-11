@@ -8,5 +8,6 @@
   "grafana": "",
   "splunk": "",
   "bamboo": "",
-  "logs": {"splunk": {"index": "", "query": ""}}
+  "logs": {"splunk": {"index": "", "query": ""}},
+  "owners": []
 }

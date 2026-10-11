@@ -39,8 +39,11 @@
    GPU-узле (cgroup v1/v2, systemd/cgroupfs, containerd/CRI-O/cri-dockerd, static pod),
    источник узла без экземпляров, DaemonSet deploy/gpu-attribution-k8s.yaml, процессы в
    карточке узла и экземплярах сервиса; GPU по pod-ам из меток DCGM на вкладке «Ресурсы».
+10. SSO (OIDC) и роли: вход Authorization Code + PKCE через API, серверные сессии
+    (миграция 0003), CSRF, роли из групп IdP, владельцы сервиса в поле `owners`,
+    редактор записи каталога в карточке, автор изменений каталога в журнале.
 
-Тесты: 101 passed, 1 skipped (тест конкурентности только для PostgreSQL).
+Тесты: 127 passed, 1 skipped (тест конкурентности только для PostgreSQL).
 Frontend: `npm run build` проходит. Подробности — в README.
 
 ## Подготовка на новой машине
@@ -102,7 +105,11 @@ kubectl), сервис backup в контейнере (busybox sh/find).
 
 ## Дальше по плану
 
-- SSO (OIDC) и роли viewer / service owner / platform admin вместо общего токена.
+- ~~SSO (OIDC) и роли viewer / service owner / platform admin вместо общего токена.~~
+  Сделано: вход Authorization Code + PKCE через API, серверные сессии (миграция 0003),
+  CSRF, роли из групп IdP, владельцы сервиса в поле `owners`, автор изменений каталога
+  в журнале. Bearer-токены остаются для автоматизации и режима без SSO. Проверено
+  против mock IdP в тестах; с настоящим IdP (Keycloak/AD FS/Okta) еще не проверялось.
 - ~~Атрибуция процессов GPU в Kubernetes (PID → pod)~~ — сделано (п. 9 выше). Не проверено
   в реальном кластере: nvidia-smi через NVIDIA runtime без запроса GPU, список процессов
   от non-root, PSA privileged для hostPID, метки DCGM pod/namespace/container.
