@@ -101,3 +101,10 @@ export type CurrentMetrics = {
   k8s_pod?: Record<string, MetricValues>;
 };
 export type RangeResult = { points: [number, number | null][]; step: number };
+
+/** Firing alerts from Alertmanager, without silenced and inhibited ones. */
+export type ActiveAlert = {
+  name: string; starts_at: string | null; labels: Record<string, string>;
+  summary: string; description: string; runbook_url: string;
+};
+export type AlertList = { enabled: boolean; error: string | null; alerts: ActiveAlert[] };

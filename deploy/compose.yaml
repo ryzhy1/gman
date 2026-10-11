@@ -24,6 +24,8 @@ services:
       PROMETHEUS_URL: http://prometheus:9090
       # Address of Grafana as the browser sees it; used for default dashboard links.
       GMAN_GRAFANA_URL: ${GMAN_GRAFANA_URL:-http://127.0.0.1:3000}
+      # Active alerts for the portal's alerts page.
+      ALERTMANAGER_URL: http://alertmanager:9093
     depends_on:
       db: {condition: service_healthy}
     healthcheck:
@@ -54,11 +56,42 @@ services:
     restart: unless-stopped
   prometheus:
     image: prom/prometheus:v3.5.0
-    volumes: ["./prometheus.yaml:/etc/prometheus/prometheus.yml:ro", "prometheus:/prometheus"]
-    command: ["--config.file=/etc/prometheus/prometheus.yml", "--storage.tsdb.retention.time=30d"]
+    environment:
+      # Browser-facing portal address for runbook links in alert annotations.
+      GMAN_PORTAL_URL: ${GMAN_PORTAL_URL:-http://127.0.0.1:8080}
+    volumes:
+      - ./prometheus.yaml:/etc/prometheus/prometheus.yml:ro
+      - ./alerts/rules.yaml:/etc/prometheus/rules/gman.yaml:ro
+      - prometheus:/prometheus
+    command: ["--config.file=/etc/prometheus/prometheus.yml", "--storage.tsdb.retention.time=30d",
+              "--enable-feature=expand-external-labels"]
     ports: ["127.0.0.1:9090:9090"]
     healthcheck:
       test: ["CMD", "wget", "-q", "-O", "/dev/null", "http://127.0.0.1:9090/-/healthy"]
+      interval: 15s
+      timeout: 5s
+      retries: 3
+    restart: unless-stopped
+  alertmanager:
+    image: prom/alertmanager:v0.28.1
+    # Renders receivers from the variables below, then starts Alertmanager (see the script header).
+    entrypoint: ["/bin/sh", "/etc/gman-alerts/alertmanager.sh"]
+    environment:
+      GMAN_ALERT_WEBHOOK_URL: ${GMAN_ALERT_WEBHOOK_URL:-}
+      GMAN_ALERT_EMAIL_TO: ${GMAN_ALERT_EMAIL_TO:-}
+      GMAN_ALERT_EMAIL_FROM: ${GMAN_ALERT_EMAIL_FROM:-}
+      GMAN_ALERT_SMTP_SMARTHOST: ${GMAN_ALERT_SMTP_SMARTHOST:-}
+      GMAN_ALERT_SMTP_USERNAME: ${GMAN_ALERT_SMTP_USERNAME:-}
+      GMAN_ALERT_SMTP_PASSWORD: ${GMAN_ALERT_SMTP_PASSWORD:-}
+      GMAN_ALERT_SMTP_REQUIRE_TLS: ${GMAN_ALERT_SMTP_REQUIRE_TLS:-true}
+      GMAN_ALERTMANAGER_URL: ${GMAN_ALERTMANAGER_URL:-http://127.0.0.1:9093}
+    volumes:
+      - ./alerts/alertmanager.yaml:/etc/gman-alerts/alertmanager.yaml:ro
+      - ./alerts/alertmanager.sh:/etc/gman-alerts/alertmanager.sh:ro
+      - alertmanager:/alertmanager
+    ports: ["127.0.0.1:9093:9093"]
+    healthcheck:
+      test: ["CMD", "wget", "-q", "-O", "/dev/null", "http://127.0.0.1:9093/-/healthy"]
       interval: 15s
       timeout: 5s
       retries: 3
@@ -86,4 +119,5 @@ services:
 volumes:
   postgres:
   prometheus:
+  alertmanager:
   grafana:

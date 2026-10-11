@@ -10,13 +10,15 @@ from typing import Literal
 from urllib.parse import urlsplit
 
 from fastapi import Depends, FastAPI, Header, HTTPException, Path, Query
-from fastapi.responses import JSONResponse
+from fastapi.responses import JSONResponse, PlainTextResponse
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 from sqlalchemy import text
 from sqlalchemy.orm import Session
 
+from . import alerts
 from . import configs
 from . import db as store
+from . import exposition
 from . import metrics
 
 logger = logging.getLogger("gman")
@@ -343,6 +345,12 @@ def health():
     return {"status": "ok"}
 
 
+@app.get("/metrics", include_in_schema=False)
+def prometheus_metrics(session: Session = Depends(db)):
+    """Inventory-derived metrics for alert rules. Internal: nginx does not proxy this path."""
+    return PlainTextResponse(exposition.render(session), media_type="text/plain; version=0.0.4")
+
+
 @app.put("/api/services/{service_id}", dependencies=[Depends(admin)])
 def put_service(service_id: str, value: Service, session: Session = Depends(db)):
     if service_id != value.id:
@@ -430,6 +438,17 @@ def metrics_current():
         return {"enabled": True, "error": None, **metrics.current()}
     except metrics.Unavailable as error:
         return {"enabled": True, "error": "Metrics store unavailable: " + str(error)}
+
+
+@app.get("/api/alerts", dependencies=[Depends(reader)])
+def active_alerts():
+    """Firing alerts from Alertmanager, without silenced and inhibited ones."""
+    if not alerts.base_url():
+        return {"enabled": False, "error": "ALERTMANAGER_URL is not configured", "alerts": []}
+    try:
+        return {"enabled": True, "error": None, "alerts": alerts.active()}
+    except alerts.Unavailable as error:
+        return {"enabled": True, "error": "Alertmanager unavailable: " + str(error), "alerts": []}
 
 
 @app.get("/api/metrics/range", dependencies=[Depends(reader)])

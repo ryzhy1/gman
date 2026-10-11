@@ -1,0 +1,233 @@
+# GMan alert rules for Prometheus. Tests: deploy/alerts/rules.test.yaml (promtool test rules).
+# Sources of series:
+#   system_*, DCGM_FI_*  telemetry through the OTel gateway (deploy/otel-*.yaml); host_id = GMAN_HOST_ID or node name.
+#   gman_*               inventory state from the API's /metrics (backend/app/exposition.py).
+# Labels used by Alertmanager (deploy/alerts/alertmanager.yaml):
+#   severity  critical | warning
+#   scope     pipeline | node | gpu | instance: inhibition suppresses gpu/instance alerts of a node that is down
+#             (GManNodeDown, GManK8sNodeNotReady) and instance alerts of a silent inventory source.
+# runbook_url opens the portal's alerts page; GMAN_PORTAL_URL reaches it as external label gman_portal.
+groups:
+  - name: gman-recording
+    rules:
+      # One series per GPU; DCGM is preferred, nvidia-smi from inventory fills in where DCGM is absent.
+      - record: gman:gpu_temperature_celsius:max
+        expr: |
+          max by (host_id, UUID) (DCGM_FI_DEV_GPU_TEMP)
+          or max by (host_id, UUID) (gman_gpu_temperature_celsius)
+      # Bitmask of active clock throttle reasons. DCGM renamed the field in 3.3 (CLOCK_THROTTLE -> CLOCKS_EVENT).
+      - record: gman:gpu_clock_event_reasons:max
+        expr: |
+          max by (host_id, UUID) (DCGM_FI_DEV_CLOCKS_EVENT_REASONS or DCGM_FI_DEV_CLOCK_THROTTLE_REASONS)
+          or max by (host_id, UUID) (gman_gpu_clock_event_reasons)
+      # Hosts that should be sending telemetry: seen in the last 6 hours or known to inventory.
+      - record: gman:host_expected:max
+        expr: |
+          max by (host_id) (max_over_time(system_cpu_load_average_1m[6h]) * 0 + 1)
+          or max by (host_id) (gman_source_last_snapshot_timestamp_seconds{source_type="docker-host"} * 0 + 1)
+          or max by (host_id) (gman_k8s_node_ready * 0 + 1)
+      - record: gman:host_telemetry_missing:max
+        expr: gman:host_expected:max unless on (host_id) max by (host_id) (system_cpu_load_average_1m)
+
+  - name: gman-pipeline
+    rules:
+      - alert: GManTelemetryGatewayDown
+        expr: up{job="otel"} == 0
+        for: 2m
+        labels: {severity: critical, scope: pipeline}
+        annotations:
+          summary: OTel gateway недоступен для Prometheus
+          description: Prometheus не может прочитать метрики gateway (otel:8889). Телеметрия всех хостов не поступает.
+          runbook_url: '{{ $externalLabels.gman_portal }}/#alerts/GManTelemetryGatewayDown'
+      - alert: GManApiMetricsDown
+        expr: up{job="gman-api"} == 0
+        for: 2m
+        labels: {severity: critical, scope: pipeline}
+        annotations:
+          summary: API GMan не отдает /metrics
+          description: Алерты по inventory (молчащие источники, OOMKilled, CrashLoopBackOff) не вычисляются.
+          runbook_url: '{{ $externalLabels.gman_portal }}/#alerts/GManApiMetricsDown'
+
+  - name: gman-nodes
+    rules:
+      - alert: GManSourceSilent
+        expr: time() - gman_source_last_snapshot_timestamp_seconds > 300
+        for: 1m
+        labels: {severity: warning, scope: node}
+        annotations:
+          summary: 'Источник {{ $labels.source_id }} не присылает inventory'
+          description: >-
+            Последний снимок принят {{ $value | humanizeDuration }} назад (агент отправляет раз в минуту).
+            Данные портала по этому источнику устарели.
+          runbook_url: '{{ $externalLabels.gman_portal }}/#alerts/GManSourceSilent'
+      # Not raised while the gateway itself is down: GManTelemetryGatewayDown covers that case.
+      - alert: GManHostTelemetryAbsent
+        expr: gman:host_telemetry_missing:max and on () (up{job="otel"} == 1)
+        for: 5m
+        labels: {severity: warning, scope: node}
+        annotations:
+          summary: 'Нет метрик хоста {{ $labels.host_id }}'
+          description: >-
+            Хост известен по inventory или присылал метрики за последние 6 часов, но метрик OTel сейчас нет:
+            остановлен Collector, нет связи с gateway или хост выключен.
+          runbook_url: '{{ $externalLabels.gman_portal }}/#alerts/GManHostTelemetryAbsent'
+      # Docker host down: both independent channels (inventory agent and OTel Collector) are silent.
+      # Inhibits the host's other alerts (deploy/alerts/alertmanager.yaml).
+      - alert: GManNodeDown
+        expr: |
+          max by (host_id, source_id) (time() - gman_source_last_snapshot_timestamp_seconds{source_type="docker-host"}) > 300
+          and on (host_id) gman:host_telemetry_missing:max
+        for: 1m
+        labels: {severity: critical, scope: node}
+        annotations:
+          summary: 'Хост {{ $labels.host_id }} недоступен'
+          description: >-
+            Нет ни inventory ({{ $value | humanizeDuration }}), ни метрик OTel: хост выключен или потерял сеть.
+            Алерты GPU и контейнеров этого хоста подавлены.
+          runbook_url: '{{ $externalLabels.gman_portal }}/#alerts/GManNodeDown'
+      - alert: GManK8sNodeNotReady
+        expr: gman_k8s_node_ready == 0
+        for: 2m
+        labels: {severity: critical, scope: node}
+        annotations:
+          summary: 'Узел Kubernetes {{ $labels.host_id }} в состоянии NotReady'
+          description: 'Кластер {{ $labels.source_id }}: условие Ready узла ложно или неизвестно.'
+          runbook_url: '{{ $externalLabels.gman_portal }}/#alerts/GManK8sNodeNotReady'
+
+  - name: gman-gpu
+    rules:
+      - alert: GManGpuTelemetryAbsent
+        expr: |
+          max by (host_id, UUID) (max_over_time(DCGM_FI_DEV_GPU_TEMP[6h]))
+          unless on (host_id, UUID) max by (host_id, UUID) (DCGM_FI_DEV_GPU_TEMP)
+          and on () (up{job="otel"} == 1)
+        for: 5m
+        labels: {severity: warning, scope: gpu}
+        annotations:
+          summary: 'Нет метрик DCGM для GPU {{ $labels.UUID }} на {{ $labels.host_id }}'
+          description: Метрики хоста поступают, а DCGM Exporter перестал отвечать или GPU пропал из системы.
+          runbook_url: '{{ $externalLabels.gman_portal }}/#alerts/GManGpuTelemetryAbsent'
+      # DCGM keeps the last XID code until the GPU is reset; after handling, silence the alert in Alertmanager.
+      - alert: GManGpuXidError
+        expr: max by (host_id, UUID) (DCGM_FI_DEV_XID_ERRORS) > 0
+        labels: {severity: warning, scope: gpu}
+        annotations:
+          summary: 'XID {{ $value }} на GPU {{ $labels.UUID }} ({{ $labels.host_id }})'
+          description: Драйвер NVIDIA сообщил ошибку XID. Коды 13, 31, 43, 45 обычно вызваны приложением.
+          runbook_url: '{{ $externalLabels.gman_portal }}/#alerts/GManGpuXidError'
+      # Hardware/driver XIDs: 48 DBE ECC, 64 row remap failure, 74 NVLink, 79 fallen off the bus,
+      # 92 high SBE rate, 94/95 contained/uncontained ECC, 119/120 GSP. Inhibits the warning above.
+      - alert: GManGpuXidError
+        expr: |
+          max by (host_id, UUID) (
+            DCGM_FI_DEV_XID_ERRORS == 48 or DCGM_FI_DEV_XID_ERRORS == 64 or DCGM_FI_DEV_XID_ERRORS == 74
+            or DCGM_FI_DEV_XID_ERRORS == 79 or DCGM_FI_DEV_XID_ERRORS == 92 or DCGM_FI_DEV_XID_ERRORS == 94
+            or DCGM_FI_DEV_XID_ERRORS == 95 or DCGM_FI_DEV_XID_ERRORS == 119 or DCGM_FI_DEV_XID_ERRORS == 120)
+        labels: {severity: critical, scope: gpu}
+        annotations:
+          summary: 'Аппаратная XID {{ $value }} на GPU {{ $labels.UUID }} ({{ $labels.host_id }})'
+          description: Ошибка указывает на память, шину или прошивку GPU. Нужен вывод GPU из работы и проверка.
+          runbook_url: '{{ $externalLabels.gman_portal }}/#alerts/GManGpuXidError'
+      - alert: GManGpuEccUncorrectable
+        expr: |
+          max by (host_id, UUID) (increase(DCGM_FI_DEV_ECC_DBE_VOL_TOTAL[10m]) > 0)
+          or max by (host_id, UUID) (increase(gman_gpu_ecc_uncorrected_errors[10m]) > 0)
+          or max by (host_id, UUID) (DCGM_FI_DEV_ROW_REMAP_FAILURE > 0)
+        labels: {severity: critical, scope: gpu}
+        annotations:
+          summary: 'Неисправимые ошибки ECC на GPU {{ $labels.UUID }} ({{ $labels.host_id }})'
+          description: Рост double-bit ECC (DCGM или nvidia-smi) либо сбой переназначения строк памяти.
+          runbook_url: '{{ $externalLabels.gman_portal }}/#alerts/GManGpuEccUncorrectable'
+      - alert: GManGpuEccCorrectableHigh
+        expr: max by (host_id, UUID) (increase(DCGM_FI_DEV_ECC_SBE_VOL_TOTAL[1h])) > 100
+        labels: {severity: warning, scope: gpu}
+        annotations:
+          summary: 'Частые исправимые ошибки ECC на GPU {{ $labels.UUID }} ({{ $labels.host_id }})'
+          description: 'Более 100 single-bit ECC за час ({{ $value | humanize }}). Предвестник деградации памяти.'
+          runbook_url: '{{ $externalLabels.gman_portal }}/#alerts/GManGpuEccCorrectableHigh'
+      # Thresholds are a generic default for data center GPUs; the slowdown temperature is model specific
+      # (nvidia-smi -q -d TEMPERATURE). Adjust after the pilot measures the real fleet.
+      - alert: GManGpuOverheating
+        expr: gman:gpu_temperature_celsius:max > 85
+        for: 5m
+        labels: {severity: warning, scope: gpu}
+        annotations:
+          summary: 'GPU {{ $labels.UUID }} на {{ $labels.host_id }}: {{ $value }} °C'
+          description: Температура GPU выше 85 °C пять минут.
+          runbook_url: '{{ $externalLabels.gman_portal }}/#alerts/GManGpuOverheating'
+      - alert: GManGpuOverheating
+        expr: gman:gpu_temperature_celsius:max > 90
+        for: 2m
+        labels: {severity: critical, scope: gpu}
+        annotations:
+          summary: 'GPU {{ $labels.UUID }} на {{ $labels.host_id }}: {{ $value }} °C'
+          description: Температура GPU выше 90 °C, близко к аппаратному снижению частот.
+          runbook_url: '{{ $externalLabels.gman_portal }}/#alerts/GManGpuOverheating'
+      - alert: GManGpuMemoryOverheating
+        expr: max by (host_id, UUID) (DCGM_FI_DEV_MEMORY_TEMP) > 95
+        for: 5m
+        labels: {severity: warning, scope: gpu}
+        annotations:
+          summary: 'Память GPU {{ $labels.UUID }} на {{ $labels.host_id }}: {{ $value }} °C'
+          description: Температура памяти (HBM) выше 95 °C пять минут.
+          runbook_url: '{{ $externalLabels.gman_portal }}/#alerts/GManGpuMemoryOverheating'
+      # Bits 0x20 sw_thermal and 0x40 hw_thermal.
+      - alert: GManGpuThermalThrottling
+        expr: floor(gman:gpu_clock_event_reasons:max / 32) % 4 > 0
+        for: 5m
+        labels: {severity: warning, scope: gpu}
+        annotations:
+          summary: 'Тепловой троттлинг GPU {{ $labels.UUID }} ({{ $labels.host_id }})'
+          description: GPU снижает частоты из-за температуры (sw_thermal/hw_thermal) дольше пяти минут.
+          runbook_url: '{{ $externalLabels.gman_portal }}/#alerts/GManGpuThermalThrottling'
+      # Bits 0x8 hw_slowdown and 0x80 hw_power_brake: external signal, power supply or overheating.
+      - alert: GManGpuHardwareSlowdown
+        expr: |
+          floor(gman:gpu_clock_event_reasons:max / 8) % 2 == 1
+          or floor(gman:gpu_clock_event_reasons:max / 128) % 2 == 1
+        for: 5m
+        labels: {severity: warning, scope: gpu}
+        annotations:
+          summary: 'Аппаратное снижение частот GPU {{ $labels.UUID }} ({{ $labels.host_id }})'
+          description: Активны hw_slowdown или hw_power_brake дольше пяти минут — проверить питание и охлаждение.
+          runbook_url: '{{ $externalLabels.gman_portal }}/#alerts/GManGpuHardwareSlowdown'
+
+  - name: gman-instances
+    rules:
+      # Kubernetes keeps OOMKilled as the last termination reason until the next one: count it only while
+      # the restart counter grows. Docker reports OOMKilled while the container stays stopped.
+      - alert: GManInstanceOOMKilled
+        expr: |
+          gman_instance_state_reason{reason="OOMKilled"} == 1
+          or (gman_instance_last_termination_reason{reason="OOMKilled"} == 1
+              and on (source_id, instance_id) increase(gman_instance_restarts_total[30m]) > 0)
+        labels: {severity: warning, scope: instance}
+        annotations:
+          summary: '{{ $labels.instance_name }} завершен по OOMKilled'
+          description: >-
+            Контейнер {{ $labels.instance_name }} ({{ with $labels.service_id }}сервис {{ . }}, {{ end }}{{ $labels.host_id }})
+            превысил лимит памяти. Проверить лимит и потребление на вкладке «Ресурсы».
+          runbook_url: '{{ $externalLabels.gman_portal }}/#alerts/GManInstanceOOMKilled'
+      - alert: GManInstanceCrashLoopBackOff
+        expr: gman_instance_state_reason{reason="CrashLoopBackOff"} == 1
+        for: 5m
+        labels: {severity: warning, scope: instance}
+        annotations:
+          summary: '{{ $labels.instance_name }} в CrashLoopBackOff'
+          description: 'Pod {{ $labels.namespace }}/{{ $labels.instance_name }} (сервис {{ $labels.service_id }}) перезапускается с ошибкой.'
+          runbook_url: '{{ $externalLabels.gman_portal }}/#alerts/GManInstanceCrashLoopBackOff'
+      - alert: GManInstanceRestartLoop
+        expr: increase(gman_instance_restarts_total[30m]) >= 3
+        labels: {severity: warning, scope: instance}
+        annotations:
+          summary: '{{ $labels.instance_name }}: {{ $value | humanize }} перезапусков за 30 минут'
+          description: Контейнер (Docker restart policy или Kubernetes) часто перезапускается.
+          runbook_url: '{{ $externalLabels.gman_portal }}/#alerts/GManInstanceRestartLoop'
+      - alert: GManInstanceImagePullFailing
+        expr: gman_instance_state_reason{reason=~"ImagePullBackOff|ErrImagePull"} == 1
+        for: 10m
+        labels: {severity: warning, scope: instance}
+        annotations:
+          summary: '{{ $labels.instance_name }} не может скачать образ'
+          description: 'Pod {{ $labels.namespace }}/{{ $labels.instance_name }}: {{ $labels.reason }} дольше 10 минут.'
+          runbook_url: '{{ $externalLabels.gman_portal }}/#alerts/GManInstanceImagePullFailing'

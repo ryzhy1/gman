@@ -1,6 +1,7 @@
 import React, { useEffect, useState } from 'react';
 import { createRoot } from 'react-dom/client';
 import { get, type CurrentMetrics, type Overview } from './api';
+import { Alerts } from './alerts';
 import { ConfigView, History, InstanceTable, type Placed } from './components';
 import { ConfigHistory } from './configs';
 import { ClusterCard, HostCard } from './hardware';
@@ -9,7 +10,7 @@ import { Resources } from './resources';
 import './style.css';
 
 const ALL = 'Все окружения';
-const PAGES = [['Сервисы', '▦'], ['Серверы и GPU', '▤'], ['Аудит', '◷']] as const;
+const PAGES = [['Сервисы', '▦'], ['Серверы и GPU', '▤'], ['Алерты', '⚠'], ['Аудит', '◷']] as const;
 const LINKS = [['repository', 'Репозиторий'], ['grafana', 'Grafana'], ['splunk', 'Splunk'], ['bamboo', 'Bamboo']] as const;
 
 function Login({ onToken }: { onToken: (token: string) => void }) {
@@ -32,7 +33,8 @@ function App() {
   const [data, setData] = useState<Overview | null>(null);
   const [metrics, setMetrics] = useState<CurrentMetrics | null>(null);
   const [error, setError] = useState('');
-  const [page, setPage] = useState<string>('Сервисы');
+  // Runbook links from alert notifications open <portal>/#alerts/<name>.
+  const [page, setPage] = useState<string>(() => location.hash.startsWith('#alerts') ? 'Алерты' : 'Сервисы');
   const [query, setQuery] = useState('');
   const [selected, setSelected] = useState('');
   const [tab, setTab] = useState('Обзор');
@@ -170,6 +172,8 @@ function App() {
               : <HostCard key={s.source_id} source={s} metrics={metrics} grafanaUrl={grafana} onService={openService} />)}
             {!data.sources.length && <section className="empty">Источники еще не подключены. Начните с одного Docker-хоста или Kubernetes-кластера.</section>}
           </div>}
+
+          {page === 'Алерты' && <Alerts token={token} refreshKey={data.server_time} />}
 
           {page === 'Аудит' && <section><h2>Журнал событий</h2><History token={token} refreshKey={data.server_time} /></section>}
 

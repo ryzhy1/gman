@@ -57,6 +57,9 @@ NVIDIA на серверах, Bitbucket/GitLab для исходного код�
   частоты, XID); вкладка «Ресурсы» с графиками за 1 час / 24 часа / 7 дней.
 - OTel Collector на хосте → OTel Gateway → Prometheus → Grafana с готовыми дашбордами
   «GMan · Хост» и «GMan · Сервис»; кнопки Grafana в портале ведут на них по умолчанию.
+- Алерты: Prometheus rules + Alertmanager (молчащий узел/источник, GPU XID/ECC, перегрев,
+  троттлинг, OOMKilled, CrashLoopBackOff, частые перезапуски), подавление дочерних алертов
+  упавшего узла, webhook/email из .env, страница «Алерты» с runbook в портале.
 
 ## Локальный запуск через Docker
 
@@ -68,7 +71,8 @@ docker compose --env-file .env -f deploy/compose.yaml up --build -d
 ```
 
 Открыть http://127.0.0.1:8080. Войти с GMAN_READ_TOKEN из локального .env.
-Prometheus: http://127.0.0.1:9090. Grafana: http://127.0.0.1:3000 (admin /
+Prometheus: http://127.0.0.1:9090. Alertmanager: http://127.0.0.1:9093.
+Grafana: http://127.0.0.1:3000 (admin /
 GRAFANA_ADMIN_PASSWORD из .env). Порты привязаны к loopback. Если .env создан
 предыдущей версией, добавьте в него GRAFANA_ADMIN_PASSWORD вручную.
 OTLP gateway принимает локально 4317/4318 без TLS: это конфигурация стенда.
@@ -126,8 +130,9 @@ docker compose --env-file .env -f deploy/compose.yaml -f deploy/compose.prod.yam
 ```
 
 Снаружи доступны: 443 (портал, /api, Grafana на /grafana/), 80 (только редирект на HTTPS)
-и 4317 (OTLP gRPC с mTLS). Prometheus остается на 127.0.0.1:9090, PostgreSQL и Grafana
-не публикуются. Ссылки Grafana в портале ведут на https://GMAN_PUBLIC_HOST/grafana.
+и 4317 (OTLP gRPC с mTLS). Prometheus и Alertmanager остаются на 127.0.0.1:9090/9093,
+PostgreSQL и Grafana не публикуются. Получатели алертов — GMAN_ALERT_* (раздел «Алерты»),
+runbook-ссылки в уведомлениях ведут на https://GMAN_PUBLIC_HOST. Ссылки Grafana в портале ведут на https://GMAN_PUBLIC_HOST/grafana.
 Ограничьте 443 и 4317 межсетевым экраном подсетями серверов и пользователей.
 
 nginx: HSTS, TLS 1.2/1.3; тело запроса до 1 МБ, для POST /api/inventory — до 20 МБ;
@@ -366,6 +371,92 @@ DCGM на узле); портал показывает CPU/RAM контейне�
 включая k8s_attributes и обнаружение DCGM, не проверено.
 Логи приложений и traces не включены; Splunk не разворачивается.
 
+## Алерты
+
+Prometheus rules + Alertmanager, а не Grafana alerting: правила лежат в репозитории
+(deploy/alerts/rules.yaml) и проверяются `promtool test rules` без запуска стека,
+подавление дочерних алертов (inhibition) — штатная функция Alertmanager, а Grafana
+остается только визуализацией без собственного состояния алертов.
+
+| Файл | Назначение |
+| --- | --- |
+| deploy/alerts/rules.yaml | правила и recording rules; подключены в deploy/prometheus.yaml |
+| deploy/alerts/rules.test.yaml | unit-тесты правил для promtool |
+| deploy/alerts/alertmanager.yaml | маршрутизация, группировка, inhibition |
+| deploy/alerts/alertmanager.sh | entrypoint: добавляет получателей из GMAN_ALERT_* и запускает Alertmanager |
+| backend/app/exposition.py | /metrics API: состояние inventory для правил |
+
+| Алерт | Условие | Важность |
+| --- | --- | --- |
+| GManNodeDown | Docker-хост: нет ни inventory дольше 5 минут, ни метрик OTel | critical |
+| GManSourceSilent | источник не присылал снимок дольше 5 минут | warning |
+| GManHostTelemetryAbsent | хост известен inventory или слал метрики за 6 часов, а метрик хоста нет 5 минут | warning |
+| GManK8sNodeNotReady | узел Kubernetes NotReady 2 минуты (по inventory) | critical |
+| GManTelemetryGatewayDown / GManApiMetricsDown | Prometheus не читает gateway / /metrics API | critical |
+| GManGpuTelemetryAbsent | DCGM-метрики GPU пропали, а Collector работает | warning |
+| GManGpuXidError | XID ≠ 0; аппаратные коды (48, 64, 74, 79, 92, 94, 95, 119, 120) — critical | warning / critical |
+| GManGpuEccUncorrectable | рост DBE ECC (DCGM или nvidia-smi) либо сбой переназначения строк | critical |
+| GManGpuEccCorrectableHigh | более 100 SBE ECC за час | warning |
+| GManGpuOverheating | GPU выше 85 °C 5 минут / выше 90 °C 2 минуты | warning / critical |
+| GManGpuMemoryOverheating | память GPU выше 95 °C 5 минут | warning |
+| GManGpuThermalThrottling | sw_thermal или hw_thermal 5 минут | warning |
+| GManGpuHardwareSlowdown | hw_slowdown или hw_power_brake 5 минут | warning |
+| GManInstanceOOMKilled | контейнер остановлен OOM (Docker) или перезапущен после OOM за 30 минут (Kubernetes) | warning |
+| GManInstanceCrashLoopBackOff | pod в CrashLoopBackOff 5 минут | warning |
+| GManInstanceRestartLoop | не менее 3 перезапусков за 30 минут | warning |
+| GManInstanceImagePullFailing | ImagePullBackOff/ErrImagePull 10 минут | warning |
+
+Источники данных. Хосты и GPU — телеметрия OTel (host_metrics, DCGM); где DCGM нет,
+температура, ECC и причины троттлинга берутся из nvidia-smi последнего снимка inventory
+(не старше 5 минут; DCGM при наличии важнее). Контейнеры и pod-ы — inventory:
+kubelet_stats и docker_stats не сообщают OOMKilled/CrashLoopBackOff, а kube-state-metrics
+в пилоте нет. API отдает их на /metrics: gman_source_last_snapshot_timestamp_seconds,
+gman_k8s_node_ready, gman_instance_restarts_total, gman_instance_state_reason и
+gman_instance_last_termination_reason (reason только из фиксированного списка),
+gman_gpu_*. Путь /metrics без токена, но nginx его не проксирует: Prometheus читает
+api:8000 внутри сети Compose, снаружи endpoint недоступен.
+
+Подавление: GManNodeDown и GManK8sNodeNotReady скрывают алерты GPU, контейнеров и
+каналов своего хоста (метка host_id); GManSourceSilent — алерты экземпляров и узлов
+своего источника (данные устарели); GManHostTelemetryAbsent — GManGpuTelemetryAbsent;
+critical скрывает warning того же алерта; CrashLoopBackOff — RestartLoop. При
+недоступном gateway алерты об отсутствии метрик хостов и GPU не создаются вовсе
+(иначе они подавили бы алерты по inventory всех узлов). Группировка по объекту
+(alertname, source_id, host_id, UUID, instance_id); повтор через 4 часа, critical — через час.
+
+Получатели задаются в .env и применяются при пересоздании контейнера alertmanager:
+GMAN_ALERT_WEBHOOK_URL (JSON Alertmanager, send_resolved) и/или GMAN_ALERT_EMAIL_TO с
+GMAN_ALERT_EMAIL_FROM, GMAN_ALERT_SMTP_SMARTHOST (host:port), необязательными
+GMAN_ALERT_SMTP_USERNAME/GMAN_ALERT_SMTP_PASSWORD и GMAN_ALERT_SMTP_REQUIRE_TLS (true).
+Без них получатель пустой: алерты видны в Alertmanager (http://127.0.0.1:9093) и в
+портале, но никуда не отправляются. Пароль SMTP попадает в сгенерированный файл в томе
+alertmanager с правами 0600.
+
+Портал: страница «Алерты» (GET /api/alerts читает Alertmanager по ALERTMANAGER_URL,
+без заглушенных и подавленных) и runbook по каждому алерту. Аннотация runbook_url
+ведет на GMAN_PORTAL_URL/#alerts/<имя> (стенд — http://127.0.0.1:8080, production —
+https://GMAN_PUBLIC_HOST); адрес передается в правила внешней меткой gman_portal
+(`--enable-feature=expand-external-labels`). Заглушить алерт (silence) — в UI Alertmanager.
+
+Ограничения. Пороги температуры общие для серверных GPU; температура замедления зависит
+от модели. DCGM хранит код последней XID до сброса GPU, поэтому алерт XID держится до
+сброса — после разбора его глушат. Поля ECC (DCGM_FI_DEV_ECC_*_VOL_TOTAL,
+DCGM_FI_DEV_ROW_REMAP_FAILURE) и причины троттлинга (DCGM_FI_DEV_CLOCKS_EVENT_REASONS,
+в старых версиях DCGM_FI_DEV_CLOCK_THROTTLE_REASONS) должны быть включены в CSV
+счетчиков DCGM Exporter; без них эти алерты работают только по nvidia-smi из inventory.
+Docker сбрасывает признак OOMKilled при автоматическом перезапуске контейнера, поэтому
+OOM с restart policy виден как RestartLoop, а не OOMKilled. Состояние контейнеров
+обновляется со снимками inventory (раз в минуту или по событиям `--watch`).
+
+Проверка:
+
+```sh
+promtool check rules deploy/alerts/rules.yaml
+promtool test rules deploy/alerts/rules.test.yaml
+promtool check config deploy/prometheus.yaml
+deploy/alerts/alertmanager.sh --render /tmp/am.yml && amtool check-config /tmp/am.yml
+```
+
 ## Проверка
 
 ```sh
@@ -381,7 +472,7 @@ npm run build
 без DATABASE_URL применяется SQLite только для локальной разработки/тестов.
 Задайте токены, как в Compose. Frontend: npm run dev, /api проксируется на 8000.
 
-Проверено: тесты API/агента/метрик/истории конфигураций (включая spool, backoff, flock и debounce `--watch`), TypeScript и production build,
+Проверено: тесты API/агента/метрик/истории конфигураций/алертов (включая spool, backoff, flock и debounce `--watch`), TypeScript и production build,
 синтаксис Docker Compose; чтение AMD sysfs; браузерная проверка портала на тестовых
 данных с API на SQLite; bamboo_event.py против локального API. PostgreSQL,
 Docker end-to-end, Kubernetes, NVIDIA/DCGM и настоящий Bamboo еще не проверены.
