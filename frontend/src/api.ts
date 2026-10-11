@@ -35,6 +35,8 @@ export type Instance = {
   last_termination_reason: string;
   created_at: string | null; started_at: string | null; finished_at: string | null;
   restarts: number; origin: Origin; config: Record<string, unknown>;
+  /** Latest OOM kill (Docker `oom` event or OOMKilled, Kubernetes termination); kept after restarts. */
+  last_oom_at?: string | null;
 };
 
 /** Docker owner by container_id; Kubernetes (node source) also by pod and instance_id "<pod uid>:<container>". */
@@ -83,6 +85,12 @@ export type Audit = {
   status?: string; build_id?: string; build_url?: string; release?: string; commit?: string; image_digest?: string;
   instance_id?: string; instance_name?: string; instance_count?: number;
   before?: Instance; after?: Instance; changes?: Record<string, [unknown, unknown]>;
+  /** runtime-event: a Kubernetes Event of a pod, without its message (only fixed phrases in `detail`). */
+  uid?: string; reason?: string; event_type?: 'Normal' | 'Warning'; count?: number; occurrences?: number;
+  first_at?: string | null; last_at?: string; namespace?: string; pod?: string; container?: string;
+  component?: string; detail?: string;
+  /** history-gap: changes between gap_from and gap_to may be missing. */
+  gap_from?: string; gap_to?: string; gap_seconds?: number; reasons?: string[]; dropped_snapshots?: number;
 };
 
 export type Overview = { services: Service[]; sources: Source[]; events: Audit[]; server_time: string; grafana_url: string };

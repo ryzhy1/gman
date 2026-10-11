@@ -32,6 +32,8 @@ HELP = {
     "gman_instance_restarts_total": ("counter", "Restart count of the container as reported by the runtime."),
     "gman_instance_state_reason": ("gauge", "1 for the current state reason of the container (allowlisted)."),
     "gman_instance_last_termination_reason": ("gauge", "1 for the reason of the previous termination (Kubernetes)."),
+    "gman_instance_last_oom_timestamp_seconds": ("gauge", "Time of the latest OOM kill of the container (Docker oom "
+                                                          "event or OOMKilled, Kubernetes termination)."),
     "gman_gpu_temperature_celsius": ("gauge", "GPU core temperature from nvidia-smi."),
     "gman_gpu_ecc_uncorrected_errors": ("gauge", "Volatile uncorrected ECC errors from nvidia-smi."),
     "gman_gpu_clock_event_reasons": ("gauge", "Active clock throttle reasons from nvidia-smi as a DCGM bitmask."),
@@ -94,6 +96,11 @@ def render(session):
         last = (item.get("last_termination_reason") or "").split(" ")[0]
         if last in STATE_REASONS:
             add("gman_instance_last_termination_reason", {**labels, "reason": last}, 1)
+        if item.get("last_oom_at"):
+            # reason="OOMKilled" gives the series the label set of gman_instance_state_reason, so that
+            # GManInstanceOOMKilled raises one alert when both report the same kill.
+            add("gman_instance_last_oom_timestamp_seconds", {**labels, "reason": "OOMKilled"},
+                datetime.fromisoformat(item["last_oom_at"]).timestamp())
 
     output = []
     for name, (kind, text) in HELP.items():
