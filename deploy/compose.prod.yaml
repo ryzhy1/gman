@@ -6,7 +6,8 @@
 # Alert receivers: GMAN_ALERT_* in .env (see deploy/alerts/alertmanager.sh).
 # Requires in .env: GMAN_PUBLIC_HOST (DNS name in the portal certificate).
 # Certificates (deploy/pki/issue.sh) are read from GMAN_TLS_DIR (default deploy/pki/out):
-#   portal.pem, portal-key.pem, gateway.pem, gateway-key.pem, ca.pem, crl.pem. Never put ca-key.pem there
+#   portal.pem, portal-key.pem, gateway.pem, gateway-key.pem, ca.pem, crl.pem (the API also gets the four public
+#   files, no keys, to export their expiry for the GManTls* alerts). Never put ca-key.pem there
 #   on the server. Requires Docker Compose >= 2.24.4 (!override/!reset tags).
 x-logging: &logging
   driver: json-file
@@ -21,6 +22,16 @@ services:
       # SSO callback on the public HTTPS name: the login cookie is set on this host and must come back to it,
       # and its https scheme makes the session cookie Secure (__Host-). Unused while GMAN_OIDC_ISSUER is empty.
       GMAN_OIDC_REDIRECT_URI: ${GMAN_OIDC_REDIRECT_URI:-https://${GMAN_PUBLIC_HOST}/api/auth/callback}
+      # Expiry of nginx's certificates and CRL on /metrics (GManTls* alerts): an expired crl.pem makes nginx
+      # reject every OTLP client. Only public files are mounted (no keys); they must be world-readable (0644),
+      # the API runs as 65534.
+      GMAN_TLS_WATCH_FILES: ${GMAN_TLS_WATCH_FILES:-/etc/gman/tls/portal.pem,/etc/gman/tls/gateway.pem,/etc/gman/tls/ca.pem,/etc/gman/tls/crl.pem}
+    # Same single-file mounts as the portal's: replaced in place (cp), they are seen without a restart.
+    volumes:
+      - ${GMAN_TLS_DIR:-./pki/out}/portal.pem:/etc/gman/tls/portal.pem:ro
+      - ${GMAN_TLS_DIR:-./pki/out}/gateway.pem:/etc/gman/tls/gateway.pem:ro
+      - ${GMAN_TLS_DIR:-./pki/out}/ca.pem:/etc/gman/tls/ca.pem:ro
+      - ${GMAN_TLS_DIR:-./pki/out}/crl.pem:/etc/gman/tls/crl.pem:ro
     logging: *logging
   portal:
     # nginx also terminates OTLP mTLS on 4317 (client CA + CRL) and passes the certificate identity to the

@@ -102,3 +102,14 @@ def test_otlp_identity_headers_match_between_nginx_and_gateway():
     prod = (DEPLOY / "compose.prod.yaml").read_text()
     otel = prod[prod.index("\n  otel:"):prod.index("\n  prometheus:")]
     assert "ports: !reset []" in otel
+
+
+def test_watched_tls_files_are_mounted_into_the_api_without_keys():
+    prod = (DEPLOY / "compose.prod.yaml").read_text()
+    api = prod[prod.index("\n  api:"):prod.index("\n  portal:")]
+    watched = re.search(r"GMAN_TLS_WATCH_FILES: \$\{GMAN_TLS_WATCH_FILES:-([^}]+)\}", api).group(1).split(",")
+    mounted = re.findall(r"- \$\{GMAN_TLS_DIR:-\./pki/out\}/(\S+):(\S+):ro", api)
+    assert sorted(target for _, target in mounted) == sorted(watched)
+    # The CRL nginx checks OTLP clients against is among them; private keys never reach the API container.
+    assert "/etc/gman/tls/crl.pem" in watched and "ssl_crl /etc/nginx/tls/crl.pem;" in (DEPLOY / "nginx/gman.conf").read_text()
+    assert not any("key" in source or "key" in target for source, target in mounted)

@@ -8,13 +8,24 @@ source are dropped instead, so that a stale temperature does not compete with li
 
 Label conventions match the telemetry pipeline: host_id is the Docker host's source_id (GMAN_HOST_ID)
 or the Kubernetes node name, UUID is the NVIDIA GPU UUID (as in DCGM Exporter).
+
+TLS expiry (GManTls* alerts): files listed in GMAN_TLS_WATCH_FILES (certificates and the CRL that nginx uses,
+mounted read-only by deploy/compose.prod.yaml) are parsed for notAfter / nextUpdate. Paths containing "key" are
+refused unread, so a misconfigured list cannot make the API read a private key.
 """
+import logging
+import os
+import threading
 from datetime import datetime, timezone
+
+from cryptography import x509
 
 from sqlalchemy import and_, exists, or_, select
 from sqlalchemy.orm import aliased
 
 from . import db as store
+
+log = logging.getLogger(__name__)
 
 # Reasons safe to use as label values: a fixed set keeps cardinality bounded and drops free-form errors.
 STATE_REASONS = {"OOMKilled", "CrashLoopBackOff", "ImagePullBackOff", "ErrImagePull", "CreateContainerConfigError",
@@ -40,7 +51,67 @@ HELP = {
     "gman_gpu_clock_event_reasons": ("gauge", "Active clock throttle reasons from nvidia-smi as a DCGM bitmask."),
     "gman_release_status": ("gauge", "1 for the status of the latest release of a service/environment (releases.py)."),
     "gman_release_started_timestamp_seconds": ("gauge", "Start of the latest release of a service/environment."),
+    "gman_tls_cert_not_after_timestamp_seconds": ("gauge", "notAfter of each certificate in a watched PEM file "
+                                                            "(GMAN_TLS_WATCH_FILES)."),
+    "gman_tls_crl_next_update_timestamp_seconds": ("gauge", "nextUpdate of a watched CRL: past it nginx rejects "
+                                                             "every OTLP client certificate."),
+    "gman_tls_file_error": ("gauge", "1 when a watched TLS file is missing, unreadable, unparseable or refused "
+                                     "(a key file)."),
 }
+
+# Watched TLS files: parsed results cached by (mtime_ns, size, inode), so a scrape re-reads only replaced files.
+_tls_cache = {}
+_tls_lock = threading.Lock()
+
+
+def tls_watch_files():
+    return [path.strip() for path in os.getenv("GMAN_TLS_WATCH_FILES", "").split(",") if path.strip()]
+
+
+def parse_tls(data):
+    """([(subject, not_after)], [(issuer, next_update)]) from PEM (bundles, mixed) or DER. Raises ValueError."""
+    certs, crls = [], []
+    if b"-----BEGIN" in data:
+        if b"-----BEGIN CERTIFICATE-----" in data:
+            certs = x509.load_pem_x509_certificates(data)
+        start = 0
+        while (start := data.find(b"-----BEGIN X509 CRL-----", start)) >= 0:
+            end = data.index(b"-----END X509 CRL-----", start) + len(b"-----END X509 CRL-----")
+            crls.append(x509.load_pem_x509_crl(data[start:end]))
+            start = end
+    else:
+        try:
+            certs = [x509.load_der_x509_certificate(data)]
+        except ValueError:
+            crls = [x509.load_der_x509_crl(data)]
+    if not certs and not crls:
+        raise ValueError("no certificate or CRL")
+    return ([(cert.subject.rfc4514_string(), cert.not_valid_after_utc.timestamp()) for cert in certs],
+            [(crl.issuer.rfc4514_string(), crl.next_update_utc.timestamp()) for crl in crls if crl.next_update_utc])
+
+
+def read_tls(path):
+    """Parsed file or None on error. Key files are never opened: the metrics must not depend on secrets."""
+    if "key" in path.lower():
+        log.warning("GMAN_TLS_WATCH_FILES: %s looks like a private key, not read", path)
+        return None
+    try:
+        info = os.stat(path)
+        stamp = (info.st_mtime_ns, info.st_size, info.st_ino)
+        with _tls_lock:
+            cached = _tls_cache.get(path)
+        if cached and cached[0] == stamp:
+            return cached[1]
+        with open(path, "rb") as handle:
+            parsed = parse_tls(handle.read(1 << 20))
+    except Exception as error:  # noqa: BLE001  (any unreadable file is a gman_tls_file_error, never a failed scrape)
+        log.warning("GMAN_TLS_WATCH_FILES: %s: %s", path, error)
+        with _tls_lock:
+            _tls_cache.pop(path, None)
+        return None
+    with _tls_lock:
+        _tls_cache[path] = (stamp, parsed)
+    return parsed
 
 
 def latest_releases(session):
@@ -120,6 +191,16 @@ def render(session):
         labels = {"service_id": release.service_id, "environment": release.environment}
         add("gman_release_status", {**labels, "status": release.status}, 1)
         add("gman_release_started_timestamp_seconds", labels, release.started_at.timestamp())
+
+    for path in tls_watch_files():
+        parsed = read_tls(path)
+        add("gman_tls_file_error", {"file": path}, 0 if parsed else 1)
+        certs, crls = parsed or ([], [])
+        # One series per subject; a bundle repeating a subject keeps the earliest expiry.
+        for subject, not_after in sorted(dict(sorted(certs, key=lambda c: -c[1])).items()):
+            add("gman_tls_cert_not_after_timestamp_seconds", {"file": path, "subject": subject}, not_after)
+        for issuer, next_update in sorted(dict(sorted(crls, key=lambda c: -c[1])).items()):
+            add("gman_tls_crl_next_update_timestamp_seconds", {"file": path, "issuer": issuer}, next_update)
 
     output = []
     for name, (kind, text) in HELP.items():

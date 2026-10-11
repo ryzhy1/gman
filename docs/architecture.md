@@ -181,16 +181,22 @@ API /metrics ──┘                                                   │
 API отдает на `/metrics` состояние inventory (backend/app/exposition.py): время последнего
 снимка источника, число ошибок сбора, Ready узлов, рестарты и причины состояния экземпляров
 (только из фиксированного списка), температуру/ECC/причины троттлинга GPU из nvidia-smi
-(не старше 5 минут). Путь не проксируется nginx и читается Prometheus внутри сети Compose.
+(не старше 5 минут), а также сроки TLS-файлов nginx из GMAN_TLS_WATCH_FILES: notAfter каждого
+сертификата (включая цепочки в одном PEM) и nextUpdate CRL, ошибку чтения файла. В production
+API получает portal.pem, gateway.pem, ca.pem и crl.pem только для чтения, без ключей; пути с
+«key» API не читает. Разбор кэшируется по mtime/размеру/inode, замена файла через `cp` видна
+со следующего опроса. Путь не проксируется nginx и читается Prometheus внутри сети Compose.
 Recording rules объединяют DCGM и nvidia-smi (DCGM важнее), выбирают порог перегрева по
 модели GPU (таблица gman-gpu-thresholds, по умолчанию 85/90 °C) и связывают pod-ы
 kube-state-metrics с workload (Deployment через ReplicaSet) и сервисом (метки gman.* pod-ов).
-25 алертов: узел, источник, телеметрия, gateway и kube-state-metrics молчат, узел Kubernetes
+30 алертов: узел, источник, телеметрия, gateway и kube-state-metrics молчат, узел Kubernetes
 NotReady, GPU XID/ECC/перегрев/троттлинг, OOMKilled (включая время последнего OOM kill),
 CrashLoopBackOff, частые перезапуски, образ не скачивается, недоступные реплики, застрявший
-rollout, Pending, упавшая Job, DaemonSet не на своих узлах, последний релиз failed. Inhibition: упавший узел скрывает алерты своих GPU и
+rollout, Pending, упавшая Job, DaemonSet не на своих узлах, последний релиз failed, истекающие
+или просроченные CRL и сертификаты (30/7 дней), нечитаемый TLS-файл. Inhibition: упавший узел скрывает алерты своих GPU и
 контейнеров, молчащий источник — алерты своих экземпляров, NotReady узла — недоступные
-pod-ы DaemonSet-ов кластера, Pending/rollout — warning о репликах того же workload.
+pod-ы DaemonSet-ов кластера, Pending/rollout — warning о репликах того же workload, просроченный
+CRL — алерты об отсутствии метрик хостов, GPU и kube-state-metrics (nginx отвергает всех клиентов).
 Runbook — страница портала `#alerts/<имя>`. Silence — в UI Alertmanager.
 
 ### Вход и доступ
@@ -441,6 +447,7 @@ CPU контейнера — в ядрах (1.0 = одно ядро), проце
 | GPU NVIDIA | nvidia-smi (inventory) | модель, PCI, драйвер, pstate, загрузка, VRAM, температуры, мощность/лимит, частоты, вентилятор, throttle reasons, ECC, PCIe, MIG, persistence, процессы с VRAM |
 | GPU AMD | sysfs (inventory) | busy, VRAM, датчики edge/junction/mem, частоты, вентилятор (локальная проверка) |
 | Pipeline | Prometheus, /metrics | up gateway и API, время последнего снимка и ошибки сбора источников |
+| TLS сервера GMan | /metrics (GMAN_TLS_WATCH_FILES) | notAfter сертификатов portal/gateway/CA, nextUpdate crl.pem, ошибка чтения файла |
 
 Неподдерживаемый показатель передается как отсутствующий, а не ноль; температуры датчиков
 не объединяются. GPU host-метрики не приписываются целиком контейнеру: связь процесса с
@@ -525,6 +532,9 @@ OTLP: mTLS завершает nginx (4317), потому что otelcol-contrib 
 заменяя одноименные заголовки клиента; gateway (include_metadata, resource + filter до batch)
 отбрасывает метрики с host.id ≠ CN и без метаданных, а k8s.cluster.name ставит из CN сертификата
 кластера. Gateway не публикуется. Отзыв — `issue.sh revoke` + crl.pem + reload nginx.
+Просроченный crl.pem nginx считает ошибкой проверки любого клиента, поэтому nextUpdate CRL и
+сроки серверных сертификатов и CA контролируют алерты GManTls* (warning за 30 дней, critical
+за 7 и после истечения).
 
 GPU-агенты DaemonSet: projected token pod-а с audience `gman` вместо общих токенов; API
 вызывает TokenReview кластера (сервисная учетная запись gman-token-reviewer с

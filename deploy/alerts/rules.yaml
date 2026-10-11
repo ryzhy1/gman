@@ -9,8 +9,9 @@
 # the gateway's own target is up{job="otel", exported_job=""}.
 # Labels used by Alertmanager (deploy/alerts/alertmanager.yaml):
 #   severity  critical | warning
-#   scope     pipeline | node | gpu | instance | workload: inhibition suppresses gpu/instance alerts of a node that
-#             is down (GManNodeDown, GManK8sNodeNotReady) and instance alerts of a silent inventory source.
+#   scope     pipeline | node | gpu | instance | workload | release | tls: inhibition suppresses gpu/instance
+#             alerts of a node that is down (GManNodeDown, GManK8sNodeNotReady) and instance alerts of a silent
+#             inventory source.
 # runbook_url opens the portal's alerts page; GMAN_PORTAL_URL reaches it as external label gman_portal.
 groups:
   - name: gman-recording
@@ -509,3 +510,70 @@ groups:
             Последний релиз (начат {{ with printf "gman_release_started_timestamp_seconds{service_id='%s',environment='%s'}" $labels.service_id $labels.environment | query }}{{ . | first | value | humanizeTimestamp }}{{ end }})
             в статусе failed: ошибка в Bamboo, сбой новых экземпляров или тайм-аут выката. Причина — на вкладке «Релизы» сервиса.
           runbook_url: '{{ $externalLabels.gman_portal }}/#alerts/GManReleaseFailed'
+
+  # TLS files of nginx (backend/app/exposition.py, GMAN_TLS_WATCH_FILES): one series per watched file (and per
+  # certificate of a bundle). nginx verifies OTLP client certificates against crl.pem: past its nextUpdate every
+  # client is rejected and telemetry stops from all servers, so the CRL has its own alerts.
+  - name: gman-tls
+    rules:
+      - alert: GManTlsCrlExpiring
+        expr: (gman_tls_crl_next_update_timestamp_seconds - time() < 30 * 86400) > 0
+        labels: {severity: warning, scope: tls}
+        annotations:
+          summary: 'Список отзыва {{ $labels.file }} истекает через {{ $value | humanizeDuration }}'
+          description: >-
+            nextUpdate CRL ({{ $labels.issuer }}) через {{ $value | humanizeDuration }}. После этого nginx отвергнет
+            все клиентские сертификаты OTLP и телеметрия всех серверов остановится. Переподписать: issue.sh crl.
+          runbook_url: '{{ $externalLabels.gman_portal }}/#alerts/GManTlsCrlExpiring'
+      - alert: GManTlsCrlExpiring
+        expr: (gman_tls_crl_next_update_timestamp_seconds - time() < 7 * 86400) > 0
+        labels: {severity: critical, scope: tls}
+        annotations:
+          summary: 'Список отзыва {{ $labels.file }} истекает через {{ $value | humanizeDuration }}'
+          description: >-
+            nextUpdate CRL ({{ $labels.issuer }}) через {{ $value | humanizeDuration }}. После этого nginx отвергнет
+            все клиентские сертификаты OTLP и телеметрия всех серверов остановится. Переподписать: issue.sh crl.
+          runbook_url: '{{ $externalLabels.gman_portal }}/#alerts/GManTlsCrlExpiring'
+      - alert: GManTlsCrlExpired
+        expr: time() - gman_tls_crl_next_update_timestamp_seconds >= 0
+        labels: {severity: critical, scope: tls}
+        annotations:
+          summary: 'Список отзыва {{ $labels.file }} просрочен'
+          description: >-
+            nextUpdate CRL ({{ $labels.issuer }}) прошел {{ $value | humanizeDuration }} назад: nginx отвергает все
+            клиентские сертификаты OTLP, телеметрия серверов не принимается.
+          runbook_url: '{{ $externalLabels.gman_portal }}/#alerts/GManTlsCrlExpired'
+      - alert: GManTlsCertExpiring
+        expr: (gman_tls_cert_not_after_timestamp_seconds - time() < 30 * 86400) > 0
+        labels: {severity: warning, scope: tls}
+        annotations:
+          summary: 'Сертификат {{ $labels.subject }} истекает через {{ $value | humanizeDuration }}'
+          description: 'Файл {{ $labels.file }}: notAfter через {{ $value | humanizeDuration }}. Перевыпустить и заменить на сервере.'
+          runbook_url: '{{ $externalLabels.gman_portal }}/#alerts/GManTlsCertExpiring'
+      - alert: GManTlsCertExpiring
+        expr: (gman_tls_cert_not_after_timestamp_seconds - time() < 7 * 86400) > 0
+        labels: {severity: critical, scope: tls}
+        annotations:
+          summary: 'Сертификат {{ $labels.subject }} истекает через {{ $value | humanizeDuration }}'
+          description: 'Файл {{ $labels.file }}: notAfter через {{ $value | humanizeDuration }}. Перевыпустить и заменить на сервере.'
+          runbook_url: '{{ $externalLabels.gman_portal }}/#alerts/GManTlsCertExpiring'
+      - alert: GManTlsCertExpired
+        expr: time() - gman_tls_cert_not_after_timestamp_seconds >= 0
+        labels: {severity: critical, scope: tls}
+        annotations:
+          summary: 'Сертификат {{ $labels.subject }} просрочен'
+          description: >-
+            Файл {{ $labels.file }}: notAfter прошел {{ $value | humanizeDuration }} назад. Клиенты не доверяют
+            порталу или OTLP endpoint (серверный сертификат) либо любому сертификату пилотного CA (CA).
+          runbook_url: '{{ $externalLabels.gman_portal }}/#alerts/GManTlsCertExpired'
+      # Without the file the expiry alerts above cannot fire for it.
+      - alert: GManTlsFileError
+        expr: gman_tls_file_error == 1
+        for: 5m
+        labels: {severity: warning, scope: tls}
+        annotations:
+          summary: 'API не может прочитать {{ $labels.file }}'
+          description: >-
+            Файл из GMAN_TLS_WATCH_FILES отсутствует, не читается пользователем API (65534), не разбирается как
+            сертификат/CRL или похож на ключ. Сроки действия этого файла не контролируются.
+          runbook_url: '{{ $externalLabels.gman_portal }}/#alerts/GManTlsFileError'

@@ -71,9 +71,16 @@
     GManTelemetryGatewayDown срабатывал бы на `up` упавшего DCGM Exporter, переотданный gateway.
     Алерт GManReleaseFailed по gman_release_status (последний релиз окружения failed).
 
+15. Сроки TLS: API отдает на /metrics notAfter сертификатов и nextUpdate CRL из
+    GMAN_TLS_WATCH_FILES (cryptography; PEM-цепочки и DER, кэш по mtime, пути с «key» не
+    читаются, ошибка — gman_tls_file_error); compose.prod монтирует в API portal.pem,
+    gateway.pem, ca.pem и crl.pem без ключей. Группа gman-tls: GManTlsCrlExpiring (30/7 дней),
+    GManTlsCrlExpired (подавляет алерты отсутствия телеметрии), GManTlsCertExpiring (30/7 дней),
+    GManTlsCertExpired, GManTlsFileError; runbook в портале, unit-тесты promtool.
+
 Проверено:
 - Тесты: 195 passed на PostgreSQL 17 (включая запросы истории конфигураций и тест
-  конкурентности), 194 passed и 1 skipped на SQLite; миграции upgrade → downgrade base →
+  конкурентности; прогон до п. 15), 203 passed и 1 skipped на SQLite; миграции upgrade → downgrade base →
   upgrade и `alembic check` на PostgreSQL 17. Frontend: `npm run build`.
 - Kubernetes watch и Events — на fixtures потоков (ADDED/MODIFIED/DELETED, BOOKMARK, ERROR 410,
   сбой kubectl, HTTP 410 in-cluster), Docker `oom` — на fixtures событий; правило OOM —
@@ -96,6 +103,9 @@
   с клиентским сертификатом и отказ без него и с чужим CA; pg_backup.sh на PostgreSQL 17
   (ротация, `--check`, восстановление `pg_restore --clean`); доверие агента пилотному CA
   через SSL_CERT_FILE; nginx-конфиги разобраны crossplane.
+- Сроки TLS: тесты API на CA, сертификатах (в том числе просроченном и цепочке) и CRL (PEM и
+  просроченный DER), созданных cryptography; битый, пустой, отсутствующий файл и путь ключа
+  (не открывается); `promtool test rules` для порогов 30/7 дней и истечения.
 - SSO — против mock IdP в тестах; bamboo_event.py — против локального API; чтение AMD sysfs.
 - Привязка OTLP к сертификату: nginx 1.31 (OTLP-блок deploy/nginx/gman.conf) + otelcol-contrib
   0.162.0 (deploy/otel-gateway.prod.yaml) + отправляющие otelcol с сертификатами issue.sh:
@@ -190,7 +200,9 @@ deploy/alerts/alertmanager.sh --render /tmp/am.yml && amtool check-config /tmp/a
   сертификат кластера общий для DaemonSet, host.id узлов им не привязан; вариант —
   сертификат на pod через cert-manager csi-driver (CN = имя узла, `OU=client`).
 - ~~Отзыв сертификатов (CRL) вместо перевыпуска CA~~ Сделано (п. 13: issue.sh revoke/crl, ssl_crl).
-  Напоминание о переподписи CRL до nextUpdate пока только в документации.
+- ~~Напоминание о переподписи CRL до nextUpdate и сроках сертификатов~~ Сделано (п. 15, алерты GManTls*).
+  Переподпись остается ручной (ключ CA офлайн); клиентские сертификаты узлов на сервере не
+  видны — их срок контролирует только GManHostTelemetryAbsent после истечения.
 - ~~Projected token на каждый GPU-узел в deploy/gpu-attribution-k8s.yaml~~ Сделано (п. 13, TokenReview).
 - ~~Выгрузка бэкапов за пределы сервера; регулярная проверка восстановления~~ Сделано (п. 13)
   (BACKUP_UPLOAD_CMD, `--restore-check`); подключить реальное хранилище.

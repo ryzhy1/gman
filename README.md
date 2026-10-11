@@ -145,8 +145,10 @@ deploy/pki/issue.sh cluster cluster-01      # OTel DaemonSet кластера, C
 `issue.sh ca` сразу создает пустой список отзыва crl.pem (действует CRL_DAYS, 365 дней).
 На сервер GMan в каталог GMAN_TLS_DIR (по умолчанию deploy/pki/out) кладутся только
 portal.pem, portal-key.pem, gateway.pem, gateway-key.pem, ca.pem и crl.pem; все читает
-nginx (root), права ключей 0600. Если CA создан старой версией issue.sh, выполните
-`deploy/pki/issue.sh crl`.
+nginx (root), права ключей 0600. portal.pem, gateway.pem, ca.pem и crl.pem смонтированы
+еще и в API (только чтение, без ключей) для алертов о сроках (раздел «Алерты»): API работает
+под UID 65534, поэтому эти четыре файла должны иметь права 0644 (иначе GManTlsFileError).
+Если CA создан старой версией issue.sh, выполните `deploy/pki/issue.sh crl`.
 
 ### Запуск
 
@@ -154,7 +156,9 @@ nginx (root), права ключей 0600. Если CA создан старо�
 Необязательные: GMAN_BIND_ADDRESS и GMAN_OTLP_BIND_ADDRESS (по умолчанию 0.0.0.0),
 GMAN_TLS_DIR, GMAN_BACKUP_DIR (deploy/backups), GMAN_BACKUP_KEEP (14),
 GMAN_BACKUP_INTERVAL_SECONDS (86400), GMAN_BACKUP_UPLOAD_CMD и GMAN_BACKUP_OFFSITE_DIR
-(выгрузка), GMAN_BACKUP_RESTORE_CHECK_DAYS (7), GMAN_K8S_TOKEN_REVIEW (GPU DaemonSet).
+(выгрузка), GMAN_BACKUP_RESTORE_CHECK_DAYS (7), GMAN_K8S_TOKEN_REVIEW (GPU DaemonSet),
+GMAN_TLS_WATCH_FILES (пути внутри контейнера API через запятую; по умолчанию четыре файла
+/etc/gman/tls/{portal,gateway,ca,crl}.pem).
 
 ```sh
 docker compose --env-file .env -f deploy/compose.yaml -f deploy/compose.prod.yaml up --build -d
@@ -208,7 +212,20 @@ docker compose --env-file .env -f deploy/compose.yaml -f deploy/compose.prod.yam
 иначе контейнер видит старый inode) и перезагружайте nginx; так же обновляются
 сертификаты при перевыпуске. Список отзыва нужно переподписывать до nextUpdate
 (`issue.sh crl`, срок CRL_DAYS): с просроченным crl.pem nginx отвергает все клиентские
-сертификаты. Срок видно в выводе issue.sh и `openssl crl -in crl.pem -noout -nextupdate`.
+сертификаты. Срок видно в выводе issue.sh и `openssl crl -in crl.pem -noout -nextupdate`;
+за 30 и 7 дней до nextUpdate приходит GManTlsCrlExpiring, после — GManTlsCrlExpired, так же
+для portal.pem, gateway.pem и ca.pem (GManTlsCertExpiring/GManTlsCertExpired).
+Переподпись CRL:
+
+```sh
+deploy/pki/issue.sh crl
+scp deploy/pki/out/crl.pem gman:/tmp/ && ssh gman 'cp /tmp/crl.pem <GMAN_TLS_DIR>/crl.pem'
+docker compose --env-file .env -f deploy/compose.yaml -f deploy/compose.prod.yaml exec portal nginx -s reload
+```
+
+API видит новый файл со следующего опроса /metrics, алерт снимается без перезапуска.
+Клиентские сертификаты узлов на сервере не лежат: их срок (CERT_DAYS) отслеживайте по
+выводу issue.sh; истекший сертификат узла виден как GManHostTelemetryAbsent.
 
 Healthcheck есть у db, api, portal, prometheus, grafana и backup (свежий бэкап моложе двух
 интервалов). Образ otelcol distroless, проверки внутри контейнера нет: следите за
@@ -773,7 +790,7 @@ Prometheus rules + Alertmanager, а не Grafana alerting: правила леж
 | deploy/alerts/rules.test.yaml | unit-тесты правил для promtool |
 | deploy/alerts/alertmanager.yaml | маршрутизация, группировка, inhibition |
 | deploy/alerts/alertmanager.sh | entrypoint: добавляет получателей из GMAN_ALERT_* и запускает Alertmanager |
-| backend/app/exposition.py | /metrics API: состояние inventory для правил |
+| backend/app/exposition.py | /metrics API: состояние inventory и сроки TLS-файлов для правил |
 
 | Алерт | Условие | Важность |
 | --- | --- | --- |
@@ -801,6 +818,11 @@ Prometheus rules + Alertmanager, а не Grafana alerting: правила леж
 | GManWorkloadPodsPending | pod-ы workload в Pending дольше 10 минут (значение — их число) | warning |
 | GManJobFailed | условие Failed у Job (backoffLimit, activeDeadlineSeconds) | warning |
 | GManDaemonSetMisscheduled | pod-ы DaemonSet на неподходящих узлах 15 минут | warning |
+| GManTlsCrlExpiring | до nextUpdate crl.pem меньше 30 / 7 дней | warning / critical |
+| GManTlsCrlExpired | nextUpdate crl.pem прошел: nginx отвергает все клиентские сертификаты OTLP | critical |
+| GManTlsCertExpiring | до notAfter сертификата (portal, gateway, CA; каждого в цепочке) меньше 30 / 7 дней | warning / critical |
+| GManTlsCertExpired | сертификат просрочен | critical |
+| GManTlsFileError | файл из GMAN_TLS_WATCH_FILES 5 минут отсутствует, не читается или не разбирается | warning |
 
 Источники данных. Хосты и GPU — телеметрия OTel (host_metrics, DCGM); где DCGM нет,
 температура, ECC и причины троттлинга берутся из nvidia-smi последнего снимка inventory
@@ -813,7 +835,11 @@ gman_source_last_snapshot_timestamp_seconds,
 gman_k8s_node_ready, gman_instance_restarts_total, gman_instance_state_reason,
 gman_instance_last_termination_reason (reason только из фиксированного списка),
 gman_instance_last_oom_timestamp_seconds, gman_gpu_*, gman_release_*. Путь /metrics без токена, но nginx его не проксирует: Prometheus читает
-api:8000 внутри сети Compose, снаружи endpoint недоступен.
+api:8000 внутри сети Compose, снаружи endpoint недоступен. Сроки TLS — тоже с /metrics:
+для каждого файла из GMAN_TLS_WATCH_FILES gman_tls_cert_not_after_timestamp_seconds{file,subject}
+(по ряду на сертификат PEM-цепочки), gman_tls_crl_next_update_timestamp_seconds{file,issuer}
+и gman_tls_file_error{file}. Ключи API не читает: путь, содержащий «key», сразу дает
+ошибку файла. Разбор кэшируется до изменения mtime, размера или inode файла.
 
 Подавление: GManNodeDown и GManK8sNodeNotReady скрывают алерты GPU, контейнеров и
 каналов своего хоста (метка host_id); GManSourceSilent — алерты экземпляров и узлов
@@ -821,12 +847,14 @@ api:8000 внутри сети Compose, снаружи endpoint недоступ
 critical скрывает warning того же алерта и объекта; CrashLoopBackOff — RestartLoop;
 Pending-pod-ы или застрявший rollout workload — его warning о недоступных репликах
 (critical «нет ни одной реплики» не скрывается); NotReady узла кластера — недоступные
-реплики DaemonSet-ов этого кластера (по pod-у каждого DaemonSet на узле). Deployment и
+реплики DaemonSet-ов этого кластера (по pod-у каждого DaemonSet на узле); просроченный CRL
+(GManTlsCrlExpired) — алерты об отсутствии метрик хостов, GPU и kube-state-metrics: их
+причина одна. Deployment и
 StatefulSet при падении узла не подавляются: их реплики должны переехать. При
 недоступном gateway алерты об отсутствии метрик хостов и GPU не создаются вовсе
 (иначе они подавили бы алерты по inventory всех узлов). Группировка по объекту
 (alertname, source_id, host_id, UUID, instance_id, namespace, workload_kind, workload,
-service_id, environment); повтор через 4 часа, critical — через час.
+service_id, environment, file); повтор через 4 часа, critical — через час.
 
 Получатели задаются в .env и применяются при пересоздании контейнера alertmanager:
 GMAN_ALERT_WEBHOOK_URL (JSON Alertmanager, send_resolved) и/или GMAN_ALERT_EMAIL_TO с
@@ -886,12 +914,12 @@ npm run build
 без DATABASE_URL применяется SQLite только для локальной разработки/тестов.
 Задайте токены, как в Compose. Frontend: npm run dev, /api проксируется на 8000.
 
-Проверено: тесты API/агента/метрик/истории конфигураций/ссылок Splunk/SSO/алертов (включая spool, backoff, flock, debounce `--watch`, watch Kubernetes и Events на fixtures; SSO — против mock IdP), TypeScript и production build,
+Проверено: тесты API/агента/метрик/истории конфигураций/ссылок Splunk/SSO/алертов/сроков TLS (включая spool, backoff, flock, debounce `--watch`, watch Kubernetes и Events на fixtures; SSO — против mock IdP), TypeScript и production build,
 синтаксис Docker Compose; чтение AMD sysfs; браузерная проверка портала на тестовых
 данных с API на SQLite; bamboo_event.py против локального API. Тест test_deploy.py сверяет
 имена DCGM с deploy/dcgm-counters.csv, allowlist kube-state-metrics с правилами и дашбордами,
 runbook каждого алерта и переменные дашбордов в ссылках портала. Тесты проходят на SQLite
-(198 passed, 1 skipped); последний прогон на PostgreSQL 17 — до этих проверок (180 passed). Docker end-to-end, Kubernetes, NVIDIA/DCGM
+(203 passed, 1 skipped); последний прогон на PostgreSQL 17 — до этих проверок (180 passed). Docker end-to-end, Kubernetes, NVIDIA/DCGM
 и настоящий Bamboo еще не проверены.
 
 ## Хранилище

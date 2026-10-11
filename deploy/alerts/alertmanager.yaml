@@ -3,8 +3,8 @@
 # (Alertmanager itself does not expand variables in its config).
 route:
   receiver: gman
-  # One notification per object: a node, a GPU, an instance, a Kubernetes workload or a service release.
-  group_by: [alertname, source_id, host_id, UUID, instance_id, namespace, workload_kind, workload, service_id, environment]
+  # One notification per object: a node, a GPU, an instance, a Kubernetes workload, a service release or a TLS file.
+  group_by: [alertname, source_id, host_id, UUID, instance_id, namespace, workload_kind, workload, service_id, environment, file]
   # Prometheus re-sends firing alerts once a minute per rule group. After an Alertmanager restart, waiting
   # longer than that lets inhibiting alerts (node down) arrive before their children are notified.
   group_wait: 90s
@@ -32,7 +32,7 @@ inhibit_rules:
   # Labels missing on both sides count as equal: the list must name every object label.
   - source_matchers: ['severity="critical"']
     target_matchers: ['severity="warning"']
-    equal: [alertname, host_id, UUID, source_id, namespace, workload_kind, workload]
+    equal: [alertname, host_id, UUID, source_id, namespace, workload_kind, workload, file, subject, issuer]
   # Workloads (kube-state-metrics). A pending pod or a stuck rollout explains the missing replicas of the same
   # workload; the critical «no replicas at all» is never hidden by them.
   - source_matchers: ['alertname=~"GManWorkloadPodsPending|GManWorkloadRolloutStuck"']
@@ -43,6 +43,9 @@ inhibit_rules:
   - source_matchers: ['alertname="GManK8sNodeNotReady"']
     target_matchers: ['alertname="GManWorkloadReplicasUnavailable"', 'workload_kind="DaemonSet"']
     equal: [source_id]
+  # An expired CRL makes nginx reject every OTLP client: one TLS alert instead of one per host and cluster.
+  - source_matchers: ['alertname="GManTlsCrlExpired"']
+    target_matchers: ['alertname=~"GManHostTelemetryAbsent|GManGpuTelemetryAbsent|GManKubeStateMetricsAbsent"']
   # CrashLoopBackOff already explains the restarts.
   - source_matchers: ['alertname="GManInstanceCrashLoopBackOff"']
     target_matchers: ['alertname="GManInstanceRestartLoop"']

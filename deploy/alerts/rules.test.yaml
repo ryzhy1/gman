@@ -791,3 +791,147 @@ tests:
       - eval_time: 14m
         alertname: GManReleaseFailed
         exp_alerts: []
+
+
+  # TLS files as backend/app/exposition.py renders them. time() starts at 0, so each expiry is set 5 minutes past
+  # a threshold: crl.pem crosses 30 days, gateway.pem 7 days and portal.pem expires at 5 minutes.
+  - name: tls expiry thresholds
+    external_labels: {gman_portal: https://gman.example}
+    interval: 1m
+    input_series:
+      - series: 'gman_tls_crl_next_update_timestamp_seconds{job="gman-api", instance="api:8000", file="/etc/gman/tls/crl.pem", issuer="CN=GMan pilot CA,O=GMan pilot"}'
+        values: '2592300x10'
+      - series: 'gman_tls_cert_not_after_timestamp_seconds{job="gman-api", instance="api:8000", file="/etc/gman/tls/gateway.pem", subject="CN=gman.example.org,OU=server,O=GMan pilot"}'
+        values: '605100x10'
+      - series: 'gman_tls_cert_not_after_timestamp_seconds{job="gman-api", instance="api:8000", file="/etc/gman/tls/portal.pem", subject="CN=portal.example.org,OU=server,O=GMan pilot"}'
+        values: '300x10'
+      # Five years: no alert.
+      - series: 'gman_tls_cert_not_after_timestamp_seconds{job="gman-api", instance="api:8000", file="/etc/gman/tls/ca.pem", subject="CN=GMan pilot CA,O=GMan pilot"}'
+        values: '157680000x10'
+    alert_rule_test:
+      - eval_time: 4m
+        alertname: GManTlsCrlExpiring
+        exp_alerts: []
+      - eval_time: 6m
+        alertname: GManTlsCrlExpiring
+        exp_alerts:
+          - exp_labels: {severity: warning, scope: tls, job: gman-api, instance: 'api:8000', file: /etc/gman/tls/crl.pem, issuer: 'CN=GMan pilot CA,O=GMan pilot'}
+            exp_annotations:
+              summary: 'Список отзыва /etc/gman/tls/crl.pem истекает через 29d 23h 59m 0s'
+              description: >-
+                nextUpdate CRL (CN=GMan pilot CA,O=GMan pilot) через 29d 23h 59m 0s. После этого nginx отвергнет
+                все клиентские сертификаты OTLP и телеметрия всех серверов остановится. Переподписать: issue.sh crl.
+              runbook_url: https://gman.example/#alerts/GManTlsCrlExpiring
+      # At 4 minutes gateway.pem is in the 30-day window, portal.pem has one minute left (both severities;
+      # Alertmanager inhibits the warning of the same alertname, file and subject).
+      - eval_time: 4m
+        alertname: GManTlsCertExpiring
+        exp_alerts:
+          - exp_labels: {severity: warning, scope: tls, job: gman-api, instance: 'api:8000', file: /etc/gman/tls/gateway.pem, subject: 'CN=gman.example.org,OU=server,O=GMan pilot'}
+            exp_annotations:
+              summary: 'Сертификат CN=gman.example.org,OU=server,O=GMan pilot истекает через 7d 0h 1m 0s'
+              description: 'Файл /etc/gman/tls/gateway.pem: notAfter через 7d 0h 1m 0s. Перевыпустить и заменить на сервере.'
+              runbook_url: https://gman.example/#alerts/GManTlsCertExpiring
+          - exp_labels: {severity: warning, scope: tls, job: gman-api, instance: 'api:8000', file: /etc/gman/tls/portal.pem, subject: 'CN=portal.example.org,OU=server,O=GMan pilot'}
+            exp_annotations:
+              summary: 'Сертификат CN=portal.example.org,OU=server,O=GMan pilot истекает через 1m 0s'
+              description: 'Файл /etc/gman/tls/portal.pem: notAfter через 1m 0s. Перевыпустить и заменить на сервере.'
+              runbook_url: https://gman.example/#alerts/GManTlsCertExpiring
+          - exp_labels: {severity: critical, scope: tls, job: gman-api, instance: 'api:8000', file: /etc/gman/tls/portal.pem, subject: 'CN=portal.example.org,OU=server,O=GMan pilot'}
+            exp_annotations:
+              summary: 'Сертификат CN=portal.example.org,OU=server,O=GMan pilot истекает через 1m 0s'
+              description: 'Файл /etc/gman/tls/portal.pem: notAfter через 1m 0s. Перевыпустить и заменить на сервере.'
+              runbook_url: https://gman.example/#alerts/GManTlsCertExpiring
+      # At 6 minutes gateway.pem is inside 7 days and portal.pem has expired.
+      - eval_time: 6m
+        alertname: GManTlsCertExpiring
+        exp_alerts:
+          - exp_labels: {severity: warning, scope: tls, job: gman-api, instance: 'api:8000', file: /etc/gman/tls/gateway.pem, subject: 'CN=gman.example.org,OU=server,O=GMan pilot'}
+            exp_annotations:
+              summary: 'Сертификат CN=gman.example.org,OU=server,O=GMan pilot истекает через 6d 23h 59m 0s'
+              description: 'Файл /etc/gman/tls/gateway.pem: notAfter через 6d 23h 59m 0s. Перевыпустить и заменить на сервере.'
+              runbook_url: https://gman.example/#alerts/GManTlsCertExpiring
+          - exp_labels: {severity: critical, scope: tls, job: gman-api, instance: 'api:8000', file: /etc/gman/tls/gateway.pem, subject: 'CN=gman.example.org,OU=server,O=GMan pilot'}
+            exp_annotations:
+              summary: 'Сертификат CN=gman.example.org,OU=server,O=GMan pilot истекает через 6d 23h 59m 0s'
+              description: 'Файл /etc/gman/tls/gateway.pem: notAfter через 6d 23h 59m 0s. Перевыпустить и заменить на сервере.'
+              runbook_url: https://gman.example/#alerts/GManTlsCertExpiring
+      - eval_time: 4m
+        alertname: GManTlsCertExpired
+        exp_alerts: []
+      - eval_time: 6m
+        alertname: GManTlsCertExpired
+        exp_alerts:
+          - exp_labels: {severity: critical, scope: tls, job: gman-api, instance: 'api:8000', file: /etc/gman/tls/portal.pem, subject: 'CN=portal.example.org,OU=server,O=GMan pilot'}
+            exp_annotations:
+              summary: 'Сертификат CN=portal.example.org,OU=server,O=GMan pilot просрочен'
+              description: >-
+                Файл /etc/gman/tls/portal.pem: notAfter прошел 1m 0s назад. Клиенты не доверяют
+                порталу или OTLP endpoint (серверный сертификат) либо любому сертификату пилотного CA (CA).
+              runbook_url: https://gman.example/#alerts/GManTlsCertExpired
+
+  # crl.pem expires at 10 minutes: both severities of GManTlsCrlExpiring before, GManTlsCrlExpired after.
+  - name: tls crl expired
+    external_labels: {gman_portal: https://gman.example}
+    interval: 1m
+    input_series:
+      - series: 'gman_tls_crl_next_update_timestamp_seconds{job="gman-api", instance="api:8000", file="/etc/gman/tls/crl.pem", issuer="CN=GMan pilot CA,O=GMan pilot"}'
+        values: '600x15'
+    alert_rule_test:
+      - eval_time: 8m
+        alertname: GManTlsCrlExpiring
+        exp_alerts:
+          - exp_labels: {severity: warning, scope: tls, job: gman-api, instance: 'api:8000', file: /etc/gman/tls/crl.pem, issuer: 'CN=GMan pilot CA,O=GMan pilot'}
+            exp_annotations:
+              summary: 'Список отзыва /etc/gman/tls/crl.pem истекает через 2m 0s'
+              description: >-
+                nextUpdate CRL (CN=GMan pilot CA,O=GMan pilot) через 2m 0s. После этого nginx отвергнет
+                все клиентские сертификаты OTLP и телеметрия всех серверов остановится. Переподписать: issue.sh crl.
+              runbook_url: https://gman.example/#alerts/GManTlsCrlExpiring
+          - exp_labels: {severity: critical, scope: tls, job: gman-api, instance: 'api:8000', file: /etc/gman/tls/crl.pem, issuer: 'CN=GMan pilot CA,O=GMan pilot'}
+            exp_annotations:
+              summary: 'Список отзыва /etc/gman/tls/crl.pem истекает через 2m 0s'
+              description: >-
+                nextUpdate CRL (CN=GMan pilot CA,O=GMan pilot) через 2m 0s. После этого nginx отвергнет
+                все клиентские сертификаты OTLP и телеметрия всех серверов остановится. Переподписать: issue.sh crl.
+              runbook_url: https://gman.example/#alerts/GManTlsCrlExpiring
+      - eval_time: 8m
+        alertname: GManTlsCrlExpired
+        exp_alerts: []
+      - eval_time: 12m
+        alertname: GManTlsCrlExpiring
+        exp_alerts: []
+      - eval_time: 12m
+        alertname: GManTlsCrlExpired
+        exp_alerts:
+          - exp_labels: {severity: critical, scope: tls, job: gman-api, instance: 'api:8000', file: /etc/gman/tls/crl.pem, issuer: 'CN=GMan pilot CA,O=GMan pilot'}
+            exp_annotations:
+              summary: 'Список отзыва /etc/gman/tls/crl.pem просрочен'
+              description: >-
+                nextUpdate CRL (CN=GMan pilot CA,O=GMan pilot) прошел 2m 0s назад: nginx отвергает все
+                клиентские сертификаты OTLP, телеметрия серверов не принимается.
+              runbook_url: https://gman.example/#alerts/GManTlsCrlExpired
+
+  # crl.pem became unreadable at 2 minutes (e.g. replaced with mode 0600); portal.pem is fine.
+  - name: tls file error
+    external_labels: {gman_portal: https://gman.example}
+    interval: 1m
+    input_series:
+      - series: 'gman_tls_file_error{job="gman-api", instance="api:8000", file="/etc/gman/tls/crl.pem"}'
+        values: '0 0 1x10'
+      - series: 'gman_tls_file_error{job="gman-api", instance="api:8000", file="/etc/gman/tls/portal.pem"}'
+        values: '0x12'
+    alert_rule_test:
+      - eval_time: 5m
+        alertname: GManTlsFileError
+        exp_alerts: []
+      - eval_time: 8m
+        alertname: GManTlsFileError
+        exp_alerts:
+          - exp_labels: {severity: warning, scope: tls, job: gman-api, instance: 'api:8000', file: /etc/gman/tls/crl.pem}
+            exp_annotations:
+              summary: 'API не может прочитать /etc/gman/tls/crl.pem'
+              description: >-
+                Файл из GMAN_TLS_WATCH_FILES отсутствует, не читается пользователем API (65534), не разбирается как
+                сертификат/CRL или похож на ключ. Сроки действия этого файла не контролируются.
+              runbook_url: https://gman.example/#alerts/GManTlsFileError

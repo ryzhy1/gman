@@ -23,6 +23,28 @@ const RUNBOOKS: [string, string, string[]][] = [
   ['GManTelemetryGatewayDown', 'OTel gateway недоступен', [
     'docker compose ps otel; docker compose logs otel — ошибки конфигурации или нехватка памяти.',
     'Пока gateway лежит, алерты об отсутствии метрик хостов и GPU не создаются; алерты по inventory работают.']],
+  ['GManTlsCrlExpiring', 'Истекает список отзыва (CRL)', [
+    'Не дать CRL истечь: после nextUpdate nginx отвергает все клиентские сертификаты OTLP, и метрики перестают приходить со всех серверов.',
+    'На машине администратора: deploy/pki/issue.sh crl (новый crl.pem на CRL_DAYS, по умолчанию 365 дней).',
+    'scp deploy/pki/out/crl.pem gman:/tmp/; на сервере cp /tmp/crl.pem <GMAN_TLS_DIR>/crl.pem (cp, не mv: файл смонтирован по inode), права 0644.',
+    'docker compose --env-file .env -f deploy/compose.yaml -f deploy/compose.prod.yaml exec portal nginx -s reload. Алерт снимется при следующем опросе /metrics.',
+    'С корпоративным CA — получить свежий CRL у его владельцев и положить так же.']],
+  ['GManTlsCrlExpired', 'Список отзыва (CRL) просрочен', [
+    'nginx сейчас отвергает все клиентские сертификаты OTLP: метрики не приходят ни с одного сервера (алерты об отсутствии метрик подавлены этим алертом). Inventory по HTTPS не затронут.',
+    'Срочно: deploy/pki/issue.sh crl на машине администратора, затем cp crl.pem в <GMAN_TLS_DIR>/crl.pem на сервере и nginx -s reload (шаги — в GManTlsCrlExpiring).',
+    'Проверка: openssl crl -in <GMAN_TLS_DIR>/crl.pem -noout -nextupdate; в журнале Collector-ов пропадают ошибки TLS, GManHostTelemetryAbsent не появляется.']],
+  ['GManTlsCertExpiring', 'Истекает сертификат', [
+    'Метка file — какой файл: portal.pem (HTTPS портала и API, им пользуются агенты inventory), gateway.pem (OTLP 4317), ca.pem (CA пилота).',
+    'Серверный сертификат: на машине администратора удалить старые deploy/pki/out/<name>.pem и <name>-key.pem, выполнить deploy/pki/issue.sh server <name> DNS:<имя> (те же SAN), скопировать оба файла в GMAN_TLS_DIR через cp и выполнить nginx -s reload.',
+    'CA: перевыпуск означает новые сертификаты всех узлов и серверов и раздачу нового ca.pem — планировать заранее; срок CA (CA_DAYS) — 5 лет.',
+    'С корпоративным CA — запросить новый сертификат у его владельцев, имена файлов те же.']],
+  ['GManTlsCertExpired', 'Сертификат просрочен', [
+    'portal.pem: агенты inventory и браузеры не доверяют порталу; gateway.pem: Collector-ы не подключаются к 4317; ca.pem: не проходят все сертификаты пилота.',
+    'Перевыпустить и заменить, как в GManTlsCertExpiring, затем nginx -s reload.']],
+  ['GManTlsFileError', 'Файл TLS не читается', [
+    'Файл из GMAN_TLS_WATCH_FILES отсутствует, нечитаем пользователем API (65534) или не разбирается: сроки по нему не контролируются.',
+    'Проверить на сервере: ls -l <GMAN_TLS_DIR>; сертификаты и crl.pem должны иметь права 0644 (ключи остаются 0600 и в API не монтируются).',
+    'Пути с «key» в имени API не читает намеренно — уберите их из GMAN_TLS_WATCH_FILES. Подробности — в журнале API (docker compose logs api).']],
   ['GManApiMetricsDown', 'API не отдает /metrics', [
     'docker compose ps api; логи API, доступность PostgreSQL.',
     'Алерты по inventory (молчащие источники, OOMKilled, CrashLoopBackOff) в это время не вычисляются.']],
@@ -90,7 +112,8 @@ const RUNBOOKS: [string, string, string[]][] = [
 
 const OBJECT_LABELS = [['host_id', 'Хост'], ['source_id', 'Источник'], ['UUID', 'GPU'], ['instance_name', 'Экземпляр'],
   ['namespace', 'Namespace'], ['workload_kind', 'Тип'], ['workload', 'Workload'], ['service_id', 'Сервис'],
-  ['environment', 'Окружение'], ['reason', 'Причина']] as const;
+  ['environment', 'Окружение'], ['reason', 'Причина'], ['file', 'Файл'], ['subject', 'Сертификат'],
+  ['issuer', 'Издатель CRL']] as const;
 
 export function Alerts({ token, refreshKey }: { token: string; refreshKey: string }) {
   const [data, setData] = useState<AlertList | null>(null);
