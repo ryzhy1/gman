@@ -136,6 +136,21 @@ class Deployment(Base):
     received_at: Mapped[datetime] = mapped_column(UTC)
 
 
+class UserSession(Base):
+    """Signed-in SSO users. Only a hash of the cookie value is stored, so a database dump yields no sessions."""
+    __tablename__ = "sessions"
+    id: Mapped[str] = mapped_column(String(64), primary_key=True)  # sha256 hex of the cookie value
+    subject: Mapped[str] = mapped_column(String)
+    role: Mapped[str] = mapped_column(String)
+    # email, name, username and groups as seen at sign-in; roles are not re-read from the IdP mid-session.
+    data: Mapped[dict] = mapped_column(Json)
+    csrf_token: Mapped[str] = mapped_column(String)
+    created_at: Mapped[datetime] = mapped_column(UTC)
+    expires_at: Mapped[datetime] = mapped_column(UTC)
+
+    __table_args__ = (Index("ix_sessions_expires_at", "expires_at"),)
+
+
 def connect(url):
     return create_engine(url, pool_pre_ping=url.startswith("postgresql"))
 
@@ -172,6 +187,11 @@ def put_service(session, value):
         for key, item in known.items():
             setattr(row, key, item)
         row.extra = extra
+
+
+def service(session, service_id):
+    row = session.get(Service, service_id)
+    return None if row is None else {**{f: getattr(row, f) for f in SERVICE_FIELDS}, **row.extra}
 
 
 def sources(session):

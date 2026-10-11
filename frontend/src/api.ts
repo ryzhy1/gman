@@ -1,7 +1,26 @@
 export type Service = {
   id: string; name: string; description: string; owner: string; team: string;
   repository: string; grafana: string; splunk: string; bamboo: string;
+  /** Who may edit the entry with the service owner role: subject, email, username or "group:<name>". */
+  owners?: string[];
 };
+
+export type Role = 'viewer' | 'owner' | 'admin';
+/** Signed-in user: an SSO session (cookie + CSRF token) or a shared Bearer token. */
+export type Me = {
+  auth: 'oidc' | 'token'; role: Role; subject: string; email: string; name: string;
+  identities: string[]; csrf_token: string | null;
+};
+export const ROLE_LABELS: Record<Role, string> = {
+  viewer: 'Просмотр', owner: 'Владелец сервиса', admin: 'Администратор платформы',
+};
+
+/** Mirrors the API check; the API remains the authority. */
+export function canEdit(me: Me, service: Service): boolean {
+  if (me.role === 'admin') return true;
+  return me.role === 'owner' && me.auth === 'oidc'
+    && (service.owners ?? []).some(o => me.identities.includes(o.trim().toLowerCase()));
+}
 
 export type Origin = Partial<Record<
   'compose_project' | 'compose_service' | 'compose_working_dir' | 'image_source' | 'image_revision' |
@@ -63,14 +82,38 @@ export type Overview = { services: Service[]; sources: Source[]; events: Audit[]
 export type EventPage = { events: Audit[]; next: string | null };
 
 export class ApiError extends Error {
-  constructor(public status: number) {
-    super(status === 401 ? 'Неверный токен просмотра' : `Ошибка API: ${status}`);
+  constructor(public status: number, detail?: string) {
+    super(status === 401 ? 'Требуется вход: токен неверен или сессия истекла'
+      : status === 403 ? `Недостаточно прав${detail ? `: ${detail}` : ''}`
+      : `Ошибка API: ${status}${detail ? ` · ${detail}` : ''}`);
   }
 }
 
+/** Empty token: the SSO session cookie is sent instead (same origin). */
+function authHeaders(token: string): Record<string, string> {
+  return token ? { Authorization: `Bearer ${token}` } : {};
+}
+
+async function failure(response: Response): Promise<ApiError> {
+  const detail = await response.json().then(b => b?.detail, () => undefined);
+  return new ApiError(response.status, typeof detail === 'string' ? detail : undefined);
+}
+
 export async function get<T>(token: string, path: string, signal?: AbortSignal): Promise<T> {
-  const response = await fetch(path, { headers: { Authorization: `Bearer ${token}` }, signal });
-  if (!response.ok) throw new ApiError(response.status);
+  const response = await fetch(path, { headers: authHeaders(token), signal, credentials: 'same-origin' });
+  if (!response.ok) throw await failure(response);
+  return response.json();
+}
+
+/** Mutating request; a cookie session must prove the request comes from the portal with its CSRF token. */
+export async function send<T>(me: Me, token: string, method: 'PUT' | 'POST', path: string, body?: unknown): Promise<T> {
+  const headers = authHeaders(token);
+  if (me.csrf_token) headers['X-CSRF-Token'] = me.csrf_token;
+  if (body !== undefined) headers['Content-Type'] = 'application/json';
+  const response = await fetch(path, {
+    method, headers, credentials: 'same-origin', body: body === undefined ? undefined : JSON.stringify(body),
+  });
+  if (!response.ok) throw await failure(response);
   return response.json();
 }
 

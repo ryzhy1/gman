@@ -49,6 +49,9 @@ NVIDIA на серверах, Bitbucket/GitLab для исходного код�
   частоты, XID); вкладка «Ресурсы» с графиками за 1 час / 24 часа / 7 дней.
 - OTel Collector на хосте → OTel Gateway → Prometheus → Grafana с готовыми дашбордами
   «GMan · Хост» и «GMan · Сервис»; кнопки Grafana в портале ведут на них по умолчанию.
+- Вход через корпоративный SSO (OIDC) с ролями «Просмотр», «Владелец сервиса» и
+  «Администратор платформы»; владельцы правят только свои записи каталога, изменения
+  каталога пишутся в журнал с автором. Без настройки SSO работает вход по токену.
 
 ## Локальный запуск через Docker
 
@@ -59,7 +62,8 @@ python3 deploy/init_env.py
 docker compose --env-file .env -f deploy/compose.yaml up --build -d
 ```
 
-Открыть http://127.0.0.1:8080. Войти с GMAN_READ_TOKEN из локального .env.
+Открыть http://127.0.0.1:8080. Без SSO войти с GMAN_READ_TOKEN (просмотр) или
+GMAN_ADMIN_TOKEN (администратор) из локального .env; SSO — раздел «Вход и роли».
 Prometheus: http://127.0.0.1:9090. Grafana: http://127.0.0.1:3000 (admin /
 GRAFANA_ADMIN_PASSWORD из .env). Порты привязаны к loopback. Если .env создан
 предыдущей версией, добавьте в него GRAFANA_ADMIN_PASSWORD вручную.
@@ -70,10 +74,58 @@ init_env.py не перезаписывает существующий .env. Н�
 server-01 и cluster-01; для остальных узлов добавьте отдельные токены в
 GMAN_AGENT_TOKENS и пересоздайте API. Не используйте один токен для всех серверов.
 
+## Вход и роли
+
+Люди входят через корпоративный SSO (OIDC Authorization Code + PKCE). Обмен кода,
+проверка ID token (подпись по JWKS, issuer, audience, nonce, срок) и сессия — на стороне
+API (конфиденциальный клиент). Браузер получает только HttpOnly cookie сессии
+(SameSite=Lax, Secure и префикс `__Host-` при HTTPS); в базе хранится лишь хеш ее значения.
+Изменяющие запросы из портала передают CSRF-токен сессии в заголовке X-CSRF-Token.
+«Выйти» удаляет сессию на сервере.
+
+Роль берется из групп IdP при входе и действует до конца сессии (по умолчанию 8 часов):
+
+| Роль | Права | Группы |
+| --- | --- | --- |
+| Просмотр (viewer) | только чтение | GMAN_OIDC_VIEWER_GROUPS (`*` — любой вошедший) |
+| Владелец сервиса (owner) | чтение; изменение записей каталога, где он в `owners` | GMAN_OIDC_OWNER_GROUPS |
+| Администратор платформы (admin) | все, включая новые сервисы и список `owners` | GMAN_OIDC_ADMIN_GROUPS |
+
+Группы перечисляются через запятую, при нескольких совпадениях действует старшая роль.
+Пользователь без подходящей группы не входит. Владение задается полем `owners` записи
+каталога: email, логин (preferred_username), subject или `group:<группа IdP>`, без учета
+регистра. Владелец не может создать сервис и изменить `owners` — это делает администратор.
+Поле `owner` («Ответственный») остается описанием и прав не дает.
+
+Настройка (переменные API, в compose они берутся из .env):
+
+| Переменная | Назначение |
+| --- | --- |
+| GMAN_OIDC_ISSUER | issuer IdP; пустое значение — режим только токенов |
+| GMAN_OIDC_CLIENT_ID, GMAN_OIDC_CLIENT_SECRET | конфиденциальный клиент в IdP |
+| GMAN_OIDC_REDIRECT_URI | `https://<портал>/api/auth/callback`, зарегистрировать в IdP |
+| GMAN_OIDC_POST_LOGOUT_URI | необязательно: `https://<портал>/?logged_out=1` для выхода и из IdP |
+| GMAN_OIDC_SCOPES | по умолчанию `openid profile email` |
+| GMAN_OIDC_GROUPS_CLAIM | claim с группами, по умолчанию `groups`; путь через точку, например `realm_access.roles` |
+| GMAN_OIDC_ADMIN_GROUPS, GMAN_OIDC_OWNER_GROUPS, GMAN_OIDC_VIEWER_GROUPS | группы ролей |
+| GMAN_SESSION_HOURS | срок сессии, по умолчанию 8 |
+
+Если групп нет в ID token, они читаются из userinfo. Частичная настройка OIDC
+останавливает запуск API с перечнем недостающих переменных. Endpoints: GET
+/api/auth/login, GET /api/auth/callback, POST /api/auth/logout, GET /api/me.
+
+Bearer-токены остаются для автоматизации и режима без SSO: GMAN_READ_TOKEN дает чтение,
+GMAN_ADMIN_TOKEN — права администратора; пустое значение отключает токен. Изменения
+через admin-токен пишутся в журнал с автором GMAN_ADMIN_TOKEN (человек неизвестен).
+GMAN_CI_TOKEN и GMAN_AGENT_TOKENS не изменились. Без GMAN_OIDC_ISSUER портал
+показывает форму токена, как раньше.
+
 ## Регистрация сервиса
 
 Скопируйте deploy/service.example.json, заполните реальные поля. Ссылки необязательны.
-Загрузите запись через PUT /api/services/{id} с Bearer GMAN_ADMIN_TOKEN.
+Загрузите запись через PUT /api/services/{id} с Bearer GMAN_ADMIN_TOKEN или войдите в
+портал администратором и задайте `owners`; дальше владельцы правят запись в карточке
+сервиса («Изменить запись каталога»). Создание и изменения записи видны в журнале событий.
 Пример для локальной оболочки (токен задается в окружении):
 
 ```sh
@@ -204,7 +256,7 @@ npm run build
 без DATABASE_URL применяется SQLite только для локальной разработки/тестов.
 Задайте токены, как в Compose. Frontend: npm run dev, /api проксируется на 8000.
 
-Проверено: 20 тестов API/агента/метрик, TypeScript и production build,
+Проверено: 57 тестов API/агента/метрик/SSO (SSO — против mock IdP), TypeScript и production build,
 синтаксис Docker Compose; чтение AMD sysfs; браузерная проверка портала на тестовых
 данных с API на SQLite; bamboo_event.py против локального API. PostgreSQL,
 Docker end-to-end, Kubernetes, NVIDIA/DCGM и настоящий Bamboo еще не проверены.
@@ -215,7 +267,8 @@ PostgreSQL со схемой из Alembic-миграций (backend/migrations),
 под advisory lock, поэтому несколько реплик могут стартовать одновременно. Таблицы:
 services, sources (последний снимок), instances (текущее состояние), config_snapshots
 (история различающихся конфигураций экземпляра по хешу — основа для diff версий), events,
-deployments. Новые поля снимков хранятся в JSON и не требуют миграций.
+deployments, sessions (SSO-сессии, только хеш cookie). Новые поля снимков и каталога
+(например, owners) хранятся в JSON и не требуют миграций.
 GMAN_RETENTION_DAYS (по умолчанию 180, 0 — отключить) удаляет события и неиспользуемые
 снимки конфигурации старше срока; деплои не удаляются.
 
@@ -226,7 +279,7 @@ GMAN_RETENTION_DAYS (по умолчанию 180, 0 — отключить) уд
 
 ## Границы пилота
 
-Это основа для развития, не завершенный production PaaS. Еще нужны SSO/RBAC,
+Это основа для развития, не завершенный production PaaS. Еще нужны
 backup/restore, ограничение размера/частоты входящих запросов на ingress,
 agent spool/retry, поток runtime-событий и
 Kubernetes audit, нормализованные controllers/nodes, requests/probes/security config,

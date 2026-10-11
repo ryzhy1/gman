@@ -16,7 +16,7 @@
 4. Хранилище: нормализованная схема PostgreSQL, Alembic, история конфигураций по хешу,
    retention. Проверено на PostgreSQL 17.
 
-Тесты: 31 passed, 1 skipped (тест конкурентности только для PostgreSQL).
+Тесты: 57 passed, 1 skipped (тест конкурентности только для PostgreSQL).
 Frontend: `npm run build` проходит. Подробности — в README.
 
 ## Подготовка на новой машине
@@ -69,7 +69,11 @@ Grafana 12.1.1 с эмуляцией Docker API, kubelet и вывода DCGM.
 
 ## Дальше по плану
 
-- SSO (OIDC) и роли viewer / service owner / platform admin вместо общего токена.
+- ~~SSO (OIDC) и роли viewer / service owner / platform admin вместо общего токена.~~
+  Сделано: вход Authorization Code + PKCE через API, серверные сессии (миграция 0002),
+  CSRF, роли из групп IdP, владельцы сервиса в поле `owners`, автор изменений каталога
+  в журнале. Bearer-токены остаются для автоматизации и режима без SSO. Проверено
+  против mock IdP в тестах; с настоящим IdP (Keycloak/AD FS/Okta) еще не проверялось.
 - Атрибуция процессов GPU в Kubernetes (PID → pod) — сейчас только Docker-хосты.
 - Алерты (Grafana alerting или Alertmanager): узел/источник молчит, GPU XID/ECC,
   перегрев, троттлинг, OOMKilled, CrashLoopBackOff.

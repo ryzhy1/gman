@@ -17,13 +17,26 @@ services:
     build: ../backend
     environment:
       DATABASE_URL: postgresql+psycopg://gman:${POSTGRES_PASSWORD}@db/gman
-      GMAN_READ_TOKEN: ${GMAN_READ_TOKEN:?Set GMAN_READ_TOKEN}
-      GMAN_ADMIN_TOKEN: ${GMAN_ADMIN_TOKEN:?Set GMAN_ADMIN_TOKEN}
+      # Shared Bearer tokens for automation and token-only mode; an empty value disables the token.
+      GMAN_READ_TOKEN: ${GMAN_READ_TOKEN:-}
+      GMAN_ADMIN_TOKEN: ${GMAN_ADMIN_TOKEN:-}
       GMAN_CI_TOKEN: ${GMAN_CI_TOKEN:?Set GMAN_CI_TOKEN}
       GMAN_AGENT_TOKENS: ${GMAN_AGENT_TOKENS:?Set GMAN_AGENT_TOKENS}
       PROMETHEUS_URL: http://prometheus:9090
       # Address of Grafana as the browser sees it; used for default dashboard links.
       GMAN_GRAFANA_URL: ${GMAN_GRAFANA_URL:-http://127.0.0.1:3000}
+      # SSO (OIDC). Empty GMAN_OIDC_ISSUER keeps token-only mode; see README, «Вход и роли».
+      GMAN_OIDC_ISSUER: ${GMAN_OIDC_ISSUER:-}
+      GMAN_OIDC_CLIENT_ID: ${GMAN_OIDC_CLIENT_ID:-}
+      GMAN_OIDC_CLIENT_SECRET: ${GMAN_OIDC_CLIENT_SECRET:-}
+      GMAN_OIDC_REDIRECT_URI: ${GMAN_OIDC_REDIRECT_URI:-}
+      GMAN_OIDC_POST_LOGOUT_URI: ${GMAN_OIDC_POST_LOGOUT_URI:-}
+      GMAN_OIDC_SCOPES: ${GMAN_OIDC_SCOPES:-openid profile email}
+      GMAN_OIDC_GROUPS_CLAIM: ${GMAN_OIDC_GROUPS_CLAIM:-groups}
+      GMAN_OIDC_ADMIN_GROUPS: ${GMAN_OIDC_ADMIN_GROUPS:-}
+      GMAN_OIDC_OWNER_GROUPS: ${GMAN_OIDC_OWNER_GROUPS:-}
+      GMAN_OIDC_VIEWER_GROUPS: ${GMAN_OIDC_VIEWER_GROUPS:-}
+      GMAN_SESSION_HOURS: ${GMAN_SESSION_HOURS:-8}
     depends_on:
       db: {condition: service_healthy}
     restart: unless-stopped

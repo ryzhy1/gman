@@ -27,7 +27,7 @@ def rows(model, *order):
 
 def test_service_update_round_trips(client):
     value = {"id": "api", "name": "API", "description": "d", "owner": "o", "team": "t", "repository": "",
-             "grafana": "", "splunk": "", "bamboo": ""}
+             "grafana": "", "splunk": "", "bamboo": "", "owners": []}
     assert client.put("/api/services/api", headers=auth("admin"), json=value).status_code == 200
     value["name"] = "API v2"
     assert client.put("/api/services/api", headers=auth("admin"), json=value).json() == value

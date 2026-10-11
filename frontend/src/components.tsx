@@ -138,9 +138,11 @@ const TITLES: Record<string, string> = {
   'source-connected': 'Источник подключен', 'instance-appeared': 'Появился экземпляр',
   'instance-removed': 'Экземпляр удален', 'config-changed': 'Изменилась конфигурация',
   'instance-restarted': 'Перезапуск', 'state-changed': 'Изменилось состояние',
+  'service-created': 'Сервис добавлен в каталог', 'service-updated': 'Изменена запись каталога',
 };
 
 function title(e: Audit) {
+  if (e.type === 'service-created' || e.type === 'service-updated') return `${TITLES[e.type]} · ${e.service_id}`;
   if (e.type === 'deployment') return `Деплой · ${e.status}${e.release ? ` · ${e.release}` : ''}`;
   if (e.type === 'source-connected') return `${TITLES[e.type]} · ${e.source_id} · ${e.instance_count} экз.`;
   return `${TITLES[e.type] ?? e.type} · ${e.instance_name ?? e.instance_id}`;
