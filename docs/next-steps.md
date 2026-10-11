@@ -35,6 +35,12 @@
    Grafana на /grafana/, ротация логов), deploy/pki/issue.sh, бэкап pg_dump с проверкой
    и ротацией, процедура восстановления, systemd-юниты агента и Collector.
 10. docs/architecture.md переписан по фактической реализации.
+11. Безопасность и эксплуатация: OTLP mTLS завершает nginx (CA + CRL) и передает CN в gateway,
+    gateway отбрасывает метрики с host.id ≠ CN сертификата хоста и ставит k8s.cluster.name из
+    сертификата кластера; issue.sh `cluster`, `revoke`, `crl`; GPU DaemonSet на projected
+    token с audience `gman` и TokenReview (GMAN_K8S_TOKEN_REVIEW, backend/app/k8s_tokens.py),
+    узел из привязки токена; pg_backup.sh: хук выгрузки BACKUP_UPLOAD_CMD и проверка
+    восстановления во временную базу (`--restore-check`, раз в 7 дней), оба в healthcheck.
 
 Проверено:
 - Тесты: 134 passed на PostgreSQL 17 (включая запросы истории конфигураций и тест
@@ -51,6 +57,19 @@
   (ротация, `--check`, восстановление `pg_restore --clean`); доверие агента пилотному CA
   через SSL_CERT_FILE; nginx-конфиги разобраны crossplane.
 - SSO — против mock IdP в тестах; bamboo_event.py — против локального API; чтение AMD sysfs.
+- Привязка OTLP к сертификату: nginx 1.31 (OTLP-блок deploy/nginx/gman.conf) + otelcol-contrib
+  0.162.0 (deploy/otel-gateway.prod.yaml) + отправляющие otelcol с сертификатами issue.sh:
+  server-01 → host.id=server-01 принят; сертификат server-01 с host.id=server-02 и
+  поддельным заголовком x-gman-otlp-host — отброшен; сертификат кластера — принят,
+  k8s.cluster.name заменен на CN; отозванный (CRL) и чужой CA — 400 в nginx; прямо в gateway
+  без метаданных — отброшен.
+- TokenReview: настоящие kube-apiserver + etcd 1.36.2 (envtest) с RBAC, примененный
+  deploy/gpu-attribution-k8s.yaml, bound token pod-а на узле gpu-1 через API GMan: свой
+  узел — 200, другой узел и docker-host — 403, токен с audience API, чужой SA, не привязанный
+  к pod-у и токен удаленного pod-а — 401, статический токен — 200. Ветка Kubernetes < 1.30
+  (get pod) — только в тестах с MockTransport.
+- pg_backup.sh на PostgreSQL 17: выгрузка (cp), `--restore-check` (успех, битый дамп, дамп без
+  схемы), healthcheck при неудачной выгрузке и проверке.
 
 ## Подготовка на новой машине
 
@@ -97,7 +116,11 @@ deploy/alerts/alertmanager.sh --render /tmp/am.yml && amtool check-config /tmp/a
 - nginx: `nginx -t` и запуск с TLS, Grafana за /grafana/ (включая Live/websocket),
   limit_req на реальной нагрузке.
 - systemd: `systemd-analyze verify`, sandboxing с docker/nvidia-smi/kubectl, timer на Linux.
-- Восстановление из бэкапа на реальном сервере.
+- Восстановление из бэкапа на реальном сервере; выгрузка на настоящий сетевой ресурс/S3;
+  `--restore-check` внутри контейнера postgres:17-alpine (busybox find/sed).
+- OTLP через nginx в контейнере nginx:1.28-alpine и Compose-сеть (проверено нативными
+  бинарниками); TokenReview против настоящего кластера (не envtest) и Kubernetes < 1.30;
+  projected token и права файла при runAsUser 65534 в настоящем pod-е.
 - NVIDIA/DCGM: настоящие поля DCGM (XID, ECC, CLOCKS_EVENT_REASONS, метки
   pod/namespace/container), nvidia-smi на реальных драйверах, сверка показателей с источником.
 - Kubernetes/CRI-O: k8s_attributes, обнаружение DCGM, RBAC, kubelet_stats в реальном
@@ -117,13 +140,14 @@ deploy/alerts/alertmanager.sh --render /tmp/am.yml && amtool check-config /tmp/a
 ## Дальше по плану
 
 Безопасность и эксплуатация:
-- Привязать клиентский сертификат OTLP к host.id (CN/SAN против GMAN_HOST_ID на gateway);
-  сейчас любой сертификат пилотного CA отправляет метрики за любой узел.
-- Отзыв сертификатов (CRL) вместо перевыпуска CA.
-- Отдельный Secret или projected token на каждый GPU-узел в deploy/gpu-attribution-k8s.yaml:
-  сейчас токены всех узлов смонтированы в каждый pod (узел может слать снимки GPU за другой
-  GPU-узел; API лишь требует source_id = `<cluster>.<hostname>`). Обход сейчас — systemd на узле.
-- Выгрузка бэкапов за пределы сервера; регулярная проверка восстановления.
+- ~~Привязать клиентский сертификат OTLP к host.id~~ — сделано (nginx + gateway). Остается:
+  сертификат кластера общий для DaemonSet, host.id узлов им не привязан; вариант —
+  сертификат на pod через cert-manager csi-driver (CN = имя узла, `OU=client`).
+- ~~Отзыв сертификатов (CRL) вместо перевыпуска CA~~ — сделано (issue.sh revoke/crl, ssl_crl).
+  Напоминание о переподписи CRL до nextUpdate пока только в документации.
+- ~~Projected token на каждый GPU-узел в deploy/gpu-attribution-k8s.yaml~~ — сделано (TokenReview).
+- ~~Выгрузка бэкапов за пределы сервера; регулярная проверка восстановления~~ — сделано
+  (BACKUP_UPLOAD_CMD, `--restore-check`); подключить реальное хранилище.
 - Внешний мониторинг самого сервера GMan; постоянная очередь Collector на диске (file_storage).
 
 Inventory и аудит:

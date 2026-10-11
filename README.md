@@ -103,11 +103,11 @@ GMAN_AGENT_TOKENS и пересоздайте API. Не используйте �
 
 | Файл | Назначение |
 | --- | --- |
-| deploy/compose.prod.yaml | override: публикация 80/443 и 4317, сертификаты, бэкап, ротация логов |
-| deploy/nginx/gman.conf | HTTPS портала/API/Grafana, limit_req, client_max_body_size |
-| deploy/otel-gateway.prod.yaml | OTLP gRPC/HTTP только с TLS и проверкой клиента (client_ca_file) |
-| deploy/pki/issue.sh | пилотный CA, серверные и клиентские сертификаты (openssl) |
-| deploy/backup/pg_backup.sh | pg_dump с проверкой архива и ротацией |
+| deploy/compose.prod.yaml | override: публикация 80/443 и 4317 (nginx), сертификаты и CRL, бэкап, ротация логов |
+| deploy/nginx/gman.conf | HTTPS портала/API/Grafana, limit_req, client_max_body_size; OTLP 4317 с mTLS и CRL |
+| deploy/otel-gateway.prod.yaml | gateway за nginx: привязка host.id к сертификату клиента |
+| deploy/pki/issue.sh | пилотный CA, серверные и клиентские сертификаты, отзыв и CRL (openssl) |
+| deploy/backup/pg_backup.sh | pg_dump с проверкой архива и ротацией, выгрузка за пределы сервера, проверка восстановления |
 | deploy/systemd/ | юниты агента сбора (timer раз в минуту) и otelcol-contrib на узлах |
 
 ### Сертификаты
@@ -118,7 +118,8 @@ GMAN_AGENT_TOKENS и пересоздайте API. Не используйте �
 deploy/pki/issue.sh ca
 deploy/pki/issue.sh server portal  DNS:gman.example.org
 deploy/pki/issue.sh server gateway DNS:gman.example.org
-deploy/pki/issue.sh client server-01        # по одному на каждый узел
+deploy/pki/issue.sh client server-01        # по одному на каждый Docker-хост, CN = GMAN_HOST_ID
+deploy/pki/issue.sh cluster cluster-01      # OTel DaemonSet кластера, CN = K8S_CLUSTER_NAME
 ```
 
 Файлы попадают в deploy/pki/out (исключен из репозитория, переопределяется PKI_DIR).
@@ -126,16 +127,19 @@ deploy/pki/issue.sh client server-01        # по одному на кажды�
 Конечные сертификаты действуют 397 дней (CERT_DAYS), CA — 5 лет (CA_DAYS).
 Если есть корпоративный CA, используйте его сертификаты с теми же именами файлов.
 
+`issue.sh ca` сразу создает пустой список отзыва crl.pem (действует CRL_DAYS, 365 дней).
 На сервер GMan в каталог GMAN_TLS_DIR (по умолчанию deploy/pki/out) кладутся только
-portal.pem, portal-key.pem, gateway.pem, gateway-key.pem и ca.pem. Collector в контейнере
-работает под uid 10001, поэтому: `sudo chown 10001 gateway-key.pem` (права 0600).
+portal.pem, portal-key.pem, gateway.pem, gateway-key.pem, ca.pem и crl.pem; все читает
+nginx (root), права ключей 0600. Если CA создан старой версией issue.sh, выполните
+`deploy/pki/issue.sh crl`.
 
 ### Запуск
 
 В .env добавьте `GMAN_PUBLIC_HOST=gman.example.org` (имя из сертификата портала).
 Необязательные: GMAN_BIND_ADDRESS и GMAN_OTLP_BIND_ADDRESS (по умолчанию 0.0.0.0),
 GMAN_TLS_DIR, GMAN_BACKUP_DIR (deploy/backups), GMAN_BACKUP_KEEP (14),
-GMAN_BACKUP_INTERVAL_SECONDS (86400).
+GMAN_BACKUP_INTERVAL_SECONDS (86400), GMAN_BACKUP_UPLOAD_CMD и GMAN_BACKUP_OFFSITE_DIR
+(выгрузка), GMAN_BACKUP_RESTORE_CHECK_DAYS (7), GMAN_K8S_TOKEN_REVIEW (GPU DaemonSet).
 
 ```sh
 docker compose --env-file .env -f deploy/compose.yaml -f deploy/compose.prod.yaml up --build -d
@@ -143,7 +147,7 @@ docker compose --env-file .env -f deploy/compose.yaml -f deploy/compose.prod.yam
 ```
 
 Снаружи доступны: 443 (портал, /api, Grafana на /grafana/), 80 (только редирект на HTTPS)
-и 4317 (OTLP gRPC с mTLS). Prometheus и Alertmanager остаются на 127.0.0.1:9090/9093
+и 4317 (OTLP gRPC с mTLS, тоже nginx; сам gateway не публикуется). Prometheus и Alertmanager остаются на 127.0.0.1:9090/9093
 (у Alertmanager нет аутентификации, поэтому nginx его не проксирует: ссылки «в Alertmanager»
 из уведомлений ведут на GMAN_ALERTMANAGER_URL, по умолчанию 127.0.0.1:9093 — через SSH-туннель),
 PostgreSQL и Grafana не публикуются. Получатели алертов — GMAN_ALERT_* (раздел «Алерты»),
@@ -156,11 +160,40 @@ limit_req по IP: /api 20 r/s (burst 40), /api/inventory 2 r/s (burst 10), Graf
 50 r/s (burst 100), не более 64 соединений с IP; превышение — 429. Если агенты выходят
 через общий NAT, увеличьте лимит зоны gman_ingest.
 
-Gateway принимает только клиентов с сертификатом пилотного CA. Принадлежность
-сертификата хосту (CN против GMAN_HOST_ID) не проверяется: любой выпущенный клиентский
-сертификат может отправлять метрики за любой host.id. Отзыв — перевыпуск CA или
-отдельный CA на группу узлов; CRL пилот не поддерживает. Gateway перечитывает
-сертификаты раз в час без перезапуска; nginx — после `docker compose ... restart portal`.
+### OTLP: сертификат узла и host.id
+
+mTLS для OTLP завершает nginx (порт 4317): otelcol-contrib 0.162.0 не поддерживает CRL и
+не передает в конвейер subject клиентского сертификата, а nginx умеет и то и другое. nginx
+пропускает только сертификаты пилотного CA, не попавшие в crl.pem, и передает gateway
+(otel:4317, только внутренняя сеть Compose) по gRPC метаданные из subject:
+`x-gman-otlp-host` = CN сертификата `OU=client`, `x-gman-otlp-cluster` = CN сертификата
+`OU=cluster`. Одноименные заголовки клиента nginx заменяет. Gateway (receiver с
+include_metadata, processors resource и filter до batch):
+- сертификат хоста: метрики с host.id, отличным от CN, отбрасываются (не переписываются:
+  ошибка в GMAN_HOST_ID видна как отсутствие метрик и алерт телеметрии, а не как чужой хост);
+- сертификат кластера: k8s.cluster.name всегда = CN; host.id (имя узла) не привязан, так как
+  один сертификат общий для pod-ов DaemonSet;
+- данные без метаданных (прямо в gateway в обход nginx) отбрасываются.
+
+Отброшенные точки считает `otelcol_processor_filter_datapoints_filtered{filter="filter/identity"}`
+на внутреннем :8888 gateway. С корпоративным CA поправьте шаблоны `map $ssl_client_s_dn`
+в deploy/nginx/gman.conf под формат его subject.
+
+### Отзыв сертификатов
+
+```sh
+deploy/pki/issue.sh revoke client-server-01 keyCompromise   # или путь к .pem
+deploy/pki/issue.sh client server-01                        # новый сертификат, если нужен
+scp deploy/pki/out/crl.pem gman:/tmp/ && ssh gman 'cp /tmp/crl.pem <GMAN_TLS_DIR>/crl.pem'
+docker compose --env-file .env -f deploy/compose.yaml -f deploy/compose.prod.yaml exec portal nginx -s reload
+```
+
+Отозванный сертификат с ключом переносится в out/revoked/, база CA — out/index.txt.
+Файлы сертификатов смонтированы по одному, поэтому заменяйте их на месте (`cp`, не `mv`:
+иначе контейнер видит старый inode) и перезагружайте nginx; так же обновляются
+сертификаты при перевыпуске. Список отзыва нужно переподписывать до nextUpdate
+(`issue.sh crl`, срок CRL_DAYS): с просроченным crl.pem nginx отвергает все клиентские
+сертификаты. Срок видно в выводе issue.sh и `openssl crl -in crl.pem -noout -nextupdate`.
 
 Healthcheck есть у db, api, portal, prometheus, grafana и backup (свежий бэкап моложе двух
 интервалов). Образ otelcol distroless, проверки внутри контейнера нет: следите за
@@ -206,7 +239,24 @@ Timer запускает сбор раз в минуту со случайной
 в GMAN_BACKUP_DIR на хосте (по умолчанию deploy/backups; файлы
 gman-YYYYMMDDTHHMMSSZ.dump, права 0600). Архив проверяется `pg_restore --list`, и только
 после этого удаляются файлы сверх GMAN_BACKUP_KEEP; неудачный дамп ничего не ротирует.
-Копируйте каталог за пределы сервера: бэкап на том же диске не защищает от его потери.
+Бэкап на том же диске не защищает от его потери, поэтому есть выгрузка: GMAN_BACKUP_UPLOAD_CMD —
+команда sh, которая после каждого удачного дампа получает путь архива в `$1`. Она
+выполняется в контейнере backup (postgres:17-alpine, без rclone/aws), поэтому проще всего
+смонтировать на хосте сетевой ресурс (NFS/SMB) в GMAN_BACKUP_OFFSITE_DIR (по умолчанию
+deploy/backups-offsite, в контейнере /offsite) и задать `GMAN_BACKUP_UPLOAD_CMD='cp "$1" /offsite/'`;
+хранение на той стороне — своими средствами. Для S3/rclone запускайте
+`pg_backup.sh --once` по cron/systemd на хосте, где есть утилита, например
+`BACKUP_UPLOAD_CMD='rclone copyto "$1" remote:gman/$(basename "$1")'`. Неудачная выгрузка
+пишется в лог, локальный бэкап и ротация продолжаются, healthcheck становится unhealthy.
+
+Проверка восстановления: раз в GMAN_BACKUP_RESTORE_CHECK_DAYS (7; 0 — выключено) после
+бэкапа сервис восстанавливает свежий дамп во временную базу `gman_restore_check_*`
+(`pg_restore --exit-on-error`), выполняет контрольные запросы (версия Alembic, число
+сервисов, источников, экземпляров, событий, деплоев; источников не может быть 0, если в
+рабочей базе они есть), пишет результат в лог и удаляет базу. Healthcheck backup
+становится unhealthy при неудачной проверке или если успешной не было две периодичности.
+Вручную: `$C run --rm backup --restore-check [/backups/<файл>]`.
+
 Внеочередной бэкап, например перед обновлением:
 
 ```sh
@@ -223,14 +273,9 @@ $C run --rm --entrypoint pg_restore backup \
 $C start api portal
 ```
 
-Проверка дампа без изменения рабочей базы — восстановление в отдельную:
-
-```sh
-$C exec db createdb -U gman gman_restore_check
-$C run --rm --entrypoint pg_restore backup --no-owner -d gman_restore_check /backups/<файл>
-$C exec db psql -U gman -d gman_restore_check -c 'select count(*) from services'
-$C exec db dropdb -U gman gman_restore_check
-```
+Проверка дампа без изменения рабочей базы — `--restore-check` выше. Проверку копии за
+пределами сервера выполняйте так же, `pg_backup.sh --restore-check <файл>` против любого
+PostgreSQL 17 (libpq-переменные PGHOST/PGUSER/PGPASSWORD).
 
 Prometheus и Grafana не бэкапятся: метрики хранятся 30 дней, дашборды и datasource
 описаны в deploy/grafana. Сертификаты и .env храните отдельно, в бэкап они не входят.
@@ -393,23 +438,47 @@ account). Процесс получает namespace, pod, контейнер и 
 если pod не найден — остаются ID контейнера и UID pod-а. Сбой получения pod-ов попадает в
 ошибки снимка, данные GPU все равно отправляются.
 
-Узел — отдельный источник `<кластер>.<узел>` (source_type kubernetes-node) со своим токеном
-в GMAN_AGENT_TOKENS. Экземпляров в нем нет: pod-ы по-прежнему сообщает источник кластера,
-поэтому история не дублируется. Портал показывает GPU узла внутри карточки кластера.
-API принимает от такого источника только снимок с source_id = `<cluster>.<hostname>`
-(иначе 422): токен узла не может описать другой узел или кластер. В /metrics GPU узла
+Узел — отдельный источник `<кластер>.<узел>` (source_type kubernetes-node). Экземпляров в
+нем нет: pod-ы по-прежнему сообщает источник кластера, поэтому история не дублируется.
+Портал показывает GPU узла внутри карточки кластера. API принимает от такого источника
+только снимок с source_id = `<cluster>.<hostname>` (иначе 422). В /metrics GPU узла
 помечаются host_id = имя узла, как в DCGM и gman_k8s_node_ready.
 
-DaemonSet монтирует в каждый pod Secret с токенами всех GPU-узлов (выбрать Secret по
-имени узла DaemonSet не умеет): тот, кто управляет одним GPU-узлом, может присылать
-снимки GPU за другие GPU-узлы списка. Источники кластера и Docker-хостов это не
-затрагивает. Если такой риск неприемлем — systemd timer на каждом узле со своим токеном.
-Spool DaemonSet-а на emptyDir намеренно: у источника узла хранится только последний снимок.
+#### Идентичность GPU-узла: bound service account token
+
+DaemonSet не хранит токенов GMan: каждый pod получает свой projected service account token
+(audience `gman`, 1 час, kubelet обновляет его сам; агент перечитывает файл
+GMAN_AGENT_TOKEN_FILE при каждом запуске). API проверяет токен через TokenReview API
+кластера: подпись, срок, audience `gman` (обычный токен pod-а для API Kubernetes не
+подходит) и существование pod-а, к которому токен привязан. Узел берется из привязки
+токена: на Kubernetes ≥ 1.30 — из extra `authentication.kubernetes.io/node-name`, на более
+старых — `get pod` по имени из токена со сверкой UID. Такой токен принимается только для
+снимка kubernetes-node своего кластера и своего узла (иначе 403): pod на одном GPU-узле не
+может отправить снимок за другой. После удаления pod-а его токен перестает приниматься
+в пределах ~70 с (кэш TokenReview в kube-apiserver 10 с и в API 60 с).
+
+Настройка (deploy/gpu-attribution-k8s.yaml создает ServiceAccount `gman-token-reviewer`
+с ClusterRole system:auth-delegator, get pods в gman-gpu, и его долгоживущий токен в
+Secret): в .env
+
+```sh
+kubectl -n gman-gpu get secret gman-token-reviewer -o jsonpath='{.data.token}' | base64 -d
+kubectl config view --raw --minify -o jsonpath='{.clusters[0].cluster.certificate-authority-data}'
+GMAN_K8S_TOKEN_REVIEW='{"cluster-01":{"api_url":"https://10.0.0.1:6443","certificate_authority_data":"<base64>","token":"<токен>"}}'
+```
+
+Ключ — source_id кластера (GMAN_CLUSTER DaemonSet-а). Необязательные поля: `audience`
+(`gman`), `service_accounts` (`["gman-gpu:gman-gpu-agent"]`), `issuer` (при нескольких
+кластерах: токен отправляется только в кластер с совпадающим `iss`), `ca_file` и
+`token_file` вместо встроенных значений; GMAN_K8S_TOKEN_REVIEW_FILE — путь к тому же JSON.
+API должен достучаться до API-сервера кластера; если тот недоступен, ответ 503 и агент
+повторяет отправку. Статические токены `<cluster>.<node>` в GMAN_AGENT_TOKENS продолжают
+работать (systemd-вариант). Spool DaemonSet-а на emptyDir намеренно: у источника узла
+хранится только последний снимок.
 
 Варианты запуска: DaemonSet из deploy/gpu-attribution-k8s.yaml (hostPID, без
-capabilities, nvidia-smi от NVIDIA container runtime без запроса nvidia.com/gpu, токены в
-Secret с ключами по именам узлов через GMAN_AGENT_TOKEN_FILE, RBAC — только list pods)
-или systemd timer на узле с read-only kubeconfig (в /etc/gman/agent.env: GMAN_RUNTIME=kubernetes-node,
+capabilities, nvidia-smi от NVIDIA container runtime без запроса nvidia.com/gpu,
+projected token, RBAC — только list pods) или systemd timer на узле со своим токеном с read-only kubeconfig (в /etc/gman/agent.env: GMAN_RUNTIME=kubernetes-node,
 NODE_NAME и GMAN_CLUSTER — значения по умолчанию для --node и --cluster). GMAN_PROC_ROOT задает другой путь к
 /proc хоста, если он смонтирован отдельно.
 
@@ -653,7 +722,8 @@ compose end-to-end, nginx и systemd на Linux, NVIDIA/DCGM, Kubernetes/CRI-O, 
 Bamboo, Splunk и SMTP еще не проверены (полный список — docs/next-steps.md, «Не проверено»).
 
 Ограничения реализации:
-- Клиентский сертификат OTLP не привязан к host.id, CRL нет; бэкапы остаются на сервере.
+- Сертификат кластера (OTel DaemonSet) общий для узлов: host.id внутри кластера им не
+  привязан, привязан только k8s.cluster.name.
 - Kubernetes только опрашивается раз в минуту: нет watch, Kubernetes Events и audit log;
   `--watch` есть только для Docker. Короткие события между опросами могут быть пропущены;
   перезапуски по restart policy видны по счетчику, но промежуточное состояние exited — нет.

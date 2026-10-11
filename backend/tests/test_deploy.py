@@ -19,3 +19,20 @@ def test_stand_accepts_inventory_as_large_as_production():
         assert "client_max_body_size 20m;" in block[:block.index("}")]
     # /metrics is internal (Prometheus in the Compose network): neither proxy forwards it.
     assert "/metrics" not in stand and "location /metrics" not in prod and "location = /metrics" not in prod
+
+
+def test_otlp_identity_headers_match_between_nginx_and_gateway():
+    # nginx terminates OTLP mTLS and must overwrite exactly the headers the gateway trusts; the identity
+    # processors must run before batch, which drops request metadata.
+    nginx = (DEPLOY / "nginx/gman.conf").read_text()
+    gateway = (DEPLOY / "otel-gateway.prod.yaml").read_text()
+    otlp = nginx[nginx.index("listen 4317 ssl"):]
+    for header in ("x-gman-otlp-host", "x-gman-otlp-cluster"):
+        assert f"grpc_set_header {header} " in otlp and f"from_context: metadata.{header}," in gateway
+    assert "ssl_verify_client on;" in otlp and "ssl_crl /etc/nginx/tls/crl.pem;" in otlp
+    assert "include_metadata: true" in gateway
+    assert "processors: [memory_limiter, resource/identity, filter/identity, resource/cluster, batch]" in gateway
+    # The gateway itself is not published in production: only nginx's 4317 is.
+    prod = (DEPLOY / "compose.prod.yaml").read_text()
+    otel = prod[prod.index("\n  otel:"):prod.index("\n  prometheus:")]
+    assert "ports: !reset []" in otel

@@ -21,6 +21,7 @@ from . import auth
 from . import configs
 from . import db as store
 from . import exposition
+from . import k8s_tokens
 from . import metrics
 from . import splunk
 
@@ -96,9 +97,13 @@ def agent(authorization: str = Header(default="")):
     """Resolve the agent's source_id from its token before the body is validated."""
     tokens = json.loads(os.getenv("GMAN_AGENT_TOKENS", "{}"))
     found = [source for source, token in tokens.items() if matches(authorization, token)]
-    if not found:
+    if found:
+        return found[0]
+    # GPU DaemonSet pods: a Kubernetes bound service account token, verified by the cluster (TokenReview).
+    identity = k8s_tokens.authenticate(authorization) if k8s_tokens.enabled() else None
+    if identity is None:
         raise HTTPException(401, "Invalid credential")
-    return found[0]
+    return identity
 
 
 def lock(session, name):
@@ -410,6 +415,8 @@ async def lifespan(app):
     # local runs and tests; concurrent replicas are serialized by a PostgreSQL advisory lock.
     auth.check_config()
     auth.reset()
+    k8s_tokens.config()  # fail at startup on a malformed GMAN_K8S_TOKEN_REVIEW
+    k8s_tokens.reset()
     store.migrate(engine)
     yield
 
@@ -678,6 +685,7 @@ def metrics_range(scope: Literal["host", "container", "gpu", "k8s_container", "k
 def ingest(value: Snapshot, source_id: str = Depends(agent), session: Session = Depends(db)):
     if value.source_id != source_id:
         raise HTTPException(403, "Token is not valid for this source")
+    k8s_tokens.check_snapshot(source_id, value)
     data = value.model_dump(mode="json")
     new = {x["id"]: x for x in data["instances"]}
     if len(new) != len(data["instances"]):

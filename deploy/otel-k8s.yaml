@@ -1,6 +1,7 @@
 # Node Collector for the Kubernetes cluster: one pod per node (DaemonSet).
 # Before applying: create Secret gman-otel-tls (ca.pem, client.pem, client-key.pem) in
-# namespace gman-otel and set OTEL_GATEWAY and K8S_CLUSTER_NAME below.
+# namespace gman-otel and set OTEL_GATEWAY and K8S_CLUSTER_NAME below. The client certificate is
+# `deploy/pki/issue.sh cluster <K8S_CLUSTER_NAME>`: the gateway sets k8s.cluster.name from its CN.
 # host.id is the node name: GMan joins node metrics with nodes from the inventory agent.
 apiVersion: v1
 kind: Namespace

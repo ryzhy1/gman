@@ -387,15 +387,16 @@ Collector: memory_limiter, batch, in-memory sending_queue и retry_on_failure.
 | Человек, SSO | OIDC Authorization Code + PKCE, серверная сессия | viewer — чтение; owner — правка записей каталога, где он в `owners` (кроме самого `owners`); admin — все, включая новые сервисы |
 | Автоматизация | Bearer GMAN_READ_TOKEN / GMAN_ADMIN_TOKEN | чтение / администратор; автор в журнале — имя токена |
 | Агент inventory | Bearer-токен на source_id | только `POST /api/inventory` своего source_id |
+| GPU-агент DaemonSet | bound service account token (audience `gman`), проверка TokenReview кластера (GMAN_K8S_TOKEN_REVIEW) | только снимок kubernetes-node своего узла (узел из привязки токена к pod-у) |
 | Bamboo | Bearer GMAN_CI_TOKEN | только `POST /api/deployments` |
-| Collector узла | клиентский сертификат пилотного CA (mTLS) | OTLP в gateway |
+| Collector узла | клиентский сертификат пилотного CA (mTLS в nginx, CRL) | OTLP: host.id = CN сертификата хоста; для сертификата кластера k8s.cluster.name = CN |
 
 Владение (`owners`) сопоставляется с subject, email, логином или `group:<группа>` без учета
 регистра. Роль фиксируется при входе и действует до конца сессии. Изменения каталога
 пишутся в журнал с автором и ролью.
 
 Сеть (production): снаружи только 443 (портал, /api, Grafana на /grafana/), 80 (редирект)
-и 4317 (OTLP gRPC с mTLS); Prometheus и Alertmanager — на 127.0.0.1, PostgreSQL и Grafana не
+и 4317 (OTLP gRPC с mTLS и CRL в nginx); Prometheus и Alertmanager — на 127.0.0.1, PostgreSQL и Grafana не
 публикуются. nginx: TLS 1.2/1.3, HSTS, CSP, limit_req по IP, лимиты тела запроса.
 
 Данные: агент отправляет allowlist полей inspect/Pod spec. Значения env (кроме
@@ -409,9 +410,24 @@ docker (эквивалент root); systemd sandboxing ограничивает 
 кластера — get/list pods и nodes; DaemonSet GPU-узлов — list pods, hostPID, без capabilities.
 Secrets и exec не используются, но доступ к Pod spec открывает env в API Kubernetes.
 
-Отличие от проекта: клиентский сертификат OTLP не привязан к host.id (любой сертификат
-пилотного CA принимается за любой узел), CRL нет; токены всех GPU-узлов смонтированы в
-каждый pod DaemonSet; ограничивающий proxy для Docker socket не используется.
+OTLP: mTLS завершает nginx (4317), потому что otelcol-contrib 0.162.0 не поддерживает CRL и не
+отдает subject сертификата в конвейер. nginx проверяет CA и crl.pem и передает gateway
+метаданные `x-gman-otlp-host`/`x-gman-otlp-cluster` из CN (`OU=client`/`OU=cluster`),
+заменяя одноименные заголовки клиента; gateway (include_metadata, resource + filter до batch)
+отбрасывает метрики с host.id ≠ CN и без метаданных, а k8s.cluster.name ставит из CN сертификата
+кластера. Gateway не публикуется. Отзыв — `issue.sh revoke` + crl.pem + reload nginx.
+
+GPU-агенты DaemonSet: projected token pod-а с audience `gman` вместо общих токенов; API
+вызывает TokenReview кластера (сервисная учетная запись gman-token-reviewer с
+system:auth-delegator) и берет узел из extra `authentication.kubernetes.io/node-name`
+(Kubernetes ≥ 1.30) или из pod-а по имени и UID. Результат кэшируется до 60 с; недоступный
+API кластера — 503 (агент повторит). Статические токены продолжают работать.
+
+Бэкапы: хук выгрузки после каждого дампа (BACKUP_UPLOAD_CMD) и регулярная проверка
+восстановления во временную базу с контрольными запросами; оба влияют на healthcheck.
+
+Отличие от проекта: сертификат кластера общий для узлов DaemonSet, host.id узлов кластера им
+не привязан; ограничивающий proxy для Docker socket не используется.
 
 ## Развертывание
 
@@ -419,11 +435,13 @@ Secrets и exec не используются, но доступ к Pod spec о�
 override deploy/compose.prod.yaml (Compose ≥ 2.24.4).
 
 ```
-                 443/80                       4317 mTLS
- пользователи ─────────► portal (nginx) ─► api ─► db        ◄──── узловые Collector
- агенты, Bamboo ───────►   │ /grafana/        ▲   ▲               │
-                           ▼                  │   │ backup        ▼
-                        grafana ──► prometheus ◄──┴────────── otel gateway
+                 443/80
+ пользователи ─────────► portal (nginx) ─► api ─► db
+ агенты, Bamboo ───────►   │ /grafana/        ▲   ▲
+ узловые Collector ────►   │ OTLP + CN ───────┼───┼──────────► otel gateway
+   4317 mTLS + CRL         │                  │   │               │
+                           ▼                  │   │ backup        │
+                        grafana ──► prometheus ◄──┴───────────────┘
                                      │   ▲ /metrics (api)
                                      ▼
                                 alertmanager ─► webhook / SMTP
@@ -433,11 +451,11 @@ override deploy/compose.prod.yaml (Compose ≥ 2.24.4).
 | --- | --- |
 | db (postgres:17-alpine) | не публикуется |
 | api | за nginx; миграции при старте |
-| portal (nginx) | 443/80, TLS из deploy/pki или корпоративного CA |
-| otel (gateway) | 4317 gRPC с mTLS, перечитывает сертификаты раз в час |
+| portal (nginx) | 443/80, TLS из deploy/pki или корпоративного CA; 4317 — OTLP mTLS для узлов |
+| otel (gateway) | не публикуется; OTLP приходит через nginx (4317, mTLS, CRL) с идентичностью из сертификата |
 | prometheus, alertmanager | 127.0.0.1:9090/9093 |
 | grafana | только через /grafana/ |
-| backup | pg_dump в GMAN_BACKUP_DIR |
+| backup | pg_dump в GMAN_BACKUP_DIR, выгрузка (GMAN_BACKUP_UPLOAD_CMD), еженедельная проверка восстановления |
 
 Узлы: systemd-юниты gman-collect.service/.timer (агент) и gman-otelcol.service (Collector)
 из deploy/systemd; Kubernetes — deploy/otel-k8s.yaml, deploy/gpu-attribution-k8s.yaml,
