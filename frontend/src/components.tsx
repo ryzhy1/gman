@@ -43,14 +43,16 @@ function Vram({ instance }: { instance: Placed }) {
   </>;
 }
 
-export function InstanceTable({ rows, metrics }: { rows: Placed[]; metrics?: CurrentMetrics | null }) {
+/** `logs`: Splunk links keyed "<source_id>/<instance_id>"; the column appears only when some row has one. */
+export function InstanceTable({ rows, metrics, logs }: { rows: Placed[]; metrics?: CurrentMetrics | null; logs?: Record<string, string> }) {
   // The VRAM column appears only where some row runs on a host that reports GPUs.
   const withGpu = rows.some(i => i.runtime === 'docker' && i.source.gpus.length > 0);
+  const withLogs = rows.some(i => logs?.[`${i.source.source_id}/${i.id}`]);
   return <div className="table-wrap">
     <table>
       <thead><tr><th>Экземпляр</th><th>Размещение</th><th>Состояние</th><th>CPU, ядра</th><th>Память</th>
         {withGpu && <th title="Видеопамять, занятая процессами контейнера (nvidia-smi). Не загрузка GPU.">VRAM процессов</th>}
-        <th>Рестарты</th><th>Создан / запущен</th></tr></thead>
+        <th>Рестарты</th><th>Создан / запущен</th>{withLogs && <th>Логи</th>}</tr></thead>
       <tbody>{rows.map(i => { const usage = instanceUsage(i, metrics); return <tr key={i.source.source_id + i.id}>
         <td><b>{i.name}</b><small>{i.environment} · {i.runtime}{i.controller && ` · ${i.controller}`}</small></td>
         <td>{i.node || i.source.hostname}<small>{i.namespace}</small></td>
@@ -65,6 +67,8 @@ export function InstanceTable({ rows, metrics }: { rows: Placed[]; metrics?: Cur
         {withGpu && <td><Vram instance={i} /></td>}
         <td>{i.restarts}</td>
         <td>{date(i.created_at)}<small>Старт: {date(i.started_at)}</small></td>
+        {withLogs && <td>{logs?.[`${i.source.source_id}/${i.id}`]
+          ? <a href={logs[`${i.source.source_id}/${i.id}`]} target="_blank" rel="noopener noreferrer">Логи в Splunk ↗</a> : '—'}</td>}
       </tr>; })}</tbody>
     </table>
     {!rows.length && <div className="empty">Экземпляры еще не обнаружены.</div>}

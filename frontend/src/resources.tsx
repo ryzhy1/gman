@@ -40,8 +40,10 @@ function requests(shown: Placed[], metric: string, pod: boolean): Request[] {
   return result;
 }
 
-export function Resources({ token, instances, grafanaLink }: { token: string; instances: Placed[]; grafanaLink: string }) {
-  const [range, setRange] = useState<string>('1h');
+/** The period is owned by the service card so that its Splunk links cover the same window. */
+export function Resources({ token, instances, grafanaLink, range, onRange, splunkLink }: {
+  token: string; instances: Placed[]; grafanaLink: string; range: string; onRange: (range: string) => void; splunkLink?: string;
+}) {
   const [data, setData] = useState<Record<string, Series[]>>({});
   const [failed, setFailed] = useState<string[]>([]);
   // Color follows the instance: sort by a stable key, never by current value.
@@ -77,9 +79,10 @@ export function Resources({ token, instances, grafanaLink }: { token: string; in
   return <div>
     <div className="chart-controls">
       <div className="segmented" role="group" aria-label="Период">
-        {RANGES.map(([value, label]) => <button key={value} className={range === value ? 'chosen' : ''} onClick={() => setRange(value)}>{label}</button>)}
+        {RANGES.map(([value, label]) => <button key={value} className={range === value ? 'chosen' : ''} onClick={() => onRange(value)}>{label}</button>)}
       </div>
       {grafanaLink && <a href={grafanaLink} target="_blank" rel="noreferrer">Подробнее в Grafana ↗</a>}
+      {splunkLink && <a href={splunkLink} target="_blank" rel="noopener noreferrer">Логи в Splunk ↗</a>}
     </div>
     {failed.length > 0 && <div role="alert" className="alert">Часть рядов без данных — {failed.join('; ')}.</div>}
     {!shown.length && <div className="empty">Нет запущенных экземпляров.</div>}

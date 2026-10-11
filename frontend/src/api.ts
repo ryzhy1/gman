@@ -1,6 +1,7 @@
 export type Service = {
   id: string; name: string; description: string; owner: string; team: string;
   repository: string; grafana: string; splunk: string; bamboo: string;
+  logs?: { splunk?: { index?: string | Record<string, string>; query?: string } };
 };
 
 export type Origin = Partial<Record<
@@ -60,6 +61,8 @@ export type Audit = {
 };
 
 export type Overview = { services: Service[]; sources: Source[]; events: Audit[]; server_time: string; grafana_url: string };
+/** Splunk search links built by the API; instances are keyed "<source_id>/<instance_id>". */
+export type SplunkLinks = { enabled: boolean; error: string | null; service: string | null; instances: Record<string, string> };
 export type EventPage = { events: Audit[]; next: string | null };
 
 /** One distinct configuration of an instance; returning to an older config is a new version. */

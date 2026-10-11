@@ -1,6 +1,6 @@
 import React, { useEffect, useState } from 'react';
 import { createRoot } from 'react-dom/client';
-import { get, type CurrentMetrics, type Overview } from './api';
+import { get, type CurrentMetrics, type Overview, type SplunkLinks } from './api';
 import { ConfigView, History, InstanceTable, type Placed } from './components';
 import { ConfigHistory } from './configs';
 import { ClusterCard, HostCard } from './hardware';
@@ -10,7 +10,7 @@ import './style.css';
 
 const ALL = 'Все окружения';
 const PAGES = [['Сервисы', '▦'], ['Серверы и GPU', '▤'], ['Аудит', '◷']] as const;
-const LINKS = [['repository', 'Репозиторий'], ['grafana', 'Grafana'], ['splunk', 'Splunk'], ['bamboo', 'Bamboo']] as const;
+const LINKS = [['repository', 'Репозиторий'], ['grafana', 'Grafana'], ['splunk', 'Логи в Splunk'], ['bamboo', 'Bamboo']] as const;
 
 function Login({ onToken }: { onToken: (token: string) => void }) {
   const [draft, setDraft] = useState('');
@@ -37,6 +37,8 @@ function App() {
   const [selected, setSelected] = useState('');
   const [tab, setTab] = useState('Обзор');
   const [environment, setEnvironment] = useState(ALL);
+  const [range, setRange] = useState('1h');
+  const [splunk, setSplunk] = useState<SplunkLinks | null>(null);
 
   useEffect(() => {
     if (!token) return;
@@ -57,6 +59,16 @@ function App() {
     return () => { ctrl.abort(); clearInterval(timer); };
   }, [token]);
 
+  // Links are built by the API (SPL escaping); refreshed with the overview so new instances get one.
+  useEffect(() => setSplunk(null), [selected, environment, range]);
+  useEffect(() => {
+    if (!token || !selected) return;
+    const ctrl = new AbortController();
+    const params = new URLSearchParams({ service_id: selected, range, ...(environment === ALL ? {} : { environment }) });
+    get<SplunkLinks>(token, `/api/logs/splunk?${params}`, ctrl.signal).then(setSplunk).catch(() => undefined);
+    return () => ctrl.abort();
+  }, [token, selected, environment, range, data?.server_time]);
+
   if (!token) return <Login onToken={setToken} />;
 
   const all: Placed[] = data?.sources.flatMap(s => s.instances.map(i => ({ ...i, source: s }))) ?? [];
@@ -71,7 +83,7 @@ function App() {
   const open = (p: string) => { setPage(p); setSelected(''); setQuery(''); };
   const grafana = data?.grafana_url ?? '';
   const serviceDashboard = service && grafana ? `${grafana}/d/gman-service/gman-service?var-service=${encodeURIComponent(service.id)}` : '';
-  const links = service ? { repository: service.repository, grafana: service.grafana || serviceDashboard, splunk: service.splunk, bamboo: service.bamboo } : null;
+  const links = service ? { repository: service.repository, grafana: service.grafana || serviceDashboard, splunk: service.splunk || splunk?.service || '', bamboo: service.bamboo } : null;
 
   return <div className="shell">
     <aside>
@@ -134,8 +146,8 @@ function App() {
           {service && <>
             <button className="back" onClick={() => setSelected('')}>← Все сервисы</button>
             <div className="links">{LINKS.map(([k, label]) => links![k]
-              ? <a key={k} href={links![k]} target="_blank" rel="noreferrer">{label} ↗</a>
-              : <span key={k} title="Ссылка не задана в каталоге">{label} · не настроен</span>)}
+              ? <a key={k} href={links![k]} target="_blank" rel="noopener noreferrer">{label} ↗</a>
+              : k === 'splunk' ? null : <span key={k} title="Ссылка не задана в каталоге">{label} · не настроен</span>)}
             </div>
             <div className="tabs">{['Обзор', 'Ресурсы', 'Экземпляры', 'Конфигурация', 'История'].map(t =>
               <button key={t} className={tab === t ? 'chosen' : ''} onClick={() => setTab(t)}>{t}</button>)}
@@ -146,11 +158,12 @@ function App() {
                 <dl>{[['Команда', service.team], ['Ответственный', service.owner], ['Идентификатор', service.id], ['Репозиторий', service.repository]]
                   .map(([k, v]) => <div key={k}><dt>{k}</dt><dd>{v || 'Не указано'}</dd></div>)}</dl>
                 <h3 className="subheading">Текущее размещение</h3>
-                <InstanceTable rows={own} metrics={metrics} />
+                <InstanceTable rows={own} metrics={metrics} logs={splunk?.instances} />
                 <p className="note">Сервисы обнаруживаются независимо от способа запуска. Владелец сервиса и инициатор деплоя — разные роли. Bamboo сообщает автора деплоя; для ручных запусков без отдельного аудита автор неизвестен. CPU — в ядрах (1.0 = одно ядро), процент — от лимита контейнера. VRAM — видеопамять процессов контейнера, а не загрузка GPU.</p>
               </>}
-              {tab === 'Ресурсы' && <Resources token={token} instances={own} grafanaLink={links!.grafana} />}
-              {tab === 'Экземпляры' && <InstanceTable rows={own} metrics={metrics} />}
+              {tab === 'Ресурсы' && <Resources token={token} instances={own} grafanaLink={links!.grafana} range={range} onRange={setRange}
+                splunkLink={splunk?.service || links!.splunk} />}
+              {tab === 'Экземпляры' && <InstanceTable rows={own} metrics={metrics} logs={splunk?.instances} />}
               {tab === 'Конфигурация' && <>
                 <h2>Текущая конфигурация</h2>
                 {own.map(i => <ConfigView key={i.source.source_id + i.id} instance={i} />)}
