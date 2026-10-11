@@ -29,9 +29,9 @@ inhibit_rules:
   - source_matchers: ['alertname=~"GManNodeDown|GManK8sNodeNotReady"']
     target_matchers: ['scope=~"gpu|instance|node"', 'alertname!~"GManNodeDown|GManK8sNodeNotReady"']
     equal: [host_id]
-  # Inventory is silent: alerts computed from its last snapshot are stale.
+  # Inventory is silent: alerts computed from its last snapshot are stale (NotReady, node pressure and node Events).
   - source_matchers: ['alertname="GManSourceSilent"']
-    target_matchers: ['alertname=~"GManK8sNodeNotReady|GManInstance.*"']
+    target_matchers: ['alertname=~"GManK8sNode.*|GManInstance.*"']
     equal: [source_id]
   # The node's Collector is silent: DCGM metrics go through it too.
   - source_matchers: ['alertname="GManHostTelemetryAbsent"']
@@ -55,6 +55,12 @@ inhibit_rules:
   # An expired CRL makes nginx reject every OTLP client: one TLS alert instead of one per host and cluster.
   - source_matchers: ['alertname="GManTlsCrlExpired"']
     target_matchers: ['alertname=~"GManHostTelemetryAbsent|GManGpuTelemetryAbsent|GManKubeStateMetricsAbsent"']
+  # Node Events (gman-node-events). An OOM kill within a container's memory limit is reported twice: by the pod
+  # (GManInstanceOOMKilled, host_id = node) and by node-problem-detector (OOMKilling). SystemOOM — the whole node
+  # out of memory — is never hidden. NotReady inhibits all node Event alerts through scope=node above.
+  - source_matchers: ['alertname="GManInstanceOOMKilled"']
+    target_matchers: ['alertname="GManK8sNodeOOM"', 'reason="OOMKilling"']
+    equal: [host_id]
   # CrashLoopBackOff already explains the restarts.
   - source_matchers: ['alertname="GManInstanceCrashLoopBackOff"']
     target_matchers: ['alertname="GManInstanceRestartLoop"']

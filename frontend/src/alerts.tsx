@@ -20,6 +20,24 @@ const RUNBOOKS: [string, string, string[]][] = [
     'kubectl describe node <узел>: условия, события kubelet, pressure.',
     'Проверить kubelet и container runtime на узле, сеть до control plane.',
     'Алерты GPU и pod-ов этого узла подавлены, пока алерт активен.']],
+  ['GManK8sNodeOOM', 'OOM на узле Kubernetes', [
+    'SystemOOM (kubelet): закончилась память всего узла — сумма лимитов pod-ов и системных процессов больше памяти; проверить requests/limits pod-ов узла и kube-reserved/system-reserved.',
+    'OOMKilling (node-problem-detector): ядро завершило процесс; если агент определил pod (по UID pod или ID контейнера в сообщении), событие есть в «Истории» его сервиса, иначе — в «Аудите» с узлом.',
+    'kubectl describe node <узел> — события; журнал ядра на узле: journalctl -k | grep -i oom. OOM в пределах лимита контейнера подавляется алертом GManInstanceOOMKilled того же узла.']],
+  ['GManK8sNodePressure', 'Нехватка ресурса на узле', [
+    'DiskPressure: место или inodes на nodefs/imagefs — образы и логи контейнеров (crictl rmi --prune, ротация логов), emptyDir pod-ов.',
+    'MemoryPressure: сравнить requests и фактическое потребление pod-ов узла; PIDPressure — pod с утечкой процессов/потоков.',
+    'Пока условие истинно, kubelet вытесняет pod-ы (события Evicted в «Истории» сервисов) и не планирует новые с этим ресурсом.']],
+  ['GManK8sNodeEviction', 'Узел достиг порога вытеснения', [
+    'kubelet освобождает ресурс из подробностей события (reclaiming memory, ephemeral-storage, nodefs, imagefs): сначала удаляет образы и мертвые контейнеры, затем вытесняет pod-ы.',
+    'Вытесненные pod-ы — события Evicted в «Истории» сервисов; причина обычно та же, что у GManK8sNodePressure.']],
+  ['GManK8sNodeKernelProblem', 'Проблема ядра на узле', [
+    'KernelOops / TaskHung / FilesystemIsReadOnly от node-problem-detector: journalctl -k на узле, dmesg.',
+    'TaskHung — процесс в состоянии D дольше порога: обычно зависший диск или сетевая ФС. FilesystemIsReadOnly — ФС перемонтирована только на чтение после ошибки.',
+    'Вывести узел из планирования (kubectl cordon, затем drain) до выяснения причины.']],
+  ['GManK8sNodeRebooted', 'Узел перезагрузился', [
+    'kubelet сообщил о новом boot id: проверить, была ли перезагрузка плановой (обновление ядра, BMC/IPMI), и нет ли перед ней SystemOOM или KernelOops в «Аудите».',
+    'Pod-ы узла перезапущены: проверить их состояние в «Экземплярах» сервисов.']],
   ['GManTelemetryGatewayDown', 'OTel gateway недоступен', [
     'docker compose ps otel; docker compose logs otel — ошибки конфигурации или нехватка памяти.',
     'Пока gateway лежит, алерты об отсутствии метрик хостов и GPU не создаются; алерты по inventory работают.']],

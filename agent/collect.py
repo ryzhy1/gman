@@ -1,7 +1,7 @@
 """Read-only inventory agent. Run periodically with a systemd timer/cron, or with --watch.
 
 Docker: python3 agent/collect.py --runtime docker --source-id server-01
-K8s: python3 agent/collect.py --runtime kubernetes --source-id cluster-01 (pods, nodes and pod Events)
+K8s: python3 agent/collect.py --runtime kubernetes --source-id cluster-01 (pods, nodes, pod and node Events)
 K8s GPU node, run on the node in the host PID namespace (GPU processes attributed to pods):
   python3 agent/collect.py --runtime kubernetes-node --cluster cluster-01 --node gpu-1 --source-id cluster-01.gpu-1
 Default emits sanitized JSON; --send submits it to GMAN_URL using GMAN_AGENT_TOKEN
@@ -10,6 +10,8 @@ With --send, snapshots go through a bounded on-disk spool (oldest first, retried
 and a non-blocking flock keeps runs from overlapping. --watch follows `docker events` (Docker) or the
 Kubernetes watch API for pods and Events (list + watch from resourceVersion, relist on 410 Gone) and sends
 a debounced snapshot after changes, so short-lived containers/pods and Docker OOM kills are reported.
+Docker without --watch (timer) reads `oom` events since its previous run from `docker events --since/--until`,
+so an OOM kill of a container restarted by its restart policy is reported too.
 """
 import argparse
 import copy
@@ -33,7 +35,7 @@ from urllib.error import HTTPError, URLError
 from urllib.parse import quote
 from urllib.request import Request, urlopen
 
-AGENT_VERSION = "0.5.0"
+AGENT_VERSION = "0.6.0"
 # Host /proc. In a container this requires hostPID: nvidia-smi reports PIDs of the caller's PID namespace.
 PROC_ROOT = os.environ.get("GMAN_PROC_ROOT", "/proc")
 # In-cluster API access when kubectl is not installed (e.g. the DaemonSet in deploy/gpu-attribution-k8s.yaml).
@@ -634,12 +636,16 @@ def event_detail(reason, message):
 
 
 def pod_ref(pod):
-    """What Event mapping needs from a pod: identity, service and container names."""
-    meta, spec = pod["metadata"], pod.get("spec") or {}
+    """What Event mapping needs from a pod: identity, service, node, container names and runtime container IDs."""
+    meta, spec, status = pod["metadata"], pod.get("spec") or {}, pod.get("status") or {}
     labels = meta.get("labels") or {}
     return {"uid": meta["uid"], "namespace": meta.get("namespace", "default"), "name": meta["name"],
             "service_id": labels.get("gman.service", ""), "environment": labels.get("gman.environment", "unknown"),
-            "containers": {c["name"] for c in spec.get("containers", []) + spec.get("initContainers", [])}}
+            "node": spec.get("nodeName", ""),
+            "containers": {c["name"] for c in spec.get("containers", []) + spec.get("initContainers", [])},
+            "container_ids": {runtime_container_id(s["containerID"]): s["name"]
+                              for s in status.get("containerStatuses", []) + status.get("initContainerStatuses", [])
+                              if s.get("containerID")}}
 
 
 def kube_event(event, refs):
@@ -674,9 +680,89 @@ def kube_event(event, refs):
             "detail": event_detail(reason, event.get("message"))}
 
 
+# Node Events (namespace "default"): kubelet, node lifecycle controller and node-problem-detector (NPD).
+# kubelet reports memory and PID pressure as NodeHasInsufficientMemory / NodeHasInsufficientPID.
+NODE_EVENT_REASONS = {"OOMKilling", "SystemOOM", "NodeNotReady", "NodeHasDiskPressure", "NodeHasInsufficientMemory",
+                      "NodeHasInsufficientPID", "EvictionThresholdMet", "Rebooted", "KernelOops", "TaskHung",
+                      "FilesystemIsReadOnly", "ImageGCFailed"}
+NODE_NAME = re.compile(r"[a-z0-9]([-a-z0-9.]{0,251}[a-z0-9])?")
+# Only identifiers are looked up in OOM messages, never forwarded: the pod UID of a kubepods cgroup path
+# (task_memcg=/kubepods/.../pod<uid>/<container id>) and a 64-hex runtime container ID. The process name and
+# pid in the message are free text of the workload and stay on the node.
+CONTAINER_HEX = re.compile(r"(?<![0-9a-f])([0-9a-f]{64})(?![0-9a-f])")
+
+
+def node_event_detail(reason, message):
+    message = message or ""
+    if reason in ("OOMKilling", "SystemOOM"):
+        if "Memory cgroup out of memory" in message or "CONSTRAINT_MEMCG" in message:
+            return "memory cgroup limit"
+        if reason == "SystemOOM" or "CONSTRAINT_NONE" in message or re.search(r"(?<!cgroup )[Oo]ut of memory:", message):
+            return "node out of memory"
+        return ""
+    if reason == "EvictionThresholdMet":
+        resource = re.search(r"Attempting to reclaim ([a-z][a-z.-]{0,30})", message)
+        return f"reclaiming {resource[1]}" if resource else ""
+    if reason == "TaskHung":
+        blocked = re.search(r"blocked for more than (\d{1,6}) seconds", message)
+        return f"task blocked for more than {blocked[1]} seconds" if blocked else ""
+    if reason == "KernelOops":
+        return next((p for p in ("NULL pointer dereference", "divide error", "general protection fault")
+                     if p in message), "")
+    return ""
+
+
+def oom_pod(message, node, refs):
+    """(pod_ref, container name) of an OOM node Event whose message names a known pod of this node; else None."""
+    message = message or ""
+    by_container = {cid: (ref, name) for ref in refs.values() for cid, name in ref.get("container_ids", {}).items()}
+    for cid in CONTAINER_HEX.findall(message):
+        if cid in by_container:
+            ref, container = by_container[cid]
+            if ref.get("node") in ("", node):
+                return ref, container
+    for uid in POD_UID.findall(message):
+        ref = refs.get(uid.replace("_", "-"))
+        if ref is not None and ref.get("node") in ("", node):
+            return ref, ""
+    return None
+
+
+def kube_node_event(event, refs):
+    """A Kubernetes Event of a node, reduced to allowlisted fields; None if not allowlisted.
+
+    OOM kills are attributed to a pod (and its service) only when the message names a known pod of the node by
+    pod UID or container ID; otherwise to the node alone.
+    """
+    involved, meta = event.get("involvedObject") or {}, event.get("metadata") or {}
+    reason, node = event.get("reason") or "", involved.get("name") or ""
+    if (involved.get("kind") != "Node" or reason not in NODE_EVENT_REASONS or not meta.get("uid")
+            or not NODE_NAME.fullmatch(node)):
+        return None
+    series = event.get("series") or {}
+    first = event.get("firstTimestamp") or event.get("eventTime")
+    last = newest(series.get("lastObservedTime"), event.get("lastTimestamp"), event.get("eventTime"), first)
+    if last is None:
+        return None
+    source = event.get("source") or {}
+    mapped = oom_pod(event.get("message"), node, refs) if reason in ("OOMKilling", "SystemOOM") else None
+    pod, container = mapped or (None, "")
+    return {"uid": meta["uid"][:100], "kind": "Node", "node": node, "reason": reason,
+            "type": event.get("type") if event.get("type") in ("Normal", "Warning") else "Warning",
+            "count": max(1, int(series.get("count") or 0), int(event.get("count") or 0)),
+            "first_at": first if parse_time(first) else None, "last_at": last,
+            "service_id": pod["service_id"] if pod else "", "environment": pod["environment"] if pod else "unknown",
+            "namespace": pod["namespace"] if pod else "", "pod": pod["name"] if pod else "", "container": container,
+            "instance_id": pod["uid"] + ":" + container if container else "",
+            "instance_name": (pod["name"] + ("/" + container if container else "")) if pod else "",
+            "component": str(source.get("component") or event.get("reportingComponent") or "")[:100],
+            "detail": node_event_detail(reason, event.get("message"))}
+
+
 def kube_events(events, refs):
-    """Allowlisted Events of known pods (`refs`: pod UID -> pod_ref), newest first and bounded."""
-    mapped = [m for m in (kube_event(e, refs) for e in events) if m]
+    """Allowlisted Events of known pods (`refs`: pod UID -> pod_ref) and of nodes, newest first and bounded."""
+    mapped = [m for m in ((kube_node_event(e, refs) if (e.get("involvedObject") or {}).get("kind") == "Node"
+                           else kube_event(e, refs)) for e in events) if m]
     mapped.sort(key=lambda m: parse_time(m["last_at"]), reverse=True)
     return mapped[:MAX_KUBE_EVENTS]
 
@@ -722,6 +808,13 @@ def attribute(gpu_list, pods):
 
 
 EVENTS_PATH = "/api/v1/events?fieldSelector=" + quote("involvedObject.kind=Pod")
+# A field selector cannot OR two kinds, and listing all Events would bring every Normal one: a second list/watch.
+NODE_EVENTS_PATH = "/api/v1/events?fieldSelector=" + quote("involvedObject.kind=Node")
+
+
+def relevant_event(event):
+    kind, reason = (event.get("involvedObject") or {}).get("kind"), event.get("reason")
+    return reason in KUBE_EVENT_REASONS if kind == "Pod" else kind == "Node" and reason in NODE_EVENT_REASONS
 
 
 def collect(runtime, source_id, node="", cluster="", pods=None, events=None):
@@ -747,14 +840,15 @@ def collect(runtime, source_id, node="", cluster="", pods=None, events=None):
             pods = kube_list(["get", "pods", "--all-namespaces"], "/api/v1/pods")["items"]
         node_list = kube_list(["get", "nodes"], "/api/v1/nodes")["items"]
         if events is None:
-            try:
-                raw = kube_list(["get", "events", "--all-namespaces", "--field-selector", "involvedObject.kind=Pod"],
-                                EVENTS_PATH)["items"]
-                events = kube_events(raw, {ref["uid"]: ref for ref in map(pod_ref, pods)})
-            except (OSError, ValueError, KeyError, subprocess.SubprocessError) as error:
-                # E.g. RBAC without events: the inventory itself is still complete.
-                errors.append("kubernetes events unavailable: " + type(error).__name__)
-                events = []
+            raw = []
+            for kind, path in (("Pod", EVENTS_PATH), ("Node", NODE_EVENTS_PATH)):
+                try:
+                    raw += kube_list(["get", "events", "--all-namespaces", "--field-selector",
+                                      "involvedObject.kind=" + kind], path)["items"]
+                except (OSError, ValueError, KeyError, subprocess.SubprocessError) as error:
+                    # E.g. RBAC without events: the inventory itself is still complete.
+                    errors.append(f"kubernetes {kind.lower()} events unavailable: " + type(error).__name__)
+            events = kube_events(raw, {ref["uid"]: ref for ref in map(pod_ref, pods)})
         data.update(source_type="kubernetes-cluster", hostname=source_id,
                     instances=[i for pod in pods for i in pod_instances(pod)], gpus=[], nodes=nodes(node_list, pods),
                     events=events)
@@ -1113,7 +1207,7 @@ def kube_watch(resource, api_path, items, list_=kube_raw, stream=kube_stream, sl
 
 
 class KubeWatcher(Watcher):
-    """Debounce for the Kubernetes watch of pods and pod Events, with a pod cache built from it.
+    """Debounce for the Kubernetes watch of pods, pod Events and node Events, with a pod cache built from it.
 
     Snapshots are built from the cache (nodes are still listed per snapshot). Pods seen in the window are
     kept with their last state, so a pod created and deleted between two snapshots is still reported
@@ -1146,10 +1240,9 @@ class KubeWatcher(Watcher):
                     self.seen[instance["id"]] = instance
             else:
                 return
-        elif resource == "events" and kind in ("SYNC", "ADDED", "MODIFIED"):
+        elif resource in ("events", "node-events") and kind in ("SYNC", "ADDED", "MODIFIED"):
             fresh = (item.get("items") or []) if kind == "SYNC" else [item["object"]]
-            relevant = [e for e in fresh if e.get("reason") in KUBE_EVENT_REASONS
-                        and (e.get("involvedObject") or {}).get("kind") == "Pod"]
+            relevant = [e for e in fresh if relevant_event(e)]
             for event in relevant:
                 self.events[(event.get("metadata") or {}).get("uid")] = event
             if not relevant:
@@ -1212,6 +1305,56 @@ def watch(collect_snapshot, spool, deliver, watcher, lines=None, clock=time.mono
         for snapshot in watcher.snapshots(data, seen):
             spool.put(snapshot)
         spool.flush(deliver)
+
+
+# --- Docker OOM without --watch -----------------------------------------------------------------------
+
+# The daemon keeps only its latest events in memory (a few hundred): a longer look-back finds nothing more.
+OOM_LOOKBACK = 3600
+
+
+def docker_ooms(since, until, run=command):
+    """Container ID -> time of the latest `oom` event between two Unix times (`docker events` returns at --until)."""
+    output = run(["docker", "events", "--since", str(since), "--until", str(until), "--filter", "type=container",
+                  "--filter", "event=oom", "--format", "{{json .}}"])
+    result = {}
+    for line in output.splitlines():
+        try:
+            event = json.loads(line)
+        except ValueError:
+            continue
+        cid, when = event_id(event), event_time(event)
+        if cid and when:
+            result[cid] = newest(result.get(cid), when)
+    return result
+
+
+def with_docker_ooms(data, mark, clock=time.time, run=command):
+    """One-shot Docker: OOM kills since the previous run (time kept in `mark`) as last_oom_at.
+
+    Docker clears State.OOMKilled when the restart policy restarts the container, and an OOM kill of a child
+    process does not stop it at all; the `oom` event stays in the daemon's event buffer. The API keeps the
+    latest last_oom_at once recorded. Removed containers (--rm) have no instance to carry it.
+    """
+    until = int(clock())
+    try:
+        since = max(int(Path(mark).read_text().strip()), until - OOM_LOOKBACK)
+    except (OSError, ValueError):
+        since = until - OOM_LOOKBACK
+    if since >= until:
+        return data
+    try:
+        ooms = docker_ooms(since, until, run)
+    except (OSError, subprocess.SubprocessError) as error:
+        data["errors"].append("docker oom events unavailable: " + type(error).__name__)
+        return data  # the mark stays: the next run looks at this period again
+    for instance in data["instances"]:
+        if instance["id"] in ooms:
+            instance["last_oom_at"] = newest(instance.get("last_oom_at"), ooms[instance["id"]])
+    temporary = Path(str(mark) + ".tmp")
+    temporary.write_text(str(until))
+    os.replace(temporary, mark)
+    return data
 
 
 # --- CLI ------------------------------------------------------------------------------------------
@@ -1289,9 +1432,13 @@ def main(argv=None):
             return lambda items: kube_watch(resource, api_path, items, timeout=args.watch_timeout)
 
         watch(lambda: collect(args.runtime, args.source_id, pods=watcher.pod_list(), events=[]), spool, deliver,
-              watcher, feeds=(feed("pods", "/api/v1/pods"), feed("events", EVENTS_PATH)))
+              watcher, feeds=(feed("pods", "/api/v1/pods"), feed("events", EVENTS_PATH),
+                              feed("node-events", NODE_EVENTS_PATH)))
     elif args.watch:
         watch(snapshot, spool, deliver, Watcher(time.monotonic(), args.debounce, args.max_delay, args.interval))
+    elif args.runtime == "docker":
+        mark = state / f"docker-oom-{args.source_id}.since"
+        run_once(lambda: with_docker_ooms(snapshot(), mark), spool, deliver)
     else:
         run_once(snapshot, spool, deliver)
 

@@ -1045,3 +1045,102 @@ tests:
                 Файл из GMAN_TLS_WATCH_FILES отсутствует, не читается пользователем API (65534), не разбирается как
                 сертификат/CRL или похож на ключ. Сроки действия этого файла не контролируются.
               runbook_url: https://gman.example/#alerts/GManTlsFileError
+
+  # Node Events of cluster c1: SystemOOM on gpu-1 and OOMKilling on gpu-2 at 2 minutes, a kernel oops, an eviction
+  # threshold and a reboot at 1 minute; DiskPressure condition on gpu-1 from 1 to 4 minutes.
+  - name: node events
+    external_labels: {gman_portal: https://gman.example}
+    interval: 1m
+    input_series:
+      - series: 'gman_k8s_node_event_last_timestamp_seconds{job="gman-api", instance="api:8000", source_id="c1", host_id="gpu-1", node="gpu-1", reason="SystemOOM"}'
+        values: '_ _ 120x60'
+      - series: 'gman_k8s_node_event_last_timestamp_seconds{job="gman-api", instance="api:8000", source_id="c1", host_id="gpu-2", node="gpu-2", reason="OOMKilling"}'
+        values: '_ _ 120x60'
+      - series: 'gman_k8s_node_event_last_timestamp_seconds{job="gman-api", instance="api:8000", source_id="c1", host_id="gpu-1", node="gpu-1", reason="KernelOops"}'
+        values: '60x60'
+      - series: 'gman_k8s_node_event_last_timestamp_seconds{job="gman-api", instance="api:8000", source_id="c1", host_id="gpu-1", node="gpu-1", reason="EvictionThresholdMet"}'
+        values: '60x60'
+      - series: 'gman_k8s_node_event_last_timestamp_seconds{job="gman-api", instance="api:8000", source_id="c1", host_id="gpu-2", node="gpu-2", reason="Rebooted"}'
+        values: '60x60'
+      # Recorded, but no alert of its own (GManK8sNodeNotReady comes from the Ready condition).
+      - series: 'gman_k8s_node_event_last_timestamp_seconds{job="gman-api", instance="api:8000", source_id="c1", host_id="gpu-2", node="gpu-2", reason="NodeNotReady"}'
+        values: '60x60'
+      - series: 'gman_k8s_node_pressure{job="gman-api", instance="api:8000", source_id="c1", host_id="gpu-1", condition="DiskPressure"}'
+        values: '_ 1 1 1 1 _x20'
+      - series: 'gman_k8s_node_pressure{job="gman-api", instance="api:8000", source_id="c1", host_id="gpu-2", condition="NetworkUnavailable"}'
+        values: '1x20'
+    alert_rule_test:
+      - eval_time: 1m
+        alertname: GManK8sNodeOOM
+        exp_alerts: []
+      - eval_time: 10m
+        alertname: GManK8sNodeOOM
+        exp_alerts:
+          - exp_labels: {severity: warning, scope: node, source_id: c1, host_id: gpu-1, reason: SystemOOM}
+            exp_annotations:
+              summary: 'OOM на узле gpu-1 (SystemOOM)'
+              description: >-
+                8m 0s назад ядро узла gpu-1 (кластер c1)
+                завершило процесс по нехватке памяти. SystemOOM — закончилась память всего узла (kubelet);
+                OOMKilling — сообщение node-problem-detector. Затронутый pod, если агент его определил, — в «Аудите».
+              runbook_url: https://gman.example/#alerts/GManK8sNodeOOM
+          - exp_labels: {severity: warning, scope: node, source_id: c1, host_id: gpu-2, reason: OOMKilling}
+            exp_annotations:
+              summary: 'OOM на узле gpu-2 (OOMKilling)'
+              description: >-
+                8m 0s назад ядро узла gpu-2 (кластер c1)
+                завершило процесс по нехватке памяти. SystemOOM — закончилась память всего узла (kubelet);
+                OOMKilling — сообщение node-problem-detector. Затронутый pod, если агент его определил, — в «Аудите».
+              runbook_url: https://gman.example/#alerts/GManK8sNodeOOM
+      - eval_time: 32m
+        alertname: GManK8sNodeOOM
+        exp_alerts: []
+      - eval_time: 3m
+        alertname: GManK8sNodePressure
+        exp_alerts:
+          - exp_labels: {severity: warning, scope: node, source_id: c1, host_id: gpu-1, condition: DiskPressure}
+            exp_annotations:
+              summary: 'Узел gpu-1: DiskPressure'
+              description: >-
+                Условие DiskPressure узла gpu-1 (кластер c1) истинно:
+                kubelet вытесняет pod-ы и не принимает новые с этим ресурсом.
+              runbook_url: https://gman.example/#alerts/GManK8sNodePressure
+      - eval_time: 12m
+        alertname: GManK8sNodePressure
+        exp_alerts: []
+      - eval_time: 10m
+        alertname: GManK8sNodeEviction
+        exp_alerts:
+          - exp_labels: {severity: warning, scope: node, source_id: c1, host_id: gpu-1}
+            exp_annotations:
+              summary: 'Узел gpu-1 освобождает ресурсы (EvictionThresholdMet)'
+              description: >-
+                9m 0s назад kubelet узла gpu-1 (кластер c1)
+                достиг порога вытеснения: pod-ы узла могут быть вытеснены (Evicted).
+              runbook_url: https://gman.example/#alerts/GManK8sNodeEviction
+      - eval_time: 20m
+        alertname: GManK8sNodeEviction
+        exp_alerts: []
+      - eval_time: 50m
+        alertname: GManK8sNodeKernelProblem
+        exp_alerts:
+          - exp_labels: {severity: warning, scope: node, source_id: c1, host_id: gpu-1, reason: KernelOops}
+            exp_annotations:
+              summary: 'Проблема ядра на узле gpu-1: KernelOops'
+              description: >-
+                node-problem-detector сообщил KernelOops 49m 0s назад
+                (кластер c1).
+              runbook_url: https://gman.example/#alerts/GManK8sNodeKernelProblem
+      - eval_time: 10m
+        alertname: GManK8sNodeRebooted
+        exp_alerts:
+          - exp_labels: {severity: warning, scope: node, source_id: c1, host_id: gpu-2}
+            exp_annotations:
+              summary: 'Узел gpu-2 перезагрузился'
+              description: >-
+                kubelet сообщил о перезагрузке узла gpu-2 (кластер c1)
+                9m 0s назад; pod-ы узла перезапущены.
+              runbook_url: https://gman.example/#alerts/GManK8sNodeRebooted
+      - eval_time: 16m
+        alertname: GManK8sNodeRebooted
+        exp_alerts: []

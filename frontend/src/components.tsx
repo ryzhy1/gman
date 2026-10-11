@@ -173,7 +173,8 @@ function title(e: Audit) {
   if (e.type === 'source-connected') return `${TITLES[e.type]} · ${e.source_id} · ${e.instance_count} экз.`;
   if (e.type === 'history-gap') return `${TITLES[e.type]} · ${e.source_id}`;
   if (e.type === 'runtime-event') {
-    return `${e.reason}${e.count && e.count > 1 ? ` ×${e.count}` : ''} · ${e.instance_name}`;
+    const object = e.kind === 'Node' ? `узел ${e.node}${e.instance_name ? ` · ${e.instance_name}` : ''}` : e.instance_name;
+    return `${e.reason}${e.count && e.count > 1 ? ` ×${e.count}` : ''} · ${object}`;
   }
   return `${TITLES[e.type] ?? e.type} · ${e.instance_name ?? e.instance_id}`;
 }
@@ -212,7 +213,10 @@ export function EventItem({ e, onRelease }: { e: Audit; onRelease?: (id: number,
     </>}
     {e.type === 'runtime-event' && <dl>
       <div><dt>Причина</dt><dd>{e.reason} ({e.event_type}){e.detail ? ` · ${e.detail}` : ''}</dd></div>
-      <div><dt>Pod</dt><dd>{e.namespace}/{e.pod}{e.container ? ` · контейнер ${e.container}` : ''}</dd></div>
+      {e.kind === 'Node' && <div><dt>Узел</dt><dd>{e.node}</dd></div>}
+      {e.pod
+        ? <div><dt>Pod</dt><dd>{e.namespace}/{e.pod}{e.container ? ` · контейнер ${e.container}` : ''}</dd></div>
+        : e.kind === 'Node' && <div><dt>Pod</dt><dd>не определен: событие относится к узлу</dd></div>}
       <div><dt>Повторов</dt><dd>{e.count} всего, новых {e.occurrences}</dd></div>
       <div><dt>Впервые / последний раз</dt><dd>{date(e.first_at)} / {date(e.last_at)}</dd></div>
       <div><dt>Компонент</dt><dd>{e.component || '—'}</dd></div>
