@@ -17,7 +17,11 @@ export type Instance = {
   restarts: number; origin: Origin; config: Record<string, unknown>;
 };
 
-export type GPUProcess = { pid: number; container_id: string; used_memory_bytes: number | null };
+/** Docker owner by container_id; Kubernetes (node source) also by pod and instance_id "<pod uid>:<container>". */
+export type GPUProcess = {
+  pid: number; container_id: string; used_memory_bytes: number | null;
+  pod_uid?: string; namespace?: string; pod?: string; container?: string; instance_id?: string;
+};
 
 /** Unsupported readings are null (older snapshots may omit the field entirely), never zero. */
 export type GPU = {
@@ -46,6 +50,8 @@ export type Node = {
 
 export type Source = {
   source_id: string; hostname: string; source_type: string; agent_version: string;
+  /** kubernetes-node: GPU snapshot of node `hostname` of cluster source `cluster`, without instances. */
+  cluster?: string;
   observed_at: string; received_at: string; cpu_count: number | null; memory_total_bytes: number | null;
   os?: string; kernel?: string; cpu_model?: string; runtime_version?: string; uptime_seconds?: number | null;
   instances: Instance[]; gpus: GPU[]; nodes?: Node[]; errors: string[];
@@ -82,5 +88,7 @@ export type CurrentMetrics = {
   k8s_container?: Record<string, MetricValues>;
   /** Keyed by pod UID; network is per pod, shared by its containers. */
   k8s_pod?: Record<string, MetricValues>;
+  /** Keyed by "namespace/pod/container": DCGM series of GPUs allocated to the container. */
+  k8s_gpu?: Record<string, MetricValues>;
 };
 export type RangeResult = { points: [number, number | null][]; step: number };

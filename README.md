@@ -33,6 +33,11 @@ NVIDIA на серверах, Bitbucket/GitLab для исходного код�
 - Какой контейнер занимает GPU: процессы nvidia-smi --query-compute-apps связываются с
   контейнерами по /proc/<pid>/cgroup, с объемом VRAM процесса. Это VRAM процесса, а не
   доля загрузки GPU. Агент должен работать в host PID namespace (как host process).
+- Какой pod занимает GPU в Kubernetes: агент на GPU-узле (режим kubernetes-node) разбирает
+  /proc/<pid>/cgroup (cgroup v1 и v2, драйверы systemd и cgroupfs, containerd, CRI-O,
+  cri-dockerd, QoS besteffort/burstable/guaranteed, UID pod-а с `_` или `-`, static pod) и
+  сопоставляет ID контейнера с containerStatuses pod-ов узла. Процесс показывается в карточке
+  узла и в экземплярах сервиса (VRAM, вкладка «Конфигурация»), как для Docker.
 - Сведения о хосте: ОС, ядро, модель CPU, версия Docker, uptime.
 - Узлы Kubernetes: готовность, pressure, cordon, роли, taints, версии kubelet/ОС/runtime,
   capacity/allocatable и сумма requests активных pod-ов по CPU/RAM/GPU, модель GPU из
@@ -128,6 +133,39 @@ python3 agent/collect.py --runtime kubernetes --source-id cluster-01 --send
 но доступ к Pod spec сам по себе может открывать plain-text env в API Kubernetes;
 агент не передает эти значения в GMan.
 
+### Процессы GPU в Kubernetes
+
+Агент кластера работает через kubectl, часто вне узлов, и не видит PID узла. Поэтому
+на каждом GPU-узле запускается отдельный экземпляр агента в режиме kubernetes-node:
+
+```sh
+python3 agent/collect.py --runtime kubernetes-node --cluster cluster-01 --node gpu-1 \
+  --source-id cluster-01.gpu-1 --send
+```
+
+Он читает nvidia-smi и /proc/<pid>/cgroup узла (нужен host PID namespace: nvidia-smi
+сообщает PID своего namespace) и список pod-ов этого узла (`kubectl get pods
+--field-selector spec.nodeName=...`; без kubectl внутри pod — Kubernetes API с service
+account). Процесс получает namespace, pod, контейнер и ID экземпляра `<pod uid>:<контейнер>`.
+Если контейнера нет в containerStatuses, процесс привязывается только к pod по UID из cgroup;
+если pod не найден — остаются ID контейнера и UID pod-а. Сбой получения pod-ов попадает в
+ошибки снимка, данные GPU все равно отправляются.
+
+Узел — отдельный источник `<кластер>.<узел>` (source_type kubernetes-node) со своим токеном
+в GMAN_AGENT_TOKENS. Экземпляров в нем нет: pod-ы по-прежнему сообщает источник кластера,
+поэтому история не дублируется. Портал показывает GPU узла внутри карточки кластера.
+
+Варианты запуска: DaemonSet из deploy/gpu-attribution-k8s.yaml (hostPID, без
+capabilities, nvidia-smi от NVIDIA container runtime без запроса nvidia.com/gpu, токены в
+Secret с ключами по именам узлов через GMAN_AGENT_TOKEN_FILE, RBAC — только list pods)
+или systemd timer на узле с read-only kubeconfig. GMAN_PROC_ROOT задает другой путь к
+/proc хоста, если он смонтирован отдельно.
+
+Загрузку GPU по pod-ам дают метки namespace/pod/container DCGM Exporter в режиме
+Kubernetes (по умолчанию в GPU Operator): вкладка «Ресурсы» показывает загрузку и VRAM
+выделенных контейнеру карт для pod-ов с GPU requests. Это значения всей карты: при
+time-slicing/MPS они общие для pod-ов на ней.
+
 ## Bamboo
 
 В deployment job добавьте Script task `python3 agent/bamboo_event.py`. Обязательны
@@ -186,7 +224,8 @@ NVIDIA и DCGM еще не проверено.
 Kubernetes: deploy/otel-k8s.yaml (DaemonSet: host_metrics, kubelet_stats, k8s_attributes,
 DCGM на узле); портал показывает CPU/RAM контейнеров и сеть pod-ов, есть дашборд
 «GMan · Kubernetes». Имена метрик сверялись на эмуляторе kubelet; в реальном кластере,
-включая k8s_attributes и обнаружение DCGM, не проверено.
+включая k8s_attributes и обнаружение DCGM, не проверено. Метки pod/namespace/container
+DCGM передаются без изменений и используются для GPU по pod-ам (см. «Процессы GPU в Kubernetes»).
 Логи приложений и traces не включены; Splunk не разворачивается.
 
 ## Проверка

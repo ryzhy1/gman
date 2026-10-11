@@ -1,7 +1,7 @@
 import React, { useEffect, useState } from 'react';
 import { createRoot } from 'react-dom/client';
 import { get, type CurrentMetrics, type Overview } from './api';
-import { ConfigView, History, InstanceTable, type Placed } from './components';
+import { ConfigView, History, InstanceTable, placeInstances, type Placed } from './components';
 import { ClusterCard, HostCard } from './hardware';
 import { date, stale } from './format';
 import { Resources } from './resources';
@@ -58,14 +58,19 @@ function App() {
 
   if (!token) return <Login onToken={setToken} />;
 
-  const all: Placed[] = data?.sources.flatMap(s => s.instances.map(i => ({ ...i, source: s }))) ?? [];
+  const all: Placed[] = placeInstances(data?.sources ?? []);
   const instances = all.filter(i => environment === ALL || i.environment === environment);
   const services = (data?.services ?? []).filter(s =>
     `${s.name} ${s.id} ${s.team} ${s.owner}`.toLowerCase().includes(query.toLowerCase()));
   const service = data?.services.find(s => s.id === selected);
   const own = instances.filter(i => i.service_id === selected);
   const unknown = instances.filter(i => !data?.services.some(s => s.id === i.service_id));
-  const gpuCount = (data?.sources ?? []).reduce((n, s) => n + s.gpus.length + (s.nodes ?? []).reduce((m, x) => m + x.gpu_capacity, 0), 0);
+  // GPUs of node-local sources are already counted in their cluster's node capacity.
+  const gpuCount = (data?.sources ?? []).reduce((n, s) => n + (s.source_type === 'kubernetes-node' ? 0 : s.gpus.length)
+    + (s.nodes ?? []).reduce((m, x) => m + x.gpu_capacity, 0), 0);
+  // Node-local GPU sources are shown inside their cluster's node; without that cluster, as a host of their own.
+  const hostSources = (data?.sources ?? []).filter(s => s.source_type !== 'kubernetes-node'
+    || !data?.sources.some(c => c.source_type === 'kubernetes-cluster' && c.source_id === s.cluster));
   const openService = (id: string) => { if (data?.services.some(s => s.id === id)) { setPage('Сервисы'); setSelected(id); setTab('Обзор'); } };
   const open = (p: string) => { setPage(p); setSelected(''); setQuery(''); };
   const grafana = data?.grafana_url ?? '';
@@ -160,8 +165,8 @@ function App() {
           </>}
 
           {page === 'Серверы и GPU' && <div className="host-grid">
-            {data.sources.map(s => s.source_type === 'kubernetes-cluster'
-              ? <ClusterCard key={s.source_id} source={s} metrics={metrics} />
+            {hostSources.map(s => s.source_type === 'kubernetes-cluster'
+              ? <ClusterCard key={s.source_id} source={s} sources={data.sources} metrics={metrics} onService={openService} />
               : <HostCard key={s.source_id} source={s} metrics={metrics} grafanaUrl={grafana} onService={openService} />)}
             {!data.sources.length && <section className="empty">Источники еще не подключены. Начните с одного Docker-хоста или Kubernetes-кластера.</section>}
           </div>}

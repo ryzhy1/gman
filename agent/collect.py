@@ -2,20 +2,29 @@
 
 Docker: python3 agent/collect.py --runtime docker --source-id server-01
 K8s: python3 agent/collect.py --runtime kubernetes --source-id cluster-01
-Default emits sanitized JSON; --send submits it to GMAN_URL using GMAN_AGENT_TOKEN.
+K8s GPU node, run on the node in the host PID namespace (GPU processes attributed to pods):
+  python3 agent/collect.py --runtime kubernetes-node --cluster cluster-01 --node gpu-1 --source-id cluster-01.gpu-1
+Default emits sanitized JSON; --send submits it to GMAN_URL using GMAN_AGENT_TOKEN
+(or the file named by GMAN_AGENT_TOKEN_FILE).
 """
 import argparse
 import csv
 import json
 import os
 import re
+import ssl
 import subprocess
 from datetime import datetime, timezone
 from pathlib import Path
 from urllib.error import HTTPError
+from urllib.parse import quote
 from urllib.request import Request, urlopen
 
-AGENT_VERSION = "0.3.0"
+AGENT_VERSION = "0.4.0"
+# Host /proc. In a container this requires hostPID: nvidia-smi reports PIDs of the caller's PID namespace.
+PROC_ROOT = os.environ.get("GMAN_PROC_ROOT", "/proc")
+# In-cluster API access when kubectl is not installed (e.g. the DaemonSet in deploy/gpu-attribution-k8s.yaml).
+SERVICE_ACCOUNT = Path("/var/run/secrets/kubernetes.io/serviceaccount")
 
 # Only these labels are forwarded: they identify origin and never carry configuration values.
 ORIGIN_LABELS = {
@@ -319,13 +328,48 @@ def throttle_names(mask):
     return [name for bit, name in THROTTLE_REASONS.items() if value & bit]
 
 
-def container_of(pid):
-    """Docker/containerd container ID from the process cgroup; host processes have none."""
+# Pod UID in kubepods cgroups: dashes with the cgroupfs driver, underscores in systemd slice names;
+# static pods use the 32-hex config hash without separators.
+POD_UID = re.compile(r"pod([0-9a-f]{8}[-_]?[0-9a-f]{4}[-_]?[0-9a-f]{4}[-_]?[0-9a-f]{4}[-_]?[0-9a-f]{12})(?![0-9a-f])")
+# A container cgroup is a 64-hex segment, bare (cgroupfs driver) or with a runtime prefix and .scope
+# (systemd driver): docker-, cri-containerd-, crio-, libpod-. crio-conmon-<id> is CRI-O's monitor process.
+CONTAINER_SEGMENT = re.compile(r"(?:([a-z][a-z0-9-]*)-)?([0-9a-f]{64})(?:\.scope)?")
+NO_OWNER = {"container_id": "", "pod_uid": ""}
+
+
+def parse_cgroup(text):
+    """Container ID and pod UID from /proc/<pid>/cgroup (v1 or v2, systemd or cgroupfs); empty for host processes."""
+    found = NO_OWNER
+    for line in text.splitlines():
+        parts = line.split(":", 2)
+        if len(parts) != 3:
+            continue
+        current = dict(NO_OWNER)
+        # ":" splits runc's "slice:prefix:id" form that appears when kubelet and runtime cgroup drivers differ.
+        for segment in re.split(r"[/:]", parts[2]):
+            match = CONTAINER_SEGMENT.fullmatch(segment)
+            if match and "conmon" not in (match[1] or ""):
+                current["container_id"] = match[2]  # The innermost container segment wins.
+            uid = POD_UID.search(segment)
+            if uid:
+                current["pod_uid"] = uid[1].replace("_", "-")
+        if current["container_id"]:
+            return current  # v1 hierarchies agree with each other; the first complete one is enough.
+        if current["pod_uid"] and not found["pod_uid"]:
+            found = current  # Pod-level cgroup only (e.g. conmon or the pause sandbox).
+    return dict(found)
+
+
+def cgroup_of(pid):
     try:
-        match = re.search(r"([0-9a-f]{64})", Path(f"/proc/{pid}/cgroup").read_text())
+        return parse_cgroup((Path(PROC_ROOT) / str(pid) / "cgroup").read_text())
     except OSError:
-        return ""
-    return match[1] if match else ""
+        return dict(NO_OWNER)  # The process exited, or this /proc is not the host's.
+
+
+def container_of(pid):
+    """Docker/containerd/CRI-O container ID from the process cgroup; host processes have none."""
+    return cgroup_of(pid)["container_id"]
 
 
 def nvidia_gpus(errors):
@@ -364,8 +408,12 @@ def nvidia_gpus(errors):
             gpu = by_uuid.get(uuid.strip())
             if gpu is not None and pid.strip().isdigit():
                 memory = nvidia_value(used, float)
-                gpu["processes"].append({"pid": int(pid), "container_id": container_of(pid.strip()),
-                                         "used_memory_bytes": int(memory * MIB) if memory is not None else None})
+                owner = cgroup_of(pid.strip())
+                process = {"pid": int(pid), "container_id": owner["container_id"],
+                           "used_memory_bytes": int(memory * MIB) if memory is not None else None}
+                if owner["pod_uid"]:
+                    process["pod_uid"] = owner["pod_uid"]
+                gpu["processes"].append(process)
     except (subprocess.SubprocessError, ValueError) as error:
         errors.append("nvidia-smi compute apps unavailable: " + type(error).__name__)
     return result
@@ -441,19 +489,91 @@ def nodes(node_list, pods):
     return result
 
 
-def collect(runtime, source_id):
+def kube_get(kubectl_args, api_path):
+    """kubectl when installed; otherwise the in-cluster API with the pod's service account (stdlib only)."""
+    try:
+        return json.loads(command(["kubectl", *kubectl_args, "-o", "json"]))
+    except FileNotFoundError:
+        host, port = os.environ.get("KUBERNETES_SERVICE_HOST"), os.environ.get("KUBERNETES_SERVICE_PORT", "443")
+        if not host:
+            raise
+    token = (SERVICE_ACCOUNT / "token").read_text().strip()
+    context = ssl.create_default_context(cafile=str(SERVICE_ACCOUNT / "ca.crt"))
+    host = f"[{host}]" if ":" in host else host
+    request = Request(f"https://{host}:{port}{api_path}", headers={"Authorization": "Bearer " + token})
+    with urlopen(request, timeout=60, context=context) as response:
+        return json.loads(response.read())
+
+
+def node_pods(node):
+    return kube_get(["get", "pods", "--all-namespaces", "--field-selector", "spec.nodeName=" + node],
+                    "/api/v1/pods?fieldSelector=" + quote("spec.nodeName=" + node))["items"]
+
+
+def runtime_container_id(value):
+    # containerStatuses[].containerID is "<runtime>://<id>": containerd://, cri-o://, docker://.
+    return value.split("://", 1)[-1]
+
+
+def pod_index(pods):
+    """Runtime container ID -> pod container, and cgroup pod UID -> pod, from the same pod JSON as the inventory."""
+    by_container, by_pod = {}, {}
+    for pod in pods:
+        meta = pod["metadata"]
+        info = {"pod_uid": meta["uid"], "namespace": meta.get("namespace", "default"), "pod": meta["name"]}
+        by_pod[meta["uid"]] = info
+        # Static pods: the cgroup carries the config hash, while the API shows the mirror pod's own UID.
+        config_hash = (meta.get("annotations") or {}).get("kubernetes.io/config.hash")
+        if config_hash:
+            by_pod[config_hash] = info
+        status = pod.get("status") or {}
+        # Ephemeral (debug) containers are not inventory instances: they fall back to pod-level attribution.
+        for s in status.get("containerStatuses", []) + status.get("initContainerStatuses", []):
+            if s.get("containerID"):
+                by_container[runtime_container_id(s["containerID"])] = {
+                    **info, "container": s["name"], "instance_id": meta["uid"] + ":" + s["name"]}
+    return by_container, by_pod
+
+
+def attribute(gpu_list, pods):
+    """Adds pod, container and the inventory instance ID ("<pod uid>:<container>") to GPU processes."""
+    by_container, by_pod = pod_index(pods)
+    for gpu in gpu_list:
+        for process in gpu.get("processes", []):
+            match = by_container.get(process.get("container_id")) or by_pod.get(process.get("pod_uid", ""))
+            if match:
+                process.update(match)
+
+
+def collect(runtime, source_id, node="", cluster=""):
     observed = datetime.now(timezone.utc).isoformat()
     errors = []
     data = {"source_id": source_id, "observed_at": observed, "agent_version": AGENT_VERSION, "errors": errors}
-    if runtime == "docker":
+    if runtime == "kubernetes-node":
+        # GPU processes of one node; pods and nodes stay with the cluster source, so this snapshot has no instances.
+        gpu_list = nvidia_gpus(errors)
+        try:
+            attribute(gpu_list, node_pods(node))
+        except (OSError, ValueError, KeyError, subprocess.SubprocessError) as error:
+            # Processes still carry container ID and pod UID; only names are missing.
+            errors.append("pods of the node unavailable: " + type(error).__name__)
+        data.update(source_type="kubernetes-node", hostname=node, cluster=cluster, instances=[], gpus=gpu_list,
+                    kernel=os.uname().release)
+    elif runtime == "docker":
         data.update(source_type="docker-host", hostname=os.uname().nodename,
                     instances=[docker_instance(c) for c in inspect_containers()], gpus=gpus(errors), **host_info())
     else:
-        pods = json.loads(command(["kubectl", "get", "pods", "--all-namespaces", "-o", "json"]))["items"]
-        node_list = json.loads(command(["kubectl", "get", "nodes", "-o", "json"]))["items"]
+        pods = kube_get(["get", "pods", "--all-namespaces"], "/api/v1/pods")["items"]
+        node_list = kube_get(["get", "nodes"], "/api/v1/nodes")["items"]
         data.update(source_type="kubernetes-cluster", hostname=source_id,
                     instances=[i for pod in pods for i in pod_instances(pod)], gpus=[], nodes=nodes(node_list, pods))
     return data
+
+
+def agent_token():
+    # A file lets a DaemonSet mount one Secret with a token per node and pick its own by node name.
+    path = os.environ.get("GMAN_AGENT_TOKEN_FILE")
+    return Path(path).read_text().strip() if path else os.environ["GMAN_AGENT_TOKEN"]
 
 
 def send(data):
@@ -461,7 +581,7 @@ def send(data):
     if not (url.startswith("https://") or url.startswith("http://127.0.0.1:")):
         raise ValueError("HTTPS required except for local loopback")
     request = Request(url + "/api/inventory", data=json.dumps(data).encode(),
-                      headers={"Content-Type": "application/json", "Authorization": "Bearer " + os.environ["GMAN_AGENT_TOKEN"]})
+                      headers={"Content-Type": "application/json", "Authorization": "Bearer " + agent_token()})
     try:
         with urlopen(request, timeout=30) as response:
             print(response.status, response.read(500).decode(errors="replace"))
@@ -472,11 +592,16 @@ def send(data):
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--runtime", choices=["docker", "kubernetes"], required=True)
+    parser.add_argument("--runtime", choices=["docker", "kubernetes", "kubernetes-node"], required=True)
     parser.add_argument("--source-id", required=True)
+    parser.add_argument("--node", default=os.environ.get("NODE_NAME", ""),
+                        help="kubernetes-node: this node's name as in Kubernetes (default: NODE_NAME)")
+    parser.add_argument("--cluster", default="", help="kubernetes-node: --source-id of the cluster's inventory agent")
     parser.add_argument("--send", action="store_true")
     args = parser.parse_args()
-    data = collect(args.runtime, args.source_id)
+    if args.runtime == "kubernetes-node" and not (args.node and args.cluster):
+        parser.error("--runtime kubernetes-node needs --node (or NODE_NAME) and --cluster")
+    data = collect(args.runtime, args.source_id, args.node, args.cluster)
     if args.send:
         send(data)
     else:

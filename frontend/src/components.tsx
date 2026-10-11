@@ -2,7 +2,21 @@ import { useEffect, useState } from 'react';
 import { get, type Audit, type CurrentMetrics, type EventPage, type GPU, type GPUProcess, type Instance, type MetricValues, type Source } from './api';
 import { bytes, cores, date, describeStatus, isHttp, percent, size, stale, statusTone, value } from './format';
 
-export type Placed = Instance & { source: Source };
+/** `gpuSource`: where the instance's GPU processes are reported — the Docker host itself, or for a pod the
+ * node-local source (kubernetes-node) of its node; absent when no node agent reports that node. */
+export type Placed = Instance & { source: Source; gpuSource?: Source };
+
+/** Node-local GPU snapshot of `node` in cluster source `cluster`. */
+export function nodeGpuSource(sources: Source[], cluster: string, node: string) {
+  return sources.find(s => s.source_type === 'kubernetes-node' && s.cluster === cluster && s.hostname === node);
+}
+
+export function placeInstances(sources: Source[]): Placed[] {
+  return sources.flatMap(s => s.instances.map(i => ({
+    ...i, source: s,
+    gpuSource: i.runtime === 'docker' ? s : i.node ? nodeGpuSource(sources, s.source_id, i.node) : undefined,
+  })));
+}
 
 /** Live usage of one instance: Docker by "<host_id>/<container_id>", Kubernetes by the instance ID itself. */
 export function instanceUsage(i: Placed, metrics?: CurrentMetrics | null): MetricValues | undefined {
@@ -11,11 +25,11 @@ export function instanceUsage(i: Placed, metrics?: CurrentMetrics | null): Metri
 
 export type GpuHolding = { gpu: GPU; index: number; process: GPUProcess };
 
-/** GPU processes of this container from the host's nvidia-smi snapshot (Docker only: K8s pods carry no PID mapping yet). */
+/** GPU processes of this container from nvidia-smi on its host/node: Docker by container ID, pods by instance ID. */
 export function gpuHoldings(i: Placed): GpuHolding[] {
-  if (i.runtime !== 'docker') return [];
-  return i.source.gpus.flatMap((gpu, index) => (gpu.processes ?? [])
-    .filter(p => p.container_id && p.container_id === i.id).map(process => ({ gpu, index, process })));
+  const own = (p: GPUProcess) => i.runtime === 'docker' ? !!p.container_id && p.container_id === i.id : p.instance_id === i.id;
+  return (i.gpuSource?.gpus ?? []).flatMap((gpu, index) => (gpu.processes ?? [])
+    .filter(own).map(process => ({ gpu, index, process })));
 }
 
 export const gpuName = (h: { index: number; gpu: GPU }) => `GPU ${h.index}`;
@@ -32,7 +46,8 @@ function Vram({ instance }: { instance: Placed }) {
   const held = gpuHoldings(instance);
   if (!held.length) {
     const requested = (instance.config.gpu_requests as string[] | undefined)?.length;
-    return <span className="muted" title={requested ? 'GPU запрошен, но в снимке нет процессов этого контейнера на GPU' : 'Нет процессов на GPU'}>—</span>;
+    return <span className="muted" title={!instance.gpuSource ? 'Процессы GPU этого узла не передаются: нет агента kubernetes-node'
+      : requested ? 'GPU запрошен, но в снимке нет процессов этого контейнера на GPU' : 'Нет процессов на GPU'}>—</span>;
   }
   const known = held.filter(h => h.process.used_memory_bytes != null);
   return <>
@@ -45,7 +60,7 @@ function Vram({ instance }: { instance: Placed }) {
 
 export function InstanceTable({ rows, metrics }: { rows: Placed[]; metrics?: CurrentMetrics | null }) {
   // The VRAM column appears only where some row runs on a host that reports GPUs.
-  const withGpu = rows.some(i => i.runtime === 'docker' && i.source.gpus.length > 0);
+  const withGpu = rows.some(i => (i.gpuSource?.gpus.length ?? 0) > 0);
   return <div className="table-wrap">
     <table>
       <thead><tr><th>Экземпляр</th><th>Размещение</th><th>Состояние</th><th>CPU, ядра</th><th>Память</th>
@@ -121,7 +136,7 @@ export function ConfigView({ instance }: { instance: Placed }) {
               <small>{percent(h.process.used_memory_bytes / h.gpu.memory_total_bytes)} от {size(h.gpu.memory_total_bytes)}</small>}</td>
         </tr>)}</tbody>
       </table></div>
-      <p className="note">Видеопамять, выделенная процессам контейнера, по снимку nvidia-smi от {date(instance.source.observed_at)}. Загрузка GPU общая для всех его процессов и контейнеру не приписывается.</p>
+      <p className="note">Видеопамять, выделенная процессам контейнера, по снимку nvidia-smi от {date((instance.gpuSource ?? instance.source).observed_at)}. Загрузка GPU общая для всех его процессов и контейнеру не приписывается.</p>
     </>}
     {origin.length > 0 && <>
       <h3 className="subheading">Происхождение</h3>

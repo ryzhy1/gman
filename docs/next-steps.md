@@ -15,8 +15,12 @@
    о хосте, узлы Kubernetes с ёмкостью и requests, OTel DaemonSet для кластера.
 4. Хранилище: нормализованная схема PostgreSQL, Alembic, история конфигураций по хешу,
    retention. Проверено на PostgreSQL 17.
+5. Атрибуция процессов GPU в Kubernetes (PID → pod): режим агента kubernetes-node на
+   GPU-узле (cgroup v1/v2, systemd/cgroupfs, containerd/CRI-O/cri-dockerd, static pod),
+   источник узла без экземпляров, DaemonSet deploy/gpu-attribution-k8s.yaml, процессы в
+   карточке узла и экземплярах сервиса; GPU по pod-ам из меток DCGM на вкладке «Ресурсы».
 
-Тесты: 31 passed, 1 skipped (тест конкурентности только для PostgreSQL).
+Тесты: 58 passed, 1 skipped (тест конкурентности только для PostgreSQL).
 Frontend: `npm run build` проходит. Подробности — в README.
 
 ## Подготовка на новой машине
@@ -70,7 +74,9 @@ Grafana 12.1.1 с эмуляцией Docker API, kubelet и вывода DCGM.
 ## Дальше по плану
 
 - SSO (OIDC) и роли viewer / service owner / platform admin вместо общего токена.
-- Атрибуция процессов GPU в Kubernetes (PID → pod) — сейчас только Docker-хосты.
+- ~~Атрибуция процессов GPU в Kubernetes (PID → pod)~~ — сделано (п. 5 выше). Не проверено
+  в реальном кластере: nvidia-smi через NVIDIA runtime без запроса GPU, список процессов
+  от non-root, PSA privileged для hostPID, метки DCGM pod/namespace/container.
 - Алерты (Grafana alerting или Alertmanager): узел/источник молчит, GPU XID/ECC,
   перегрев, троттлинг, OOMKilled, CrashLoopBackOff.
 - Splunk: поиск по service/environment по ссылке из карточки после согласования индексов.
