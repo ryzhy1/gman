@@ -703,6 +703,100 @@ tests:
         alertname: GManKubeStateMetricsAbsent
         exp_alerts: []
 
+  # StatefulSet and DaemonSet rollouts. shop/kafka (OnDelete): 1 of 3 pods on the new revision, nobody deletes
+  # the rest. shop/zk (RollingUpdate): one more pod every 15 minutes, then current_revision catches up.
+  # shop/cache (OnDelete, finished): every pod updated, current_revision still the old one.
+  # shop/fluent: DaemonSet with 2 of 4 nodes updated and one pod unavailable, no progress. shop/node-exporter: updated.
+  - name: statefulset and daemonset rollout
+    external_labels: {gman_portal: https://gman.example}
+    interval: 1m
+    input_series:
+      - series: 'kube_statefulset_replicas{job="otel", exported_job="kube-state-metrics", source_id="cluster-01", namespace="shop", statefulset="kafka"}'
+        values: '3x60'
+      - series: 'kube_statefulset_status_replicas_updated{job="otel", exported_job="kube-state-metrics", source_id="cluster-01", namespace="shop", statefulset="kafka"}'
+        values: '1x60'
+      - series: 'kube_statefulset_status_current_revision{job="otel", exported_job="kube-state-metrics", source_id="cluster-01", namespace="shop", statefulset="kafka", revision="kafka-6d4f"}'
+        values: '1x60'
+      - series: 'kube_statefulset_status_update_revision{job="otel", exported_job="kube-state-metrics", source_id="cluster-01", namespace="shop", statefulset="kafka", revision="kafka-7b9c"}'
+        values: '1x60'
+      - series: 'kube_statefulset_metadata_generation{job="otel", exported_job="kube-state-metrics", source_id="cluster-01", namespace="shop", statefulset="kafka"}'
+        values: '2x60'
+      - series: 'kube_pod_owner{job="otel", exported_job="kube-state-metrics", source_id="cluster-01", namespace="shop", pod="kafka-0", uid="u-k", owner_kind="StatefulSet", owner_name="kafka", owner_is_controller="true"}'
+        values: '1x60'
+      - series: 'kube_pod_labels{job="otel", exported_job="kube-state-metrics", source_id="cluster-01", namespace="shop", pod="kafka-0", uid="u-k", label_gman_service="queue", label_gman_environment="prod"}'
+        values: '1x60'
+      - series: 'kube_statefulset_replicas{job="otel", exported_job="kube-state-metrics", source_id="cluster-01", namespace="shop", statefulset="zk"}'
+        values: '3x60'
+      - series: 'kube_statefulset_status_replicas_updated{job="otel", exported_job="kube-state-metrics", source_id="cluster-01", namespace="shop", statefulset="zk"}'
+        values: '0x14 1x14 2x14 3x15'
+      - series: 'kube_statefulset_status_current_revision{job="otel", exported_job="kube-state-metrics", source_id="cluster-01", namespace="shop", statefulset="zk", revision="zk-1"}'
+        values: '1x44'
+      - series: 'kube_statefulset_status_current_revision{job="otel", exported_job="kube-state-metrics", source_id="cluster-01", namespace="shop", statefulset="zk", revision="zk-2"}'
+        values: '_x45 1x15'
+      - series: 'kube_statefulset_status_update_revision{job="otel", exported_job="kube-state-metrics", source_id="cluster-01", namespace="shop", statefulset="zk", revision="zk-2"}'
+        values: '1x60'
+      - series: 'kube_statefulset_metadata_generation{job="otel", exported_job="kube-state-metrics", source_id="cluster-01", namespace="shop", statefulset="zk"}'
+        values: '2x60'
+      - series: 'kube_statefulset_replicas{job="otel", exported_job="kube-state-metrics", source_id="cluster-01", namespace="shop", statefulset="cache"}'
+        values: '2x60'
+      - series: 'kube_statefulset_status_replicas_updated{job="otel", exported_job="kube-state-metrics", source_id="cluster-01", namespace="shop", statefulset="cache"}'
+        values: '2x60'
+      - series: 'kube_statefulset_status_current_revision{job="otel", exported_job="kube-state-metrics", source_id="cluster-01", namespace="shop", statefulset="cache", revision="cache-1"}'
+        values: '1x60'
+      - series: 'kube_statefulset_status_update_revision{job="otel", exported_job="kube-state-metrics", source_id="cluster-01", namespace="shop", statefulset="cache", revision="cache-2"}'
+        values: '1x60'
+      - series: 'kube_statefulset_metadata_generation{job="otel", exported_job="kube-state-metrics", source_id="cluster-01", namespace="shop", statefulset="cache"}'
+        values: '2x60'
+      - series: 'kube_daemonset_status_desired_number_scheduled{job="otel", exported_job="kube-state-metrics", source_id="cluster-01", namespace="shop", daemonset="fluent"}'
+        values: '4x60'
+      - series: 'kube_daemonset_status_updated_number_scheduled{job="otel", exported_job="kube-state-metrics", source_id="cluster-01", namespace="shop", daemonset="fluent"}'
+        values: '2x60'
+      - series: 'kube_daemonset_status_number_unavailable{job="otel", exported_job="kube-state-metrics", source_id="cluster-01", namespace="shop", daemonset="fluent"}'
+        values: '1x60'
+      - series: 'kube_daemonset_metadata_generation{job="otel", exported_job="kube-state-metrics", source_id="cluster-01", namespace="shop", daemonset="fluent"}'
+        values: '3x60'
+      - series: 'kube_daemonset_status_desired_number_scheduled{job="otel", exported_job="kube-state-metrics", source_id="cluster-01", namespace="shop", daemonset="node-exporter"}'
+        values: '3x60'
+      - series: 'kube_daemonset_status_updated_number_scheduled{job="otel", exported_job="kube-state-metrics", source_id="cluster-01", namespace="shop", daemonset="node-exporter"}'
+        values: '3x60'
+      - series: 'kube_daemonset_metadata_generation{job="otel", exported_job="kube-state-metrics", source_id="cluster-01", namespace="shop", daemonset="node-exporter"}'
+        values: '1x60'
+    promql_expr_test:
+      - expr: gman:kube_workload_replicas_outdated:max
+        eval_time: 10m
+        exp_samples:
+          - labels: 'gman:kube_workload_replicas_outdated:max{source_id="cluster-01", namespace="shop", workload_kind="StatefulSet", workload="kafka", service_id="queue", environment="prod"}'
+            value: 2
+          - labels: 'gman:kube_workload_replicas_outdated:max{source_id="cluster-01", namespace="shop", workload_kind="StatefulSet", workload="zk"}'
+            value: 3
+          - labels: 'gman:kube_workload_replicas_outdated:max{source_id="cluster-01", namespace="shop", workload_kind="DaemonSet", workload="fluent"}'
+            value: 2
+      - expr: gman:kube_workload_replicas_outdated:max
+        eval_time: 50m
+        exp_samples:
+          - labels: 'gman:kube_workload_replicas_outdated:max{source_id="cluster-01", namespace="shop", workload_kind="StatefulSet", workload="kafka", service_id="queue", environment="prod"}'
+            value: 2
+          - labels: 'gman:kube_workload_replicas_outdated:max{source_id="cluster-01", namespace="shop", workload_kind="DaemonSet", workload="fluent"}'
+            value: 2
+    alert_rule_test:
+      # Outdated since 0 m: the condition holds from 30 m, firing after `for` at 35 m.
+      - eval_time: 34m
+        alertname: GManWorkloadRolloutStuck
+        exp_alerts: []
+      - eval_time: 36m
+        alertname: GManWorkloadRolloutStuck
+        exp_alerts:
+          - exp_labels: {severity: warning, scope: workload, source_id: cluster-01, namespace: shop, workload_kind: StatefulSet, workload: kafka, service_id: queue, environment: prod, reason: OutdatedReplicas}
+            exp_annotations:
+              summary: 'StatefulSet shop/kafka: rollout не продвигается'
+              description: 'Кластер cluster-01, сервис queue: 2 pod-ов на прежней версии шаблона, за 30 минут их число не уменьшилось. RollingUpdate остановлен неготовым pod-ом; при updateStrategy OnDelete pod-ы обновляются только после удаления.'
+              runbook_url: https://gman.example/#alerts/GManWorkloadRolloutStuck
+          - exp_labels: {severity: warning, scope: workload, source_id: cluster-01, namespace: shop, workload_kind: DaemonSet, workload: fluent, reason: OutdatedReplicas}
+            exp_annotations:
+              summary: 'DaemonSet shop/fluent: rollout не продвигается'
+              description: 'Кластер cluster-01: 2 pod-ов на прежней версии шаблона, за 30 минут их число не уменьшилось. RollingUpdate остановлен неготовым pod-ом; при updateStrategy OnDelete pod-ы обновляются только после удаления.'
+              runbook_url: https://gman.example/#alerts/GManWorkloadRolloutStuck
+
   - name: kube-state-metrics absent
     external_labels: {gman_portal: https://gman.example}
     interval: 1m

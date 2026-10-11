@@ -9,6 +9,7 @@ import { ClusterCard, HostCard } from './hardware';
 import { date, grafanaLink, stale, syncServerClock } from './format';
 import { Releases } from './releases';
 import { Resources } from './resources';
+import { Workloads } from './workloads';
 import './style.css';
 
 const ALL = 'Все окружения';
@@ -252,6 +253,8 @@ function App() {
                 <ServiceEditor key={service.id} service={service} me={me} token={token} onSaved={() => setReload(n => n + 1)} />
                 <h3 className="subheading">Текущее размещение</h3>
                 <InstanceTable rows={own} metrics={metrics} logs={splunk?.instances} />
+                <Workloads token={token} serviceId={service.id} environment={environment === ALL ? undefined : environment}
+                  grafanaUrl={grafana} range={range} refreshKey={data.server_time} />
                 <p className="note">Сервисы обнаруживаются независимо от способа запуска. Владелец сервиса и инициатор деплоя — разные роли. Bamboo сообщает автора деплоя; для ручных запусков без отдельного аудита автор неизвестен. CPU — в ядрах (1.0 = одно ядро), процент — от лимита контейнера. VRAM — видеопамять процессов контейнера, а не загрузка GPU.</p>
               </>}
               {tab === 'Ресурсы' && <Resources token={token} instances={own} grafanaLink={links!.grafana} range={range} onRange={setRange}
@@ -274,7 +277,9 @@ function App() {
 
           {page === 'Серверы и GPU' && <div className="host-grid">
             {hostSources.map(s => s.source_type === 'kubernetes-cluster'
-              ? <ClusterCard key={s.source_id} source={s} sources={data.sources} metrics={metrics} grafanaUrl={grafana} range={range} onService={openService} />
+              ? <ClusterCard key={s.source_id} source={s} sources={data.sources} metrics={metrics} grafanaUrl={grafana} range={range} onService={openService}>
+                <Workloads token={token} cluster={s.source_id} grafanaUrl={grafana} range={range} refreshKey={data.server_time} />
+              </ClusterCard>
               : <HostCard key={s.source_id} source={s} metrics={metrics} grafanaUrl={grafana} range={range} onService={openService} />)}
             {!data.sources.length && <section className="empty">Источники еще не подключены. Начните с одного Docker-хоста или Kubernetes-кластера.</section>}
           </div>}

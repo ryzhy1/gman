@@ -155,8 +155,8 @@ OOM kill. В Kubernetes last_oom_at берется из termination state (curre
    (resource_to_telemetry_conversion; ряды молчащих источников удаляются через 90 с).
    Prometheus читает его каждые 30 с.
 5. API читает Prometheus фиксированными шаблонами PromQL (`/api/metrics/current`,
-   `/api/metrics/range`); произвольный PromQL от клиента не принимается. Grafana читает
-   тот же Prometheus.
+   `/api/metrics/range`, `/api/workloads`); произвольный PromQL от клиента не принимается.
+   Grafana читает тот же Prometheus.
 
 Логи приложений не собираются: портал строит ссылки на поиск в Splunk
 (`GET /api/logs/splunk`, шаблон SPL с экранированием значений). Трейсы не включены.
@@ -165,6 +165,20 @@ OOM kill. В Kubernetes last_oom_at берется из termination state (curre
 kube-state-metrics читает Collector DaemonSet-а на узле его pod-а. Состояние экземпляров
 (причины, рестарты) по-прежнему берется из inventory, состояние workloads (реплики,
 rollout, Pending, Job) — из kube-state-metrics.
+
+Состояние workloads в портале (backend/app/workloads.py, `GET /api/workloads?service_id=&environment=`
+или `?cluster=`, роль «Просмотр»): шаблоны по Deployment, StatefulSet, DaemonSet и Job приводят
+ряды kube_* к ключу recording rules группы gman-workloads (source_id, namespace, workload_kind,
+workload) и соединяются с gman:kube_workload_service:info, в селектор которой подставляются
+фильтры запроса, — фильтрация по сервису, окружению или кластеру выполняется в Prometheus.
+Отдельные шаблоны читают ревизии StatefulSet, условие Progressing, Pending-pod-ы
+(gman:kube_pod_workload:info) и сработавшие алерты workload (ALERTS{scope="workload"}). API
+классифицирует workload: «застрял» (GManWorkloadRolloutStuck или Progressing=False),
+«деградирован», «раскатывается», «ок»; длительности берутся из `for` правил, а не из
+мгновенного снимка. Портал показывает таблицу на вкладке «Обзор» сервиса и в карточке
+кластера (frontend/src/workloads.tsx), обновляет ее вместе с overview раз в 30 секунд и ведет
+на дашборд «GMan · Kubernetes» с кластером, namespace и периодом. Недоступный Prometheus
+дает `error`, как `/api/metrics/current`; каталог продолжает работать.
 
 ### Алерты
 
@@ -192,7 +206,7 @@ kube-state-metrics с workload (Deployment через ReplicaSet) и серви�
 30 алертов: узел, источник, телеметрия, gateway и kube-state-metrics молчат, узел Kubernetes
 NotReady, GPU XID/ECC/перегрев/троттлинг, OOMKilled (включая время последнего OOM kill),
 CrashLoopBackOff, частые перезапуски, образ не скачивается, недоступные реплики, застрявший
-rollout, Pending, упавшая Job, DaemonSet не на своих узлах, последний релиз failed, истекающие
+rollout (Deployment по Progressing и generation, StatefulSet — RollingUpdate и OnDelete — по ревизиям и updated, DaemonSet по updated/desired), Pending, упавшая Job, DaemonSet не на своих узлах, последний релиз failed, истекающие
 или просроченные CRL и сертификаты (30/7 дней), нечитаемый TLS-файл. Inhibition: упавший узел скрывает алерты своих GPU и
 контейнеров, молчащий источник — алерты своих экземпляров, NotReady узла — недоступные
 pod-ы DaemonSet-ов кластера, Pending/rollout — warning о репликах того же workload, просроченный
@@ -443,7 +457,7 @@ CPU контейнера — в ядрах (1.0 = одно ядро), проце
 | Состояние экземпляров | inventory | status, health, ready, причина, exit code, рестарты, прошлое завершение |
 | Узлы Kubernetes | inventory | Ready, pressure, cordon, taints, capacity/allocatable, сумма requests CPU/RAM/GPU |
 | GPU NVIDIA | DCGM Exporter (deploy/dcgm-counters.csv) | загрузка, copy util, VRAM, температуры и slowdown, мощность, энергия, частоты, XID, ECC SBE/DBE, переназначение строк, причины снижения частот, PCIe replay |
-| Workloads Kubernetes | kube-state-metrics | желаемые/доступные реплики, generation, Progressing, фаза и владелец pod-ов, Unschedulable, Failed у Job, misscheduled DaemonSet, Ready узлов |
+| Workloads Kubernetes | kube-state-metrics | желаемые/готовые/доступные/обновленные реплики, generation, Progressing, ревизии StatefulSet (current/update), updated/unavailable DaemonSet, фаза и владелец pod-ов, Unschedulable, Failed и active у Job, misscheduled DaemonSet, Ready узлов |
 | GPU NVIDIA | nvidia-smi (inventory) | модель, PCI, драйвер, pstate, загрузка, VRAM, температуры, мощность/лимит, частоты, вентилятор, throttle reasons, ECC, PCIe, MIG, persistence, процессы с VRAM |
 | GPU AMD | sysfs (inventory) | busy, VRAM, датчики edge/junction/mem, частоты, вентилятор (локальная проверка) |
 | Pipeline | Prometheus, /metrics | up gateway и API, время последнего снимка и ошибки сбора источников |

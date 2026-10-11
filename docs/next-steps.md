@@ -78,10 +78,30 @@
     GManTlsCrlExpired (подавляет алерты отсутствия телеметрии), GManTlsCertExpiring (30/7 дней),
     GManTlsCertExpired, GManTlsFileError; runbook в портале, unit-тесты promtool.
 
+16. Состояние workloads в портале: `GET /api/workloads?service_id=&environment=` или `?cluster=`
+    (роль «Просмотр», фиксированные шаблоны PromQL в backend/app/workloads.py с ключом и
+    join-таблицей recording rules gman-workloads): desired/ready/available/updated/unavailable,
+    generation/observedGeneration, Progressing, ревизии StatefulSet, Pending-pod-ы, Failed/active
+    у Job, сработавшие алерты workload и статус «ок / раскатывается / деградирован / застрял».
+    Раздел «Workloads Kubernetes» на вкладке «Обзор» сервиса и в карточке кластера
+    (frontend/src/workloads.tsx) со ссылкой на дашборд «Kubernetes» (кластер, namespace, период);
+    работает и с сессией SSO. Rollout StatefulSet (RollingUpdate и OnDelete: update_revision ≠
+    current_revision и updated < replicas) и DaemonSet (updated_number_scheduled <
+    desired_number_scheduled): recording rule gman:kube_workload_replicas_outdated:max и вариант
+    GManWorkloadRolloutStuck с reason OutdatedReplicas (pod-ы на прежней версии ≥ 30 минут без
+    уменьшения за 30 минут). В allowlist kube-state-metrics добавлены
+    kube_deployment_status_replicas_ready, kube_statefulset_status_replicas_available,
+    kube_statefulset_status_current_revision/update_revision, kube_daemonset_status_number_ready;
+    test_deploy.py сверяет allowlist и с шаблонами API.
+
 Проверено:
 - Тесты: 195 passed на PostgreSQL 17 (включая запросы истории конфигураций и тест
-  конкурентности; прогон до п. 15), 203 passed и 1 skipped на SQLite; миграции upgrade → downgrade base →
+  конкурентности; прогон до п. 15), 206 passed и 1 skipped на SQLite; миграции upgrade → downgrade base →
   upgrade и `alembic check` на PostgreSQL 17. Frontend: `npm run build`.
+- /api/workloads (п. 16): тесты API с mock Prometheus и классификации статусов; все шаблоны
+  PromQL вычислены `promtool test rules` на входных рядах тестов rules.test.yaml (результаты
+  сверены вручную, включая ALERTS); правило OutdatedReplicas — unit-тестами promtool. Против
+  настоящего kube-state-metrics новые метрики allowlist и раздел портала в браузере не проверялись.
 - Kubernetes watch и Events — на fixtures потоков (ADDED/MODIFIED/DELETED, BOOKMARK, ERROR 410,
   сбой kubectl, HTTP 410 in-cluster), Docker `oom` — на fixtures событий; правило OOM —
   `promtool test rules` (Prometheus 3.5.0).
@@ -225,8 +245,12 @@ Inventory и аудит:
   счетчиков DCGM Exporter.~~ Сделано (п. 14); сверить пороги A100 и добавить модели пилота.
 - Подключить реальный канал уведомлений.
 - ~~Ссылки Grafana с окружением и периодом карточки.~~ Сделано (п. 14).
-- Состояние workloads из kube-state-metrics в карточках портала (сейчас — алерты и Grafana);
-  rollout StatefulSet с OnDelete и DaemonSet по updated/desired.
+- ~~Состояние workloads из kube-state-metrics в карточках портала (сейчас — алерты и Grafana);
+  rollout StatefulSet с OnDelete и DaemonSet по updated/desired.~~ Сделано (п. 16); проверить
+  шаблоны /api/workloads и новые метрики allowlist на настоящем кластере, раздел — в браузере.
+- Partition StatefulSet и намеренно незавершенный OnDelete дают GManWorkloadRolloutStuck
+  (kube-state-metrics не экспортирует updateStrategy): при ложных срабатываниях на пилоте —
+  исключение по метке объекта.
 
 Интеграции:
 - Согласовать индексы и имена полей Splunk и задать их в GMAN_SPLUNK_*.

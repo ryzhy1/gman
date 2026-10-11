@@ -25,6 +25,7 @@ from . import k8s_tokens
 from . import metrics
 from . import releases
 from . import splunk
+from . import workloads
 
 logger = logging.getLogger("gman")
 
@@ -696,6 +697,26 @@ def metrics_current():
         return {"enabled": True, "error": None, **metrics.current()}
     except metrics.Unavailable as error:
         return {"enabled": True, "error": "Metrics store unavailable: " + str(error)}
+
+
+@app.get("/api/workloads", dependencies=[Depends(reader)])
+def workload_state(service_id: str | None = Query(None, max_length=300),
+                   environment: str | None = Query(None, max_length=300),
+                   cluster: str | None = Query(None, max_length=300)):
+    """Kubernetes workloads of a service (optionally one environment) or of a cluster, from kube-state-metrics.
+    Needs service_id or cluster; an unavailable store is reported like /api/metrics/current."""
+    if not service_id and not cluster:
+        raise HTTPException(422, "service_id or cluster is required")
+    if not metrics.base_url():
+        return {"enabled": False, "error": "PROMETHEUS_URL is not configured", "workloads": []}
+    matchers = {"service_id": service_id, "environment": environment, "source_id": cluster}
+    try:
+        return {"enabled": True, "error": None,
+                "workloads": workloads.workloads({k: v for k, v in matchers.items() if v})}
+    except KeyError:
+        raise HTTPException(422, "Invalid service, environment or cluster")
+    except metrics.Unavailable as error:
+        return {"enabled": True, "error": "Metrics store unavailable: " + str(error), "workloads": []}
 
 
 @app.get("/api/alerts", dependencies=[Depends(reader)])

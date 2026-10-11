@@ -248,8 +248,10 @@ function NodeCard({ node, source, gpuSource, metrics, onService }: {
   </div>;
 }
 
-export function ClusterCard({ source, sources, metrics, grafanaUrl, range, onService }: {
+export function ClusterCard({ source, sources, metrics, grafanaUrl, range, onService, children }: {
   source: Source; sources: Source[]; metrics?: CurrentMetrics | null; grafanaUrl: string; range: string; onService?: Open;
+  /** Rendered after the cluster summary, before the nodes (workloads from kube-state-metrics). */
+  children?: React.ReactNode;
 }) {
   const nodes = source.nodes ?? [];
   const sum = (f: (n: Node) => number | null) => nodes.some(n => f(n) == null) ? null : nodes.reduce((s, n) => s + f(n)!, 0);
@@ -264,6 +266,7 @@ export function ClusterCard({ source, sources, metrics, grafanaUrl, range, onSer
       {!!gpus && <Meter label="GPU requests" used={sum(n => n.gpu_requested)} total={gpus} show={gpuUnit} />}
     </div>
     <p className="note">Requests — зарезервированное планировщиком, а не фактическое потребление; текущая нагрузка узла — ниже по каждому узлу.</p>
+    {children}
     {nodes.map(n => <NodeCard key={n.name} node={n} source={source} gpuSource={nodeGpuSource(sources, source.source_id, n.name)}
       metrics={metrics} onService={onService} />)}
     {!nodes.length && <p className="note">Агент не передал список узлов.</p>}

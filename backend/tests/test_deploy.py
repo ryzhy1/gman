@@ -78,11 +78,12 @@ def test_portal_grafana_links_match_dashboard_variables():
         assert names and names <= variables[uid], (uid, names)
 
 
-def test_kube_state_metrics_allowlist_covers_rules_and_dashboards():
+def test_kube_state_metrics_allowlist_covers_rules_dashboards_and_portal():
     manifest = (DEPLOY / "kube-state-metrics.yaml").read_text()
     allow = set(re.findall(r"kube_\w+", manifest[manifest.index("--metric-allowlist"):manifest.index("--metric-labels")]))
     used = set()
-    for path in [DEPLOY / "alerts/rules.yaml", *(DEPLOY / "grafana/dashboards").glob("*.json")]:
+    for path in [DEPLOY / "alerts/rules.yaml", DEPLOY.parent / "backend/app/workloads.py",
+                 *(DEPLOY / "grafana/dashboards").glob("*.json")]:
         # Not the gman:kube_* recording rules.
         used |= set(re.findall(r"(?<![:\w])kube_[a-z_]+", path.read_text()))
     assert used and used <= allow, used - allow

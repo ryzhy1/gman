@@ -99,9 +99,11 @@ def quote(value):
 
 
 def selector(matchers):
-    """Selector factory: static matchers from the template plus the request's exact matchers."""
+    """Selector factory: static matchers from the template (suffix __ne: !=, __re: =~) plus the request's
+    exact matchers."""
     def render(**static):
-        parts = [(k[:-4] + "!=" if k.endswith("__ne") else k + "=") + quote(v) for k, v in static.items()]
+        ops = {"__ne": "!=", "__re": "=~"}
+        parts = [(k[:-4] + ops[k[-4:]] if k[-4:] in ops else k + "=") + quote(v) for k, v in static.items()]
         parts += [k + "=" + quote(v) for k, v in matchers.items()]
         return "{" + ",".join(parts) + "}"
     return render

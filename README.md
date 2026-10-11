@@ -76,6 +76,10 @@ NVIDIA на серверах, Bitbucket/GitLab для исходного код�
 - OTel Collector на хосте → OTel Gateway → Prometheus → Grafana с готовыми дашбордами
   «GMan · Хост», «GMan · Сервис» и «GMan · Kubernetes» (включая состояние workloads из
   kube-state-metrics); кнопки Grafana в портале ведут на них с окружением и периодом карточки.
+- Состояние workloads Kubernetes в портале (раздел «Workloads Kubernetes» на вкладке «Обзор»
+  сервиса и в карточке кластера): статус «ок / раскатывается / деградирован / застрял»,
+  доступные, готовые и обновленные реплики, generation, Progressing, ревизии StatefulSet,
+  Pending-pod-ы, упавшие Job; ссылка на дашборд «GMan · Kubernetes» с кластером и периодом.
 - Ссылки «Логи в Splunk» на карточке сервиса и у каждого экземпляра: поиск по service/
   environment/хосту/контейнеру за выбранный период; индексы и шаблон поиска задаются
   конфигурацией (см. «Splunk»).
@@ -737,6 +741,26 @@ ReplicaSet, StatefulSet, DaemonSet, Job или сам pod) и gman:kube_workload
 Collector-ов (DCGM, kube-state-metrics) с меткой exported_job; цель самого gateway —
 `up{job="otel", exported_job=""}`.
 
+Портал читает состояние workloads через GET /api/workloads?service_id=&environment= (карточка
+сервиса) или ?cluster= (карточка кластера) с ролью «Просмотр»; нужен хотя бы service_id или
+cluster. API выполняет фиксированные шаблоны PromQL (backend/app/workloads.py, произвольный
+PromQL клиент не передает): ряды kube_* приводятся к ключу recording rules (source_id,
+namespace, workload_kind, workload) и фильтруются через gman:kube_workload_service:info.
+Ответ — `{enabled, error, workloads: [...]}`; у каждого Deployment, StatefulSet, DaemonSet и
+выполняющейся или упавшей Job — kind/name/namespace/cluster, service_id/environment,
+desired/ready/available/updated/unavailable, generation/observed_generation, paused,
+progressing (+ reason), current_revision/update_revision (StatefulSet), pending_pods,
+failed/active (Job), сработавшие алерты workload (ряд ALERTS) и status с причинами.
+Статус: «застрял» — сработал GManWorkloadRolloutStuck или у Deployment Progressing=False;
+«деградирован» — нет доступных реплик, доступных меньше желаемых, есть Pending-pod-ы,
+упавшая Job или другой алерт workload; «раскатывается» — generation не обработана,
+обновлено меньше желаемых (StatefulSet — пока update_revision отличается от
+current_revision; при OnDelete current_revision не продвигается, поэтому раскатка закончена,
+когда updated = replicas), у Deployment Progressing с reason ReplicaSetUpdated; иначе «ок».
+Без PROMETHEUS_URL ответ `enabled: false`, при недоступном Prometheus — `error`, как у
+/api/metrics/current; каталог при этом работает. Завершенные Job (история CronJob) не
+показываются.
+
 ## Splunk
 
 Портал не читает логи, а строит ссылки на поиск в существующем Splunk. Индексы еще не
@@ -814,7 +838,7 @@ Prometheus rules + Alertmanager, а не Grafana alerting: правила леж
 | GManReleaseFailed | последний релиз сервиса в окружении в статусе failed; снимается следующим релизом | warning |
 | GManKubeStateMetricsAbsent | кластер присылал ряды kube-state-metrics за 6 часов, а сейчас нет 5 минут | warning |
 | GManWorkloadReplicasUnavailable | Deployment/StatefulSet/DaemonSet: желаемых реплик больше доступных 10 минут; ни одной доступной 5 минут — critical | warning / critical |
-| GManWorkloadRolloutStuck | Deployment: Progressing=false (reason ProgressDeadlineExceeded); generation не обработана контроллером 15 минут (reason GenerationNotObserved) | warning |
+| GManWorkloadRolloutStuck | Deployment: Progressing=false (reason ProgressDeadlineExceeded); generation не обработана контроллером 15 минут (reason GenerationNotObserved); StatefulSet (RollingUpdate и OnDelete: update_revision ≠ current_revision и updated < replicas) и DaemonSet (updated_number_scheduled < desired_number_scheduled): pod-ы на прежней версии не меньше 30 минут и их число за 30 минут не уменьшилось, 5 минут подряд (reason OutdatedReplicas) | warning |
 | GManWorkloadPodsPending | pod-ы workload в Pending дольше 10 минут (значение — их число) | warning |
 | GManJobFailed | условие Failed у Job (backoffLimit, activeDeadlineSeconds) | warning |
 | GManDaemonSetMisscheduled | pod-ы DaemonSet на неподходящих узлах 15 минут | warning |
@@ -882,8 +906,10 @@ TEMPERATURE` и должны быть сверены на картах пило�
 сброса — после разбора его глушат. Поля ECC, ROW_REMAP_FAILURE и CLOCKS_EVENT_REASONS
 есть только при CSV счетчиков deploy/dcgm-counters.csv (раздел «DCGM Exporter: набор
 полей»); без него эти алерты работают только по nvidia-smi из inventory. Алерт Job
-держится, пока Job не удалена; StatefulSet с updateStrategy OnDelete алерт rollout
-не ловит (проверяется только generation). Пока kube-state-metrics молчит, алерты
+держится, пока Job не удалена. kube-state-metrics не экспортирует updateStrategy и
+partition StatefulSet: раскатка OnDelete, которую не продолжают удалением pod-ов, и
+намеренный canary через partition дают GManWorkloadRolloutStuck (reason OutdatedReplicas)
+через 35 минут — для canary алерт глушат. Пока kube-state-metrics молчит, алерты
 workloads разрешаются (рядов нет) — об этом GManKubeStateMetricsAbsent.
 Docker сбрасывает признак OOMKilled при автоматическом перезапуске контейнера: OOM с
 restart policy ловится по событию `oom` только агентом в режиме `--watch`, без него он
@@ -917,9 +943,9 @@ npm run build
 Проверено: тесты API/агента/метрик/истории конфигураций/ссылок Splunk/SSO/алертов/сроков TLS (включая spool, backoff, flock, debounce `--watch`, watch Kubernetes и Events на fixtures; SSO — против mock IdP), TypeScript и production build,
 синтаксис Docker Compose; чтение AMD sysfs; браузерная проверка портала на тестовых
 данных с API на SQLite; bamboo_event.py против локального API. Тест test_deploy.py сверяет
-имена DCGM с deploy/dcgm-counters.csv, allowlist kube-state-metrics с правилами и дашбордами,
+имена DCGM с deploy/dcgm-counters.csv, allowlist kube-state-metrics с правилами, дашбордами и шаблонами /api/workloads,
 runbook каждого алерта и переменные дашбордов в ссылках портала. Тесты проходят на SQLite
-(203 passed, 1 skipped); последний прогон на PostgreSQL 17 — до этих проверок (180 passed). Docker end-to-end, Kubernetes, NVIDIA/DCGM
+(206 passed, 1 skipped); последний прогон на PostgreSQL 17 — до этих проверок (180 passed). Docker end-to-end, Kubernetes, NVIDIA/DCGM
 и настоящий Bamboo еще не проверены.
 
 ## Хранилище
@@ -959,8 +985,8 @@ Bamboo, Splunk и SMTP еще не проверены (полный список
   проверены только на записанных потоках (fixtures), не на настоящем кластере.
 - Автор ручного запуска неизвестен: аудит сервера или аутентифицированный посредник не
   реализованы. События Bamboo не коррелируются с runtime автоматически.
-- Controllers и nodes не нормализованы в базе; состояние workloads есть только в метриках
-  kube-state-metrics (алерты, дашборды), не в карточках портала. Пороги перегрева заданы
+- Controllers и nodes не нормализованы в базе; состояние workloads в портале читается из
+  Prometheus (kube-state-metrics) на момент запроса, истории состояний в базе нет. Пороги перегрева заданы
   только для A100 SXM4, остальные модели — 85/90 °C.
 - Индексы и поля Splunk не согласованы.
 - Полная инвентаризация и последние события выводятся одним overview, поэтому этот API

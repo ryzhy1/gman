@@ -98,7 +98,9 @@ const RUNBOOKS: [string, string, string[]][] = [
   ['GManWorkloadRolloutStuck', 'Rollout не продвигается', [
     'ProgressDeadlineExceeded: kubectl rollout status и describe — новые pod-ы не становятся Ready (probe, образ, ресурсы, квоты).',
     'Откат: kubectl rollout undo deployment/<имя>; сравнить версии на вкладке «Конфигурация».',
-    'GenerationNotObserved: контроллер не обрабатывает объект — проверить kube-controller-manager.']],
+    'GenerationNotObserved: контроллер не обрабатывает объект — проверить kube-controller-manager.',
+    'OutdatedReplicas (StatefulSet, DaemonSet): 30 минут не уменьшается число pod-ов на прежней версии. kubectl rollout status; при RollingUpdate — найти неготовый pod (для DaemonSet — number_unavailable достиг maxUnavailable).',
+    'updateStrategy OnDelete: pod-ы обновляются только после удаления — kubectl delete pod <pod> по одному, дождавшись готовности. Partition StatefulSet (canary) держит часть pod-ов на прежней ревизии намеренно — заглушить алерт.']],
   ['GManWorkloadPodsPending', 'Pod-ы в Pending', [
     'kubectl describe pod <pod>: события планировщика (Insufficient cpu/memory/nvidia.com/gpu, taints, affinity, PVC).',
     'Сравнить requests с allocatable узлов в карточке кластера «Серверы и GPU».']],

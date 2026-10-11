@@ -385,6 +385,31 @@ groups:
                 "workload", "$1", "daemonset", "(.+)"), "workload_kind", "DaemonSet", "workload", ".*")
             )
             * on (source_id, namespace, workload_kind, workload) group_left (service_id, environment) gman:kube_workload_service:info)
+      # Replicas not yet on the current pod template; absent when there are none. StatefulSets: while
+      # update_revision differs from current_revision (RollingUpdate and OnDelete). With OnDelete the controller
+      # never advances current_revision, so a finished OnDelete rollout is recognized by updated = replicas.
+      # DaemonSets: updated_number_scheduled against desired_number_scheduled (both strategies). Deployments
+      # report progress themselves (the Progressing condition).
+      - record: gman:kube_workload_replicas_outdated:max
+        expr: |
+          max by (source_id, namespace, workload_kind, workload, service_id, environment) (
+            (
+              label_replace(label_replace(
+                (
+                  max by (source_id, namespace, statefulset) (kube_statefulset_replicas)
+                  - max by (source_id, namespace, statefulset) (kube_statefulset_status_replicas_updated) > 0
+                )
+                and on (source_id, namespace, statefulset) (
+                  max by (source_id, namespace, statefulset, revision) (kube_statefulset_status_update_revision)
+                  unless on (source_id, namespace, statefulset, revision)
+                  max by (source_id, namespace, statefulset, revision) (kube_statefulset_status_current_revision)),
+                "workload", "$1", "statefulset", "(.+)"), "workload_kind", "StatefulSet", "workload", ".*")
+              or label_replace(label_replace(
+                max by (source_id, namespace, daemonset) (kube_daemonset_status_desired_number_scheduled)
+                - max by (source_id, namespace, daemonset) (kube_daemonset_status_updated_number_scheduled) > 0,
+                "workload", "$1", "daemonset", "(.+)"), "workload_kind", "DaemonSet", "workload", ".*")
+            )
+            * on (source_id, namespace, workload_kind, workload) group_left (service_id, environment) gman:kube_workload_service:info)
 
       # The cluster sent kube-state-metrics series in the last 6 hours, but none now. Not raised while the
       # gateway itself is down (GManTelemetryGatewayDown).
@@ -448,6 +473,26 @@ groups:
           description: >-
             Кластер {{ $labels.source_id }}{{ with $labels.service_id }}, сервис {{ . }}{{ end }}: контроллер
             15 минут не обработал изменение спецификации (metadata.generation больше status.observedGeneration).
+          runbook_url: '{{ $externalLabels.gman_portal }}/#alerts/GManWorkloadRolloutStuck'
+      # StatefulSet/DaemonSet rollout without progress: outdated replicas for at least 30 minutes, and their count
+      # has not decreased within the last 30 minutes. RollingUpdate stops at a pod that does not become ready
+      # (for a DaemonSet — number_unavailable reaches maxUnavailable); OnDelete waits for pods to be deleted.
+      # A StatefulSet partition (canary) also keeps replicas outdated on purpose: silence the alert for it.
+      - alert: GManWorkloadRolloutStuck
+        expr: |
+          (
+            gman:kube_workload_replicas_outdated:max
+            unless gman:kube_workload_replicas_outdated:max < max_over_time(gman:kube_workload_replicas_outdated:max[30m])
+          )
+          and gman:kube_workload_replicas_outdated:max offset 30m
+        for: 5m
+        labels: {severity: warning, scope: workload, reason: OutdatedReplicas}
+        annotations:
+          summary: '{{ $labels.workload_kind }} {{ $labels.namespace }}/{{ $labels.workload }}: rollout не продвигается'
+          description: >-
+            Кластер {{ $labels.source_id }}{{ with $labels.service_id }}, сервис {{ . }}{{ end }}: {{ $value }}
+            pod-ов на прежней версии шаблона, за 30 минут их число не уменьшилось. RollingUpdate остановлен
+            неготовым pod-ом; при updateStrategy OnDelete pod-ы обновляются только после удаления.
           runbook_url: '{{ $externalLabels.gman_portal }}/#alerts/GManWorkloadRolloutStuck'
       # A pod never returns to Pending: created more than 10 minutes ago and Pending now means Pending that long.
       - alert: GManWorkloadPodsPending
