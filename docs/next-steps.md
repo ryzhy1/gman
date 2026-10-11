@@ -35,6 +35,15 @@
    Grafana на /grafana/, ротация логов), deploy/pki/issue.sh, бэкап pg_dump с проверкой
    и ротацией, процедура восстановления, systemd-юниты агента и Collector.
 10. docs/architecture.md переписан по фактической реализации.
+11. Метрики и алерты Kubernetes и GPU: kube-state-metrics v2.20.0 (deploy/kube-state-metrics.yaml,
+    минимальный RBAC, allowlist ресурсов и метрик) через Collector узла его pod-а; алерты
+    workloads (недоступные реплики, застрявший rollout, Pending, упавшая Job, misscheduled
+    DaemonSet, молчащий kube-state-metrics) с сервисом из меток pod-ов и inhibition; раздел
+    «Workloads» в дашбордах «Kubernetes» (фильтр кластера) и «Сервис». CSV счетчиков DCGM
+    (deploy/dcgm-counters.csv) с ECC, CLOCKS_EVENT_REASONS и SLOWDOWN_TEMP, сверка имен тестом;
+    пороги перегрева по модели GPU (по умолчанию 85/90 °C). Ссылки Grafana из портала несут
+    окружение и период. Исправлено: правила читали ECC без суффикса `_total`, а
+    GManTelemetryGatewayDown срабатывал бы на `up` упавшего DCGM Exporter, переотданный gateway.
 
 Проверено:
 - Тесты: 134 passed на PostgreSQL 17 (включая запросы истории конфигураций и тест
@@ -45,6 +54,13 @@
 - Алерты: `promtool check rules`/`test rules`, `amtool check-config` (Alertmanager 0.28.1)
   с получателями и без; локальный прогон Prometheus + Alertmanager + API на SQLite —
   срабатывание, подавление и доставка webhook.
+- kube-state-metrics v2.20.0 (сборка из исходников) против локального kube-apiserver 1.36
+  (envtest) с объектами и статусами-фикстурами, под своим service account (RBAC без
+  отказов) → Collector с конфигурацией otel-k8s.yaml (обнаружение pod-а по узлу, pod с
+  той же меткой на другом узле не читается) → gateway → Prometheus 3.5.0 с rules.yaml:
+  имена и метки, recording rules, алерты, все запросы дашбордов. Эмулятор DCGM по
+  dcgm-counters.csv через тот же путь. Inhibition workload-алертов — живой Alertmanager
+  0.28.1 с синтетическими алертами. Манифесты — kubeconform 0.7.0 и server-side dry-run.
 - Production частично, без Docker daemon и Linux: `docker compose config` для обоих файлов
   (Compose 2.29.7); issue.sh (shellcheck, `openssl verify -purpose`); gateway — доставка
   с клиентским сертификатом и отказ без него и с чужим CA; pg_backup.sh на PostgreSQL 17
@@ -98,16 +114,20 @@ deploy/alerts/alertmanager.sh --render /tmp/am.yml && amtool check-config /tmp/a
   limit_req на реальной нагрузке.
 - systemd: `systemd-analyze verify`, sandboxing с docker/nvidia-smi/kubectl, timer на Linux.
 - Восстановление из бэкапа на реальном сервере.
-- NVIDIA/DCGM: настоящие поля DCGM (XID, ECC, CLOCKS_EVENT_REASONS, метки
-  pod/namespace/container), nvidia-smi на реальных драйверах, сверка показателей с источником.
-- Kubernetes/CRI-O: k8s_attributes, обнаружение DCGM, RBAC, kubelet_stats в реальном
-  кластере; для kubernetes-node — nvidia-smi через NVIDIA runtime без запроса GPU, список
+- NVIDIA/DCGM: настоящие поля DCGM (XID, ECC, CLOCKS_EVENT_REASONS, SLOWDOWN_TEMP, метки
+  pod/namespace/container), запуск exporter с deploy/dcgm-counters.csv (неизвестное версии
+  DCGM поле не дает ему стартовать), пороги A100 в gman-gpu-thresholds против
+  `nvidia-smi -q -d TEMPERATURE`, nvidia-smi на реальных драйверах, сверка показателей.
+- Kubernetes/CRI-O: k8s_attributes, обнаружение DCGM и kube-state-metrics, RBAC,
+  kubelet_stats, настоящие контроллеры (статусы rollout, Pending) в реальном кластере; для kubernetes-node — nvidia-smi через NVIDIA runtime без запроса GPU, список
   процессов от non-root, PSA privileged для hostPID, формат cgroup на CRI-O/containerd.
 - SSO с настоящим IdP (Keycloak, AD FS, Okta): claim групп, end_session, cookie `__Host-`.
 - Интеграции: настоящий Bamboo (переменные `bamboo_*`), Splunk (индексы и поля),
   SMTP и webhook получателей алертов.
 - Браузер: новые страницы и элементы портала — «Алерты», история конфигураций и diff,
-  редактор каталога, вход через SSO и выход, процессы GPU в карточке кластера.
+  редактор каталога, вход через SSO и выход, процессы GPU в карточке кластера, ссылки
+  Grafana с окружением и периодом (открытие в Grafana 12.1.1 с `$__all`), новые разделы
+  дашбордов в самой Grafana (запросы проверены только через API Prometheus).
 - Накладные расходы, cardinality и прирост диска на пилоте.
 
 Первое, что стоит сделать на машине с Docker: `docker compose ... up --build`, пройти README
@@ -135,11 +155,13 @@ Inventory и аудит:
 - OOM в Docker с restart policy ловить по событию `oom` из `--watch`.
 
 Метрики и алерты:
-- kube-state-metrics (desired/available replicas, Pending, rollout).
-- Пороги температуры по моделям GPU; включить поля ECC и CLOCKS_EVENT_REASONS в CSV
-  счетчиков DCGM Exporter.
+- ~~kube-state-metrics (desired/available replicas, Pending, rollout).~~ Сделано (п. 11).
+- ~~Пороги температуры по моделям GPU; включить поля ECC и CLOCKS_EVENT_REASONS в CSV
+  счетчиков DCGM Exporter.~~ Сделано (п. 11); сверить пороги A100 и добавить модели пилота.
 - Подключить реальный канал уведомлений.
-- Ссылки Grafana с окружением и периодом карточки.
+- ~~Ссылки Grafana с окружением и периодом карточки.~~ Сделано (п. 11).
+- Состояние workloads из kube-state-metrics в карточках портала (сейчас — алерты и Grafana);
+  rollout StatefulSet с OnDelete и DaemonSet по updated/desired.
 
 Интеграции:
 - Согласовать индексы и имена полей Splunk и задать их в GMAN_SPLUNK_*.

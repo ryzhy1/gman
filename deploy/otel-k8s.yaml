@@ -2,6 +2,7 @@
 # Before applying: create Secret gman-otel-tls (ca.pem, client.pem, client-key.pem) in
 # namespace gman-otel and set OTEL_GATEWAY and K8S_CLUSTER_NAME below.
 # host.id is the node name: GMan joins node metrics with nodes from the inventory agent.
+# kube-state-metrics (deploy/kube-state-metrics.yaml) is scraped by the Collector of its node.
 apiVersion: v1
 kind: Namespace
 metadata:
@@ -22,7 +23,7 @@ rules:
   - apiGroups: ['']
     resources: ['nodes/stats', 'nodes/proxy']
     verbs: ['get']
-  # k8s_attributes and DCGM discovery: metadata only, no Secrets, no exec.
+  # k8s_attributes, DCGM and kube-state-metrics discovery: metadata only, no Secrets, no exec.
   - apiGroups: ['']
     resources: ['pods', 'namespaces', 'nodes']
     verbs: ['get', 'list', 'watch']
@@ -108,6 +109,28 @@ data:
                 - source_labels: [__meta_kubernetes_pod_container_port_number]
                   regex: '9400'
                   action: keep
+      # kube-state-metrics (deploy/kube-state-metrics.yaml): only the Collector of the node running its pod
+      # scrapes it, so every series arrives once. Cluster-level series: separate pipeline metrics/ksm below.
+      prometheus/ksm:
+        config:
+          scrape_configs:
+            - job_name: kube-state-metrics
+              scrape_interval: 30s
+              kubernetes_sd_configs:
+                - role: pod
+                  namespaces: {names: [gman-otel]}
+                  selectors:
+                    - role: pod
+                      field: spec.nodeName=${env:K8S_NODE_NAME}
+                      label: app.kubernetes.io/name=kube-state-metrics
+              relabel_configs:
+                - source_labels: [__meta_kubernetes_pod_container_port_name]
+                  regex: http-metrics
+                  action: keep
+              metric_relabel_configs:
+                # The cluster's inventory source_id: alerts group and join on it like inventory alerts.
+                - target_label: source_id
+                  replacement: ${env:K8S_CLUSTER_NAME}
     processors:
       memory_limiter:
         check_interval: 1s
@@ -141,6 +164,13 @@ data:
           - key: k8s.cluster.name
             value: ${env:K8S_CLUSTER_NAME}
             action: upsert
+      # kube-state-metrics describes the whole cluster, not the node that scrapes it: no host.id
+      # (GManNodeDown/NotReady of that node must not inhibit workload alerts) and no k8s_attributes.
+      resource/ksm:
+        attributes:
+          - key: k8s.cluster.name
+            value: ${env:K8S_CLUSTER_NAME}
+            action: upsert
       batch: {}
     exporters:
       otlp_grpc:
@@ -156,6 +186,10 @@ data:
         metrics:
           receivers: [host_metrics, kubelet_stats, prometheus/gpu]
           processors: [memory_limiter, k8s_attributes, resource, batch]
+          exporters: [otlp_grpc]
+        metrics/ksm:
+          receivers: [prometheus/ksm]
+          processors: [memory_limiter, resource/ksm, batch]
           exporters: [otlp_grpc]
 ---
 apiVersion: apps/v1

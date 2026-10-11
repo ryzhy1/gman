@@ -763,7 +763,7 @@
   {
    "type": "timeseries",
    "title": "Температура GPU",
-   "description": "",
+   "description": "Ядро и память; slowdown — температура, с которой GPU снижает частоты (ориентир для порогов модели в deploy/alerts/rules.yaml).",
    "datasource": {
     "type": "prometheus",
     "uid": "prometheus"
@@ -821,6 +821,15 @@
      "refId": "B",
      "expr": "DCGM_FI_DEV_MEMORY_TEMP{host_id=\"$host\"}",
      "legendFormat": "GPU {{gpu}} memory"
+    },
+    {
+     "datasource": {
+      "type": "prometheus",
+      "uid": "prometheus"
+     },
+     "refId": "C",
+     "expr": "DCGM_FI_DEV_SLOWDOWN_TEMP{host_id=\"$host\"}",
+     "legendFormat": "GPU {{gpu}} slowdown"
     }
    ]
   },
@@ -1054,12 +1063,144 @@
    ]
   },
   {
+   "type": "timeseries",
+   "title": "Ошибки ECC за час",
+   "description": "Рост счетчиков volatile ECC (DCGM, deploy/dcgm-counters.csv): DBE — неисправимые, SBE — исправимые.",
+   "datasource": {
+    "type": "prometheus",
+    "uid": "prometheus"
+   },
+   "gridPos": {
+    "x": 0,
+    "y": 67,
+    "w": 12,
+    "h": 8
+   },
+   "fieldConfig": {
+    "defaults": {
+     "unit": "short",
+     "min": 0,
+     "custom": {
+      "fillOpacity": 10,
+      "showPoints": "never",
+      "lineWidth": 1
+     }
+    },
+    "overrides": []
+   },
+   "options": {
+    "legend": {
+     "displayMode": "table",
+     "placement": "bottom",
+     "calcs": [
+      "lastNotNull",
+      "max"
+     ]
+    },
+    "tooltip": {
+     "mode": "multi",
+     "sort": "desc"
+    }
+   },
+   "targets": [
+    {
+     "datasource": {
+      "type": "prometheus",
+      "uid": "prometheus"
+     },
+     "refId": "A",
+     "expr": "increase(DCGM_FI_DEV_ECC_DBE_VOL_TOTAL_total{host_id=\"$host\"}[1h])",
+     "legendFormat": "GPU {{gpu}} DBE"
+    },
+    {
+     "datasource": {
+      "type": "prometheus",
+      "uid": "prometheus"
+     },
+     "refId": "B",
+     "expr": "increase(DCGM_FI_DEV_ECC_SBE_VOL_TOTAL_total{host_id=\"$host\"}[1h])",
+     "legendFormat": "GPU {{gpu}} SBE"
+    }
+   ]
+  },
+  {
+   "type": "timeseries",
+   "title": "Снижение частот (тепловое и аппаратное)",
+   "description": "1 — причина активна (DCGM_FI_DEV_CLOCKS_EVENT_REASONS): sw/hw thermal, hw_slowdown, hw_power_brake.",
+   "datasource": {
+    "type": "prometheus",
+    "uid": "prometheus"
+   },
+   "gridPos": {
+    "x": 12,
+    "y": 67,
+    "w": 12,
+    "h": 8
+   },
+   "fieldConfig": {
+    "defaults": {
+     "unit": "short",
+     "min": 0,
+     "custom": {
+      "fillOpacity": 10,
+      "showPoints": "never",
+      "lineWidth": 1
+     },
+     "decimals": 0
+    },
+    "overrides": []
+   },
+   "options": {
+    "legend": {
+     "displayMode": "table",
+     "placement": "bottom",
+     "calcs": [
+      "lastNotNull",
+      "max"
+     ]
+    },
+    "tooltip": {
+     "mode": "multi",
+     "sort": "desc"
+    }
+   },
+   "targets": [
+    {
+     "datasource": {
+      "type": "prometheus",
+      "uid": "prometheus"
+     },
+     "refId": "A",
+     "expr": "clamp_max(floor((DCGM_FI_DEV_CLOCKS_EVENT_REASONS{host_id=\"$host\"} or DCGM_FI_DEV_CLOCK_THROTTLE_REASONS{host_id=\"$host\"}) / 32) % 4, 1)",
+     "legendFormat": "GPU {{gpu}} thermal"
+    },
+    {
+     "datasource": {
+      "type": "prometheus",
+      "uid": "prometheus"
+     },
+     "refId": "B",
+     "expr": "floor((DCGM_FI_DEV_CLOCKS_EVENT_REASONS{host_id=\"$host\"} or DCGM_FI_DEV_CLOCK_THROTTLE_REASONS{host_id=\"$host\"}) / 8) % 2",
+     "legendFormat": "GPU {{gpu}} hw_slowdown"
+    },
+    {
+     "datasource": {
+      "type": "prometheus",
+      "uid": "prometheus"
+     },
+     "refId": "C",
+     "expr": "floor((DCGM_FI_DEV_CLOCKS_EVENT_REASONS{host_id=\"$host\"} or DCGM_FI_DEV_CLOCK_THROTTLE_REASONS{host_id=\"$host\"}) / 128) % 2",
+     "legendFormat": "GPU {{gpu}} hw_power_brake"
+    }
+   ]
+  },
+  {
    "type": "row",
    "title": "Контейнеры на хосте (Docker и Kubernetes)",
    "collapsed": false,
    "gridPos": {
     "x": 0,
-    "y": 67,
+    "y": 75,
     "w": 24,
     "h": 1
    },
@@ -1075,7 +1216,7 @@
    },
    "gridPos": {
     "x": 0,
-    "y": 68,
+    "y": 76,
     "w": 12,
     "h": 8
    },
@@ -1139,7 +1280,7 @@
    },
    "gridPos": {
     "x": 12,
-    "y": 68,
+    "y": 76,
     "w": 12,
     "h": 8
    },

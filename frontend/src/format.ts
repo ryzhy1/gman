@@ -13,6 +13,17 @@ export const stale = (s: Source) => Date.now() + serverOffset - Date.parse(s.rec
 export const num = (v: number | null | undefined, digits = 1) => v == null ? '—' : String(Number(v.toFixed(digits)));
 export const isHttp = (s: string | undefined) => !!s && /^https?:\/\//i.test(s);
 
+/** Link to a provisioned GMan dashboard (deploy/grafana/dashboards) with its template variables and the portal's
+ *  period: range 1h/24h/7d becomes from=now-<range>&to=now. A null value selects «All» of a multi-value variable. */
+export function grafanaLink(base: string, uid: string, vars: Record<string, string | null>, range: string) {
+  if (!base) return '';
+  const params = new URLSearchParams();
+  for (const [name, value] of Object.entries(vars)) params.set(`var-${name}`, value ?? '$__all');
+  params.set('from', `now-${range}`);
+  params.set('to', 'now');
+  return `${base}/d/${uid}/${uid}?${params}`;
+}
+
 /** Status shown to people: runtime state first, then health/readiness and the reason. */
 export function describeStatus(i: Instance) {
   const parts = [i.status];

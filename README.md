@@ -62,7 +62,8 @@ NVIDIA на серверах, Bitbucket/GitLab для исходного код�
   (CPU, RAM, ФС, диск, сеть), GPU NVIDIA из DCGM (загрузка, VRAM, температуры, мощность,
   частоты, XID); вкладка «Ресурсы» с графиками за 1 час / 24 часа / 7 дней.
 - OTel Collector на хосте → OTel Gateway → Prometheus → Grafana с готовыми дашбордами
-  «GMan · Хост» и «GMan · Сервис»; кнопки Grafana в портале ведут на них по умолчанию.
+  «GMan · Хост», «GMan · Сервис» и «GMan · Kubernetes» (включая состояние workloads из
+  kube-state-metrics); кнопки Grafana в портале ведут на них с окружением и периодом карточки.
 - Ссылки «Логи в Splunk» на карточке сервиса и у каждого экземпляра: поиск по service/
   environment/хосту/контейнеру за выбранный период; индексы и шаблон поиска задаются
   конфигурацией (см. «Splunk»).
@@ -70,7 +71,9 @@ NVIDIA на серверах, Bitbucket/GitLab для исходного код�
   «Администратор платформы»; владельцы правят только свои записи каталога, изменения
   каталога пишутся в журнал с автором. Без настройки SSO работает вход по токену.
 - Алерты: Prometheus rules + Alertmanager (молчащий узел/источник, GPU XID/ECC, перегрев,
-  троттлинг, OOMKilled, CrashLoopBackOff, частые перезапуски), подавление дочерних алертов
+  троттлинг с порогами по модели GPU, OOMKilled, CrashLoopBackOff, частые перезапуски;
+  workloads Kubernetes из kube-state-metrics: недоступные реплики, застрявший rollout,
+  Pending, упавшие Job, DaemonSet не на своих узлах), подавление дочерних алертов
   упавшего узла, webhook/email из .env, страница «Алерты» с runbook в портале.
 
 ## Локальный запуск через Docker
@@ -468,17 +471,95 @@ API читает Prometheus по PROMETHEUS_URL фиксированными ш�
 PromQL от клиента не принимается. Нет метрик — портал показывает «—» и предупреждение,
 а не нули. Gateway удаляет ряды молчащих источников через 90 секунд.
 
+Ссылки в Grafana из портала несут контекст карточки: сервис — дашборд «GMan · Сервис» с
+`var-service`, `var-environment` (окружение из фильтра портала, для «Все окружения» —
+`$__all`) и `from=now-<период>&to=now` (1h/24h/7d, как на вкладке «Ресурсы»); карточка
+Docker-хоста — «GMan · Хост» с `var-host`, карточка кластера — «GMan · Kubernetes» с
+`var-cluster` (source_id кластера = k8s_cluster_name), за тот же период. Явная ссылка
+`grafana` из каталога открывается как есть. Имена переменных сверяет test_deploy.py.
+
 Проверено: на otelcol-contrib 0.162.0, Prometheus 3.5.0 и Grafana 12.1.1 (бинарные
 релизы) с эмуляцией Docker Engine API и статическим выводом в формате DCGM: имена
-метрик, метки, все запросы API и дашбордов, provisioning Grafana. На настоящих Docker,
-NVIDIA и DCGM еще не проверено.
+метрик, метки, все запросы API и дашбордов, provisioning Grafana. Набор полей
+deploy/dcgm-counters.csv прогнан через эмулятор DCGM Exporter, Collector и gateway. На
+настоящих Docker, NVIDIA и DCGM еще не проверено.
 
 Kubernetes: deploy/otel-k8s.yaml (DaemonSet: host_metrics, kubelet_stats, k8s_attributes,
-DCGM на узле); портал показывает CPU/RAM контейнеров и сеть pod-ов, есть дашборд
-«GMan · Kubernetes». Имена метрик сверялись на эмуляторе kubelet; в реальном кластере,
-включая k8s_attributes и обнаружение DCGM, не проверено. Метки pod/namespace/container
+DCGM на узле, kube-state-metrics с узла его pod-а); портал показывает CPU/RAM контейнеров и
+сеть pod-ов, есть дашборд «GMan · Kubernetes» с фильтром кластера и разделом «Workloads».
+Имена метрик сверялись на эмуляторе kubelet; kube-state-metrics v2.20.0 — на локальном
+kube-apiserver (envtest 1.36) через Collector с конфигурацией otel-k8s.yaml; в реальном
+кластере, включая k8s_attributes и обнаружение DCGM и kube-state-metrics, не проверено. Метки pod/namespace/container
 DCGM передаются без изменений и используются для GPU по pod-ам (см. «Процессы GPU в Kubernetes»).
 Логи приложений и traces не включены; Splunk не разворачивается.
+
+### DCGM Exporter: набор полей
+
+Стандартный CSV счетчиков DCGM Exporter не включает ECC и причины снижения частот, на
+которых построены алерты. Набор GMan — deploy/dcgm-counters.csv: частоты,
+CLOCKS_EVENT_REASONS, температуры ядра и памяти, SLOWDOWN_TEMP, мощность и энергия, PCIe
+replay, загрузка, XID, VRAM, ECC SBE/DBE volatile и aggregate, переназначение строк,
+версия драйвера меткой. Имя поля — это имя метрики; счетчик (counter) после OTel pipeline
+получает суффикс `_total` (`DCGM_FI_DEV_ECC_DBE_VOL_TOTAL_total`, проверено на
+otelcol-contrib 0.162.0), gauge — нет. backend/tests/test_deploy.py сверяет каждое имя
+DCGM_FI_* из правил, API и дашбордов с этим CSV и типом поля. CLOCKS_EVENT_REASONS требует
+DCGM ≥ 3.3; для более старого exporter замените строку на DCGM_FI_DEV_CLOCK_THROTTLE_REASONS
+(то же поле 112, правила и дашборд читают оба имени). Exporter не стартует с неизвестным
+его версии DCGM полем — проверьте журнал после смены CSV.
+
+Docker-хост:
+
+```sh
+docker run -d --name dcgm-exporter --restart unless-stopped --gpus all --cap-add SYS_ADMIN \
+  -p 127.0.0.1:9400:9400 -v /etc/gman/dcgm-counters.csv:/etc/dcgm-exporter/gman.csv:ro \
+  nvcr.io/nvidia/k8s/dcgm-exporter:<версия> -f /etc/dcgm-exporter/gman.csv
+```
+
+Kubernetes с GPU Operator — ConfigMap из того же файла и values оператора:
+
+```sh
+kubectl -n gpu-operator create configmap gman-dcgm-metrics \
+  --from-file=dcgm-metrics.csv=deploy/dcgm-counters.csv --dry-run=client -o yaml | kubectl apply -f -
+```
+
+```yaml
+# values.yaml GPU Operator (helm upgrade gpu-operator nvidia/gpu-operator -n gpu-operator -f values.yaml)
+dcgmExporter:
+  config:
+    name: gman-dcgm-metrics
+  env:
+    - name: DCGM_EXPORTER_COLLECTORS
+      value: /etc/dcgm-exporter/dcgm-metrics.csv
+```
+
+Отдельный chart dcgm-exporter: тот же ConfigMap смонтировать в /etc/dcgm-exporter и
+передать `arguments: ["-f", "/etc/dcgm-exporter/dcgm-metrics.csv"]`.
+
+### kube-state-metrics
+
+deploy/kube-state-metrics.yaml — kube-state-metrics v2.20.0 (client-go 1.36) в namespace
+gman-otel, применяется после deploy/otel-k8s.yaml: `kubectl apply -f deploy/kube-state-metrics.yaml`.
+RBAC — только list/watch pods, nodes, deployments, statefulsets, daemonsets, replicasets и
+jobs (без Secrets/ConfigMaps и записи). `--resources` ограничен этими объектами,
+`--metric-allowlist` — метриками, которые читают правила и дашборды (тест сверяет список),
+`--metric-labels-allowlist` переносит в kube_pod_labels только gman.service и
+gman.environment. Одна реплика со стратегией Recreate: две копии удвоили бы ряды.
+
+Prometheus не ходит в кластер: kube-state-metrics забирает Collector DaemonSet-а того
+узла, где работает его pod (prometheus/ksm в otel-k8s.yaml: обнаружение pod-ов gman-otel
+своего узла, порт http-metrics), поэтому каждый ряд приходит один раз. Отдельный pipeline
+metrics/ksm не добавляет host.id и k8s_attributes (ряды описывают весь кластер, а не узел
+сборщика) и ставит метки source_id = K8S_CLUSTER_NAME (как source_id inventory-агента
+кластера) и k8s_cluster_name. Порт 8080 kube-state-metrics не закрыт NetworkPolicy:
+Collector работает в hostNetwork, и правило пришлось бы писать по CIDR узлов кластера;
+отдаются только метаданные перечисленных объектов и метки gman.*.
+
+Сервис и окружение workload берутся из меток gman.service/gman.environment его pod-ов
+(как в inventory): recording rules gman:kube_pod_workload:info (pod → Deployment через
+ReplicaSet, StatefulSet, DaemonSet, Job или сам pod) и gman:kube_workload_service:info.
+Метки на самих Deployment не нужны. Gateway повторно отдает `up` собственных scrape
+Collector-ов (DCGM, kube-state-metrics) с меткой exported_job; цель самого gateway —
+`up{job="otel", exported_job=""}`.
 
 ## Splunk
 
@@ -546,7 +627,7 @@ Prometheus rules + Alertmanager, а не Grafana alerting: правила леж
 | GManGpuXidError | XID ≠ 0; аппаратные коды (48, 64, 74, 79, 92, 94, 95, 119, 120) — critical | warning / critical |
 | GManGpuEccUncorrectable | рост DBE ECC (DCGM или nvidia-smi) либо сбой переназначения строк | critical |
 | GManGpuEccCorrectableHigh | более 100 SBE ECC за час | warning |
-| GManGpuOverheating | GPU выше 85 °C 5 минут / выше 90 °C 2 минуты | warning / critical |
+| GManGpuOverheating | GPU выше порога модели 5 минут / 2 минуты (по умолчанию 85 / 90 °C) | warning / critical |
 | GManGpuMemoryOverheating | память GPU выше 95 °C 5 минут | warning |
 | GManGpuThermalThrottling | sw_thermal или hw_thermal 5 минут | warning |
 | GManGpuHardwareSlowdown | hw_slowdown или hw_power_brake 5 минут | warning |
@@ -554,12 +635,20 @@ Prometheus rules + Alertmanager, а не Grafana alerting: правила леж
 | GManInstanceCrashLoopBackOff | pod в CrashLoopBackOff 5 минут | warning |
 | GManInstanceRestartLoop | не менее 3 перезапусков за 30 минут | warning |
 | GManInstanceImagePullFailing | ImagePullBackOff/ErrImagePull 10 минут | warning |
+| GManKubeStateMetricsAbsent | кластер присылал ряды kube-state-metrics за 6 часов, а сейчас нет 5 минут | warning |
+| GManWorkloadReplicasUnavailable | Deployment/StatefulSet/DaemonSet: желаемых реплик больше доступных 10 минут; ни одной доступной 5 минут — critical | warning / critical |
+| GManWorkloadRolloutStuck | Deployment: Progressing=false (reason ProgressDeadlineExceeded); generation не обработана контроллером 15 минут (reason GenerationNotObserved) | warning |
+| GManWorkloadPodsPending | pod-ы workload в Pending дольше 10 минут (значение — их число) | warning |
+| GManJobFailed | условие Failed у Job (backoffLimit, activeDeadlineSeconds) | warning |
+| GManDaemonSetMisscheduled | pod-ы DaemonSet на неподходящих узлах 15 минут | warning |
 
 Источники данных. Хосты и GPU — телеметрия OTel (host_metrics, DCGM); где DCGM нет,
 температура, ECC и причины троттлинга берутся из nvidia-smi последнего снимка inventory
 (не старше 5 минут; DCGM при наличии важнее). Контейнеры и pod-ы — inventory:
-kubelet_stats и docker_stats не сообщают OOMKilled/CrashLoopBackOff, а kube-state-metrics
-в пилоте нет. API отдает их на /metrics: gman_source_last_snapshot_timestamp_seconds,
+kubelet_stats и docker_stats не сообщают OOMKilled/CrashLoopBackOff. Состояние объектов
+Kubernetes (реплики, rollout, Pending, Job, DaemonSet) — kube-state-metrics (раздел
+«Телеметрия»); его алерты несут метки source_id (кластер), namespace, workload_kind,
+workload и, если у pod-ов есть gman.*, service_id/environment. API отдает их на /metrics: gman_source_last_snapshot_timestamp_seconds,
 gman_k8s_node_ready, gman_instance_restarts_total, gman_instance_state_reason и
 gman_instance_last_termination_reason (reason только из фиксированного списка),
 gman_gpu_*. Путь /metrics без токена, но nginx его не проксирует: Prometheus читает
@@ -568,7 +657,11 @@ api:8000 внутри сети Compose, снаружи endpoint недоступ
 Подавление: GManNodeDown и GManK8sNodeNotReady скрывают алерты GPU, контейнеров и
 каналов своего хоста (метка host_id); GManSourceSilent — алерты экземпляров и узлов
 своего источника (данные устарели); GManHostTelemetryAbsent — GManGpuTelemetryAbsent;
-critical скрывает warning того же алерта; CrashLoopBackOff — RestartLoop. При
+critical скрывает warning того же алерта и объекта; CrashLoopBackOff — RestartLoop;
+Pending-pod-ы или застрявший rollout workload — его warning о недоступных репликах
+(critical «нет ни одной реплики» не скрывается); NotReady узла кластера — недоступные
+реплики DaemonSet-ов этого кластера (по pod-у каждого DaemonSet на узле). Deployment и
+StatefulSet при падении узла не подавляются: их реплики должны переехать. При
 недоступном gateway алерты об отсутствии метрик хостов и GPU не создаются вовсе
 (иначе они подавили бы алерты по inventory всех узлов). Группировка по объекту
 (alertname, source_id, host_id, UUID, instance_id); повтор через 4 часа, critical — через час.
@@ -587,12 +680,21 @@ alertmanager с правами 0600.
 https://GMAN_PUBLIC_HOST); адрес передается в правила внешней меткой gman_portal
 (`--enable-feature=expand-external-labels`). Заглушить алерт (silence) — в UI Alertmanager.
 
-Ограничения. Пороги температуры общие для серверных GPU; температура замедления зависит
-от модели. DCGM хранит код последней XID до сброса GPU, поэтому алерт XID держится до
-сброса — после разбора его глушат. Поля ECC (DCGM_FI_DEV_ECC_*_VOL_TOTAL,
-DCGM_FI_DEV_ROW_REMAP_FAILURE) и причины троттлинга (DCGM_FI_DEV_CLOCKS_EVENT_REASONS,
-в старых версиях DCGM_FI_DEV_CLOCK_THROTTLE_REASONS) должны быть включены в CSV
-счетчиков DCGM Exporter; без них эти алерты работают только по nvidia-smi из inventory.
+Пороги перегрева по моделям GPU — группа gman-gpu-thresholds в rules.yaml: recording rule
+gman:gpu_model_temperature_threshold_celsius с метками model (точное имя из DCGM modelName
+или nvidia-smi) и severity. Модель GPU берется из DCGM, иначе из inventory; модели без
+строки получают 85/90 °C. Строки для A100 SXM4 (85/87 °C: warning — GPU Max Operating
+Temp, critical — GPU Slowdown Temp минус 2) взяты из типового вывода `nvidia-smi -q -d
+TEMPERATURE` и должны быть сверены на картах пилота (slowdown виден на дашборде «Хост»).
+Новая модель — две записи (warning и critical) по образцу, проверка — `promtool test rules`.
+
+Ограничения. DCGM хранит код последней XID до сброса GPU, поэтому алерт XID держится до
+сброса — после разбора его глушат. Поля ECC, ROW_REMAP_FAILURE и CLOCKS_EVENT_REASONS
+есть только при CSV счетчиков deploy/dcgm-counters.csv (раздел «DCGM Exporter: набор
+полей»); без него эти алерты работают только по nvidia-smi из inventory. Алерт Job
+держится, пока Job не удалена; StatefulSet с updateStrategy OnDelete алерт rollout
+не ловит (проверяется только generation). Пока kube-state-metrics молчит, алерты
+workloads разрешаются (рядов нет) — об этом GManKubeStateMetricsAbsent.
 Docker сбрасывает признак OOMKilled при автоматическом перезапуске контейнера, поэтому
 OOM с restart policy виден как RestartLoop, а не OOMKilled. Состояние контейнеров
 обновляется со снимками inventory (раз в минуту или по событиям `--watch`).
@@ -623,7 +725,9 @@ npm run build
 
 Проверено: тесты API/агента/метрик/истории конфигураций/ссылок Splunk/SSO/алертов (включая spool, backoff, flock и debounce `--watch`; SSO — против mock IdP), TypeScript и production build,
 синтаксис Docker Compose; чтение AMD sysfs; браузерная проверка портала на тестовых
-данных с API на SQLite; bamboo_event.py против локального API. Тесты проходят на PostgreSQL 17
+данных с API на SQLite; bamboo_event.py против локального API. Тест test_deploy.py сверяет
+имена DCGM с deploy/dcgm-counters.csv, allowlist kube-state-metrics с правилами и дашбордами,
+runbook каждого алерта и переменные дашбордов в ссылках портала. Тесты проходят на PostgreSQL 17
 (134 passed) и SQLite (133 passed, 1 skipped). Docker end-to-end, Kubernetes, NVIDIA/DCGM
 и настоящий Bamboo еще не проверены.
 
@@ -659,8 +763,9 @@ Bamboo, Splunk и SMTP еще не проверены (полный список
   перезапуски по restart policy видны по счетчику, но промежуточное состояние exited — нет.
 - Автор ручного запуска неизвестен: аудит сервера или аутентифицированный посредник не
   реализованы. События Bamboo не коррелируются с runtime автоматически.
-- Controllers и nodes не нормализованы; kube-state-metrics нет, состояние pod-ов для алертов
-  берется из inventory. Пороги алертов GPU общие для всех моделей.
+- Controllers и nodes не нормализованы в базе; состояние workloads есть только в метриках
+  kube-state-metrics (алерты, дашборды), не в карточках портала. Пороги перегрева заданы
+  только для A100 SXM4, остальные модели — 85/90 °C.
 - Индексы и поля Splunk не согласованы.
 - Полная инвентаризация и последние события выводятся одним overview, поэтому этот API
   рассчитан на небольшой пилот.

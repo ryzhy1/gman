@@ -11,6 +11,9 @@ tests:
         values: '1 0x6'
       - series: 'up{job="gman-api", instance="api:8000"}'
         values: '1x6'
+      # `up` of a Collector's own scrape re-exported by the gateway: a dead DCGM Exporter is not the gateway.
+      - series: 'up{job="otel", instance="otel:8889", exported_job="dcgm", exported_instance="127.0.0.1:9400", host_id="gpu-host"}'
+        values: '0x6'
     alert_rule_test:
       - eval_time: 3m
         alertname: GManTelemetryGatewayDown
@@ -182,9 +185,9 @@ tests:
     external_labels: {gman_portal: https://gman.example}
     interval: 1m
     input_series:
-      - series: 'DCGM_FI_DEV_ECC_DBE_VOL_TOTAL{host_id="gpu-host", UUID="GPU-1"}'
+      - series: 'DCGM_FI_DEV_ECC_DBE_VOL_TOTAL_total{host_id="gpu-host", UUID="GPU-1"}'
         values: '0 0 0 2 2 2'
-      - series: 'DCGM_FI_DEV_ECC_SBE_VOL_TOTAL{host_id="gpu-host", UUID="GPU-1"}'
+      - series: 'DCGM_FI_DEV_ECC_SBE_VOL_TOTAL_total{host_id="gpu-host", UUID="GPU-1"}'
         values: '0+50x60'
       # Inventory only (no DCGM on this host).
       - series: 'gman_gpu_ecc_uncorrected_errors{source_id="srv", host_id="srv", UUID="GPU-9", model="A100"}'
@@ -263,6 +266,68 @@ tests:
               description: "Температура памяти (HBM) выше 95 °C пять минут."
               runbook_url: "https://gman.example/#alerts/GManGpuMemoryOverheating"
               summary: "Память GPU GPU-1 на gpu-host: 96 °C"
+
+  - name: gpu overheating thresholds per model
+    external_labels: {gman_portal: https://gman.example}
+    interval: 1m
+    input_series:
+      # A100 SXM4 80GB from DCGM: 85/87 °C from the table, so 88 °C is critical (default would be warning only).
+      - series: 'DCGM_FI_DEV_GPU_TEMP{host_id="gpu-host", UUID="GPU-A", gpu="0", modelName="NVIDIA A100-SXM4-80GB"}'
+        values: '88x10'
+      # A100 SXM4 40GB known only to inventory (nvidia-smi name).
+      - series: 'gman_gpu_temperature_celsius{source_id="srv", host_id="srv", UUID="GPU-B", model="NVIDIA A100-SXM4-40GB"}'
+        values: '88x10'
+      # A model without a row: default thresholds.
+      - series: 'DCGM_FI_DEV_GPU_TEMP{host_id="gpu-host", UUID="GPU-C", gpu="1", modelName="NVIDIA L40S"}'
+        values: '88x10'
+      # DCGM wins over a stale inventory reading and model of the same GPU.
+      - series: 'gman_gpu_temperature_celsius{source_id="gpu-host", host_id="gpu-host", UUID="GPU-C", model="NVIDIA A100-SXM4-80GB"}'
+        values: '95x10'
+    promql_expr_test:
+      - expr: gman:gpu_temperature_threshold_celsius
+        eval_time: 1m
+        exp_samples:
+          - labels: 'gman:gpu_temperature_threshold_celsius{host_id="gpu-host", UUID="GPU-A", severity="warning"}'
+            value: 85
+          - labels: 'gman:gpu_temperature_threshold_celsius{host_id="gpu-host", UUID="GPU-A", severity="critical"}'
+            value: 87
+          - labels: 'gman:gpu_temperature_threshold_celsius{host_id="srv", UUID="GPU-B", severity="warning"}'
+            value: 85
+          - labels: 'gman:gpu_temperature_threshold_celsius{host_id="srv", UUID="GPU-B", severity="critical"}'
+            value: 87
+          - labels: 'gman:gpu_temperature_threshold_celsius{host_id="gpu-host", UUID="GPU-C", severity="warning"}'
+            value: 85
+          - labels: 'gman:gpu_temperature_threshold_celsius{host_id="gpu-host", UUID="GPU-C", severity="critical"}'
+            value: 90
+    alert_rule_test:
+      - eval_time: 7m
+        alertname: GManGpuOverheating
+        exp_alerts:
+          - exp_labels: {severity: warning, scope: gpu, host_id: gpu-host, UUID: GPU-A}
+            exp_annotations:
+              summary: 'GPU GPU-A на gpu-host: 88 °C'
+              description: Температура GPU выше 85 °C пять минут.
+              runbook_url: https://gman.example/#alerts/GManGpuOverheating
+          - exp_labels: {severity: critical, scope: gpu, host_id: gpu-host, UUID: GPU-A}
+            exp_annotations:
+              summary: 'GPU GPU-A на gpu-host: 88 °C'
+              description: Температура GPU выше 87 °C, близко к аппаратному снижению частот.
+              runbook_url: https://gman.example/#alerts/GManGpuOverheating
+          - exp_labels: {severity: warning, scope: gpu, host_id: srv, UUID: GPU-B}
+            exp_annotations:
+              summary: 'GPU GPU-B на srv: 88 °C'
+              description: Температура GPU выше 85 °C пять минут.
+              runbook_url: https://gman.example/#alerts/GManGpuOverheating
+          - exp_labels: {severity: critical, scope: gpu, host_id: srv, UUID: GPU-B}
+            exp_annotations:
+              summary: 'GPU GPU-B на srv: 88 °C'
+              description: Температура GPU выше 87 °C, близко к аппаратному снижению частот.
+              runbook_url: https://gman.example/#alerts/GManGpuOverheating
+          - exp_labels: {severity: warning, scope: gpu, host_id: gpu-host, UUID: GPU-C}
+            exp_annotations:
+              summary: 'GPU GPU-C на gpu-host: 88 °C'
+              description: Температура GPU выше 85 °C пять минут.
+              runbook_url: https://gman.example/#alerts/GManGpuOverheating
 
   - name: gpu throttling bitmask
     external_labels: {gman_portal: https://gman.example}
@@ -401,3 +466,263 @@ tests:
               description: "Pod dev/web-1/web: ImagePullBackOff дольше 10 минут."
               runbook_url: "https://gman.example/#alerts/GManInstanceImagePullFailing"
               summary: "web-1/web не может скачать образ"
+
+  # kube-state-metrics series as they reach Prometheus through the gateway (job/instance of the gateway,
+  # source_id from the node Collector). shop/api: 1 of 3 replicas available, a pod Pending since creation,
+  # Progressing false from 5 minutes. shop/web: no pods, 0 of 2 available, spec change not observed.
+  # shop/db (StatefulSet) 1 of 2 ready, shop/agent (DaemonSet) one unavailable and one misscheduled,
+  # Job shop/report failed, bare pod shop/lonely Pending. The pod-to-workload series of api-5d8f-b is duplicated
+  # for 5 minutes (old and new kube-state-metrics pod): joins must not break.
+  - name: kubernetes workloads
+    external_labels: {gman_portal: https://gman.example}
+    interval: 1m
+    input_series:
+      - series: 'up{job="otel", instance="otel:8889"}'
+        values: '1x30'
+      - series: 'kube_node_info{job="otel", exported_job="kube-state-metrics", source_id="cluster-01", node="node-1"}'
+        values: '1x30'
+      # Deployment shop/api with its ReplicaSet and pods.
+      - series: 'kube_deployment_spec_replicas{job="otel", exported_job="kube-state-metrics", source_id="cluster-01", namespace="shop", deployment="api"}'
+        values: '3x30'
+      - series: 'kube_deployment_status_replicas_available{job="otel", exported_job="kube-state-metrics", source_id="cluster-01", namespace="shop", deployment="api"}'
+        values: '1x30'
+      - series: 'kube_deployment_metadata_generation{job="otel", exported_job="kube-state-metrics", source_id="cluster-01", namespace="shop", deployment="api"}'
+        values: '4x30'
+      - series: 'kube_deployment_status_observed_generation{job="otel", exported_job="kube-state-metrics", source_id="cluster-01", namespace="shop", deployment="api"}'
+        values: '4x30'
+      - series: 'kube_deployment_spec_paused{job="otel", exported_job="kube-state-metrics", source_id="cluster-01", namespace="shop", deployment="api"}'
+        values: '0x30'
+      - series: 'kube_deployment_status_condition{job="otel", exported_job="kube-state-metrics", source_id="cluster-01", namespace="shop", deployment="api", condition="Progressing", status="false", reason="ProgressDeadlineExceeded"}'
+        values: '0x4 1x25'
+      - series: 'kube_deployment_status_condition{job="otel", exported_job="kube-state-metrics", source_id="cluster-01", namespace="shop", deployment="api", condition="Progressing", status="true", reason="ProgressDeadlineExceeded"}'
+        values: '1x4 0x25'
+      - series: 'kube_replicaset_owner{job="otel", exported_job="kube-state-metrics", source_id="cluster-01", namespace="shop", replicaset="api-5d8f", owner_kind="Deployment", owner_name="api", owner_is_controller="true"}'
+        values: '1x30'
+      - series: 'kube_pod_owner{job="otel", exported_job="kube-state-metrics", source_id="cluster-01", namespace="shop", pod="api-5d8f-a", uid="u-a", owner_kind="ReplicaSet", owner_name="api-5d8f", owner_is_controller="true"}'
+        values: '1x30'
+      - series: 'kube_pod_owner{job="otel", exported_job="kube-state-metrics", source_id="cluster-01", namespace="shop", pod="api-5d8f-b", uid="u-b", owner_kind="ReplicaSet", owner_name="api-5d8f", owner_is_controller="true"}'
+        values: '1x30'
+      - series: 'kube_pod_owner{job="otel", exported_job="kube-state-metrics", source_id="cluster-01", namespace="shop", pod="api-5d8f-b", uid="u-b", owner_kind="ReplicaSet", owner_name="api-5d8f", owner_is_controller="true", k8s_pod_name="ksm-old"}'
+        values: '1x5'
+      - series: 'kube_pod_labels{job="otel", exported_job="kube-state-metrics", source_id="cluster-01", namespace="shop", pod="api-5d8f-a", uid="u-a", label_gman_service="api", label_gman_environment="prod"}'
+        values: '1x30'
+      - series: 'kube_pod_labels{job="otel", exported_job="kube-state-metrics", source_id="cluster-01", namespace="shop", pod="api-5d8f-b", uid="u-b", label_gman_service="api", label_gman_environment="prod"}'
+        values: '1x30'
+      - series: 'kube_pod_labels{job="otel", exported_job="kube-state-metrics", source_id="cluster-01", namespace="shop", pod="api-5d8f-b", uid="u-b", label_gman_service="api", label_gman_environment="prod", k8s_pod_name="ksm-old"}'
+        values: '1x5'
+      - series: 'kube_pod_status_phase{job="otel", exported_job="kube-state-metrics", source_id="cluster-01", namespace="shop", pod="api-5d8f-a", uid="u-a", phase="Running"}'
+        values: '1x30'
+      - series: 'kube_pod_status_phase{job="otel", exported_job="kube-state-metrics", source_id="cluster-01", namespace="shop", pod="api-5d8f-a", uid="u-a", phase="Pending"}'
+        values: '0x30'
+      - series: 'kube_pod_status_phase{job="otel", exported_job="kube-state-metrics", source_id="cluster-01", namespace="shop", pod="api-5d8f-b", uid="u-b", phase="Pending"}'
+        values: '1x30'
+      - series: 'kube_pod_created{job="otel", exported_job="kube-state-metrics", source_id="cluster-01", namespace="shop", pod="api-5d8f-a", uid="u-a"}'
+        values: '0x30'
+      - series: 'kube_pod_created{job="otel", exported_job="kube-state-metrics", source_id="cluster-01", namespace="shop", pod="api-5d8f-b", uid="u-b"}'
+        values: '0x30'
+      # Deployment shop/web: no pods at all.
+      - series: 'kube_deployment_spec_replicas{job="otel", exported_job="kube-state-metrics", source_id="cluster-01", namespace="shop", deployment="web"}'
+        values: '2x30'
+      - series: 'kube_deployment_status_replicas_available{job="otel", exported_job="kube-state-metrics", source_id="cluster-01", namespace="shop", deployment="web"}'
+        values: '0x30'
+      - series: 'kube_deployment_metadata_generation{job="otel", exported_job="kube-state-metrics", source_id="cluster-01", namespace="shop", deployment="web"}'
+        values: '2x30'
+      - series: 'kube_deployment_status_observed_generation{job="otel", exported_job="kube-state-metrics", source_id="cluster-01", namespace="shop", deployment="web"}'
+        values: '1x30'
+      - series: 'kube_deployment_spec_paused{job="otel", exported_job="kube-state-metrics", source_id="cluster-01", namespace="shop", deployment="web"}'
+        values: '0x30'
+      # Paused Deployment with an unobserved change: no rollout alert.
+      - series: 'kube_deployment_metadata_generation{job="otel", exported_job="kube-state-metrics", source_id="cluster-01", namespace="shop", deployment="paused"}'
+        values: '3x30'
+      - series: 'kube_deployment_status_observed_generation{job="otel", exported_job="kube-state-metrics", source_id="cluster-01", namespace="shop", deployment="paused"}'
+        values: '2x30'
+      - series: 'kube_deployment_spec_paused{job="otel", exported_job="kube-state-metrics", source_id="cluster-01", namespace="shop", deployment="paused"}'
+        values: '1x30'
+      # StatefulSet shop/db.
+      - series: 'kube_statefulset_replicas{job="otel", exported_job="kube-state-metrics", source_id="cluster-01", namespace="shop", statefulset="db"}'
+        values: '2x30'
+      - series: 'kube_statefulset_status_replicas_ready{job="otel", exported_job="kube-state-metrics", source_id="cluster-01", namespace="shop", statefulset="db"}'
+        values: '1x30'
+      - series: 'kube_statefulset_metadata_generation{job="otel", exported_job="kube-state-metrics", source_id="cluster-01", namespace="shop", statefulset="db"}'
+        values: '1x30'
+      - series: 'kube_statefulset_status_observed_generation{job="otel", exported_job="kube-state-metrics", source_id="cluster-01", namespace="shop", statefulset="db"}'
+        values: '1x30'
+      # DaemonSet shop/agent.
+      - series: 'kube_daemonset_status_desired_number_scheduled{job="otel", exported_job="kube-state-metrics", source_id="cluster-01", namespace="shop", daemonset="agent"}'
+        values: '3x30'
+      - series: 'kube_daemonset_status_number_available{job="otel", exported_job="kube-state-metrics", source_id="cluster-01", namespace="shop", daemonset="agent"}'
+        values: '2x30'
+      - series: 'kube_daemonset_status_number_misscheduled{job="otel", exported_job="kube-state-metrics", source_id="cluster-01", namespace="shop", daemonset="agent"}'
+        values: '1x30'
+      - series: 'kube_daemonset_metadata_generation{job="otel", exported_job="kube-state-metrics", source_id="cluster-01", namespace="shop", daemonset="agent"}'
+        values: '1x30'
+      - series: 'kube_daemonset_status_observed_generation{job="otel", exported_job="kube-state-metrics", source_id="cluster-01", namespace="shop", daemonset="agent"}'
+        values: '1x30'
+      # Job shop/report and its pod.
+      - series: 'kube_job_owner{job="otel", exported_job="kube-state-metrics", source_id="cluster-01", namespace="shop", job_name="report"}'
+        values: '1x30'
+      - series: 'kube_job_failed{job="otel", exported_job="kube-state-metrics", source_id="cluster-01", namespace="shop", job_name="report", condition="true"}'
+        values: '0x2 1x27'
+      - series: 'kube_pod_owner{job="otel", exported_job="kube-state-metrics", source_id="cluster-01", namespace="shop", pod="report-abcde", uid="u-r", owner_kind="Job", owner_name="report", owner_is_controller="true"}'
+        values: '1x30'
+      - series: 'kube_pod_labels{job="otel", exported_job="kube-state-metrics", source_id="cluster-01", namespace="shop", pod="report-abcde", uid="u-r", label_gman_service="report", label_gman_environment="dev"}'
+        values: '1x30'
+      # Bare pod shop/lonely (no owner: empty owner labels are absent in Prometheus).
+      - series: 'kube_pod_owner{job="otel", exported_job="kube-state-metrics", source_id="cluster-01", namespace="shop", pod="lonely", uid="u-l"}'
+        values: '1x30'
+      - series: 'kube_pod_labels{job="otel", exported_job="kube-state-metrics", source_id="cluster-01", namespace="shop", pod="lonely", uid="u-l"}'
+        values: '1x30'
+      - series: 'kube_pod_status_phase{job="otel", exported_job="kube-state-metrics", source_id="cluster-01", namespace="shop", pod="lonely", uid="u-l", phase="Pending"}'
+        values: '1x30'
+      - series: 'kube_pod_created{job="otel", exported_job="kube-state-metrics", source_id="cluster-01", namespace="shop", pod="lonely", uid="u-l"}'
+        values: '300x30'
+    promql_expr_test:
+      - expr: gman:kube_pod_workload:info
+        eval_time: 2m
+        exp_samples:
+          - labels: 'gman:kube_pod_workload:info{source_id="cluster-01", namespace="shop", pod="api-5d8f-a", workload_kind="Deployment", workload="api"}'
+            value: 1
+          - labels: 'gman:kube_pod_workload:info{source_id="cluster-01", namespace="shop", pod="api-5d8f-b", workload_kind="Deployment", workload="api"}'
+            value: 1
+          - labels: 'gman:kube_pod_workload:info{source_id="cluster-01", namespace="shop", pod="report-abcde", workload_kind="Job", workload="report"}'
+            value: 1
+          - labels: 'gman:kube_pod_workload:info{source_id="cluster-01", namespace="shop", pod="lonely", workload_kind="Pod", workload="lonely"}'
+            value: 1
+      - expr: gman:kube_workload_service:info
+        eval_time: 2m
+        exp_samples:
+          - labels: 'gman:kube_workload_service:info{source_id="cluster-01", namespace="shop", workload_kind="Deployment", workload="api", service_id="api", environment="prod"}'
+            value: 1
+          - labels: 'gman:kube_workload_service:info{source_id="cluster-01", namespace="shop", workload_kind="Job", workload="report", service_id="report", environment="dev"}'
+            value: 1
+          - labels: 'gman:kube_workload_service:info{source_id="cluster-01", namespace="shop", workload_kind="Pod", workload="lonely"}'
+            value: 1
+          - labels: 'gman:kube_workload_service:info{source_id="cluster-01", namespace="shop", workload_kind="Deployment", workload="web"}'
+            value: 1
+          - labels: 'gman:kube_workload_service:info{source_id="cluster-01", namespace="shop", workload_kind="Deployment", workload="paused"}'
+            value: 1
+          - labels: 'gman:kube_workload_service:info{source_id="cluster-01", namespace="shop", workload_kind="StatefulSet", workload="db"}'
+            value: 1
+          - labels: 'gman:kube_workload_service:info{source_id="cluster-01", namespace="shop", workload_kind="DaemonSet", workload="agent"}'
+            value: 1
+    alert_rule_test:
+      - eval_time: 12m
+        alertname: GManWorkloadReplicasUnavailable
+        exp_alerts:
+          - exp_labels: {severity: warning, scope: workload, source_id: cluster-01, namespace: shop, workload_kind: Deployment, workload: api, service_id: api, environment: prod}
+            exp_annotations:
+              summary: 'Deployment shop/api: недоступно реплик — 2'
+              description: 'Кластер cluster-01, сервис api: часть реплик не готова дольше 10 минут.'
+              runbook_url: https://gman.example/#alerts/GManWorkloadReplicasUnavailable
+          - exp_labels: {severity: warning, scope: workload, source_id: cluster-01, namespace: shop, workload_kind: Deployment, workload: web}
+            exp_annotations:
+              summary: 'Deployment shop/web: недоступно реплик — 2'
+              description: 'Кластер cluster-01: часть реплик не готова дольше 10 минут.'
+              runbook_url: https://gman.example/#alerts/GManWorkloadReplicasUnavailable
+          - exp_labels: {severity: critical, scope: workload, source_id: cluster-01, namespace: shop, workload_kind: Deployment, workload: web}
+            exp_annotations:
+              summary: 'Deployment shop/web: нет доступных реплик'
+              description: 'Кластер cluster-01: ни одна из 2 реплик не готова дольше 5 минут.'
+              runbook_url: https://gman.example/#alerts/GManWorkloadReplicasUnavailable
+          - exp_labels: {severity: warning, scope: workload, source_id: cluster-01, namespace: shop, workload_kind: StatefulSet, workload: db}
+            exp_annotations:
+              summary: 'StatefulSet shop/db: недоступно реплик — 1'
+              description: 'Кластер cluster-01: часть реплик не готова дольше 10 минут.'
+              runbook_url: https://gman.example/#alerts/GManWorkloadReplicasUnavailable
+          - exp_labels: {severity: warning, scope: workload, source_id: cluster-01, namespace: shop, workload_kind: DaemonSet, workload: agent}
+            exp_annotations:
+              summary: 'DaemonSet shop/agent: недоступно реплик — 1'
+              description: 'Кластер cluster-01: часть реплик не готова дольше 10 минут.'
+              runbook_url: https://gman.example/#alerts/GManWorkloadReplicasUnavailable
+      - eval_time: 8m
+        alertname: GManWorkloadRolloutStuck
+        exp_alerts:
+          - exp_labels: {severity: warning, scope: workload, source_id: cluster-01, namespace: shop, workload_kind: Deployment, workload: api, service_id: api, environment: prod, reason: ProgressDeadlineExceeded}
+            exp_annotations:
+              summary: 'Deployment shop/api: rollout не продвигается'
+              description: 'Кластер cluster-01, сервис api: условие Progressing ложно (ProgressDeadlineExceeded) — новые pod-ы не стали доступными за progressDeadlineSeconds.'
+              runbook_url: https://gman.example/#alerts/GManWorkloadRolloutStuck
+      - eval_time: 17m
+        alertname: GManWorkloadRolloutStuck
+        exp_alerts:
+          - exp_labels: {severity: warning, scope: workload, source_id: cluster-01, namespace: shop, workload_kind: Deployment, workload: api, service_id: api, environment: prod, reason: ProgressDeadlineExceeded}
+            exp_annotations:
+              summary: 'Deployment shop/api: rollout не продвигается'
+              description: 'Кластер cluster-01, сервис api: условие Progressing ложно (ProgressDeadlineExceeded) — новые pod-ы не стали доступными за progressDeadlineSeconds.'
+              runbook_url: https://gman.example/#alerts/GManWorkloadRolloutStuck
+          - exp_labels: {severity: warning, scope: workload, source_id: cluster-01, namespace: shop, workload_kind: Deployment, workload: web, reason: GenerationNotObserved}
+            exp_annotations:
+              summary: 'Deployment shop/web: rollout не продвигается'
+              description: 'Кластер cluster-01: контроллер 15 минут не обработал изменение спецификации (metadata.generation больше status.observedGeneration).'
+              runbook_url: https://gman.example/#alerts/GManWorkloadRolloutStuck
+      # api-5d8f-b was created at 0 s, lonely at 300 s: only api-5d8f-b is Pending longer than 10 minutes at 12 minutes.
+      - eval_time: 12m
+        alertname: GManWorkloadPodsPending
+        exp_alerts:
+          - exp_labels: {severity: warning, scope: workload, source_id: cluster-01, namespace: shop, workload_kind: Deployment, workload: api, service_id: api, environment: prod}
+            exp_annotations:
+              summary: 'Deployment shop/api: pod-ов в Pending — 1'
+              description: 'Кластер cluster-01, сервис api: pod-ы не запущены дольше 10 минут — не хватает ресурсов, taints/affinity, PVC или образ.'
+              runbook_url: https://gman.example/#alerts/GManWorkloadPodsPending
+      - eval_time: 17m
+        alertname: GManWorkloadPodsPending
+        exp_alerts:
+          - exp_labels: {severity: warning, scope: workload, source_id: cluster-01, namespace: shop, workload_kind: Deployment, workload: api, service_id: api, environment: prod}
+            exp_annotations:
+              summary: 'Deployment shop/api: pod-ов в Pending — 1'
+              description: 'Кластер cluster-01, сервис api: pod-ы не запущены дольше 10 минут — не хватает ресурсов, taints/affinity, PVC или образ.'
+              runbook_url: https://gman.example/#alerts/GManWorkloadPodsPending
+          - exp_labels: {severity: warning, scope: workload, source_id: cluster-01, namespace: shop, workload_kind: Pod, workload: lonely}
+            exp_annotations:
+              summary: 'Pod shop/lonely: pod-ов в Pending — 1'
+              description: 'Кластер cluster-01: pod-ы не запущены дольше 10 минут — не хватает ресурсов, taints/affinity, PVC или образ.'
+              runbook_url: https://gman.example/#alerts/GManWorkloadPodsPending
+      - eval_time: 1m
+        alertname: GManJobFailed
+        exp_alerts: []
+      - eval_time: 3m
+        alertname: GManJobFailed
+        exp_alerts:
+          - exp_labels: {severity: warning, scope: workload, source_id: cluster-01, namespace: shop, workload_kind: Job, workload: report, service_id: report, environment: dev}
+            exp_annotations:
+              summary: 'Job shop/report завершилась ошибкой'
+              description: 'Кластер cluster-01, сервис report: исчерпаны попытки (backoffLimit) или время (activeDeadlineSeconds).'
+              runbook_url: https://gman.example/#alerts/GManJobFailed
+      - eval_time: 14m
+        alertname: GManDaemonSetMisscheduled
+        exp_alerts: []
+      - eval_time: 16m
+        alertname: GManDaemonSetMisscheduled
+        exp_alerts:
+          - exp_labels: {severity: warning, scope: workload, source_id: cluster-01, namespace: shop, workload_kind: DaemonSet, workload: agent}
+            exp_annotations:
+              summary: 'DaemonSet shop/agent: 1 pod-ов на неподходящих узлах'
+              description: 'Кластер cluster-01: pod-ы DaemonSet работают на узлах, где по nodeSelector/affinity/taints их быть не должно.'
+              runbook_url: https://gman.example/#alerts/GManDaemonSetMisscheduled
+      - eval_time: 25m
+        alertname: GManKubeStateMetricsAbsent
+        exp_alerts: []
+
+  - name: kube-state-metrics absent
+    external_labels: {gman_portal: https://gman.example}
+    interval: 1m
+    input_series:
+      - series: 'up{job="otel", instance="otel:8889"}'
+        values: '1x30'
+      # cluster-02 stops at 10 minutes; its series stay visible for the 5-minute lookback.
+      - series: 'kube_node_info{job="otel", exported_job="kube-state-metrics", source_id="cluster-01", node="a"}'
+        values: '1x30'
+      - series: 'kube_node_info{job="otel", exported_job="kube-state-metrics", source_id="cluster-02", node="b"}'
+        values: '1x10'
+    alert_rule_test:
+      - eval_time: 18m
+        alertname: GManKubeStateMetricsAbsent
+        exp_alerts: []
+      - eval_time: 22m
+        alertname: GManKubeStateMetricsAbsent
+        exp_alerts:
+          - exp_labels: {severity: warning, scope: pipeline, source_id: cluster-02}
+            exp_annotations:
+              summary: 'Нет метрик kube-state-metrics кластера cluster-02'
+              description: 'Алерты workloads этого кластера (реплики, rollout, Pending, Job, DaemonSet) не вычисляются: остановлен kube-state-metrics или Collector его узла.'
+              runbook_url: https://gman.example/#alerts/GManKubeStateMetricsAbsent

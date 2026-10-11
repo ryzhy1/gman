@@ -885,6 +885,133 @@
      "legendFormat": "memory {{host_id}} / {{k8s_namespace_name}}/{{k8s_pod_name}}/{{k8s_container_name}}"
     }
    ]
+  },
+  {
+   "type": "row",
+   "title": "Kubernetes: состояние workloads (kube-state-metrics)",
+   "collapsed": false,
+   "gridPos": {
+    "x": 0,
+    "y": 58,
+    "w": 24,
+    "h": 1
+   },
+   "panels": []
+  },
+  {
+   "type": "timeseries",
+   "title": "Реплики: доступно и желаемо",
+   "description": "Deployment — доступные, StatefulSet — готовые, DaemonSet — доступные pod-ы. Сервис — по меткам gman.service/gman.environment pod-ов.",
+   "datasource": {
+    "type": "prometheus",
+    "uid": "prometheus"
+   },
+   "gridPos": {
+    "x": 0,
+    "y": 59,
+    "w": 12,
+    "h": 8
+   },
+   "fieldConfig": {
+    "defaults": {
+     "unit": "short",
+     "min": 0,
+     "custom": {
+      "fillOpacity": 10,
+      "showPoints": "never",
+      "lineWidth": 1
+     },
+     "decimals": 0
+    },
+    "overrides": []
+   },
+   "options": {
+    "legend": {
+     "displayMode": "table",
+     "placement": "bottom",
+     "calcs": [
+      "lastNotNull",
+      "max"
+     ]
+    },
+    "tooltip": {
+     "mode": "multi",
+     "sort": "desc"
+    }
+   },
+   "targets": [
+    {
+     "datasource": {
+      "type": "prometheus",
+      "uid": "prometheus"
+     },
+     "refId": "A",
+     "expr": "gman:kube_workload_replicas_available:max{service_id=\"$service\",environment=~\"$environment\"}",
+     "legendFormat": "доступно {{workload_kind}} {{namespace}}/{{workload}}"
+    },
+    {
+     "datasource": {
+      "type": "prometheus",
+      "uid": "prometheus"
+     },
+     "refId": "B",
+     "expr": "gman:kube_workload_replicas_desired:max{service_id=\"$service\",environment=~\"$environment\"}",
+     "legendFormat": "желаемо {{workload_kind}} {{namespace}}/{{workload}}"
+    }
+   ]
+  },
+  {
+   "type": "timeseries",
+   "title": "Pod-ы в Pending",
+   "description": "Pod-ы сервиса, которые еще не запущены (планирование, образ, PVC).",
+   "datasource": {
+    "type": "prometheus",
+    "uid": "prometheus"
+   },
+   "gridPos": {
+    "x": 12,
+    "y": 59,
+    "w": 12,
+    "h": 8
+   },
+   "fieldConfig": {
+    "defaults": {
+     "unit": "short",
+     "min": 0,
+     "custom": {
+      "fillOpacity": 10,
+      "showPoints": "never",
+      "lineWidth": 1
+     },
+     "decimals": 0
+    },
+    "overrides": []
+   },
+   "options": {
+    "legend": {
+     "displayMode": "table",
+     "placement": "bottom",
+     "calcs": [
+      "lastNotNull",
+      "max"
+     ]
+    },
+    "tooltip": {
+     "mode": "multi",
+     "sort": "desc"
+    }
+   },
+   "targets": [
+    {
+     "datasource": {
+      "type": "prometheus",
+      "uid": "prometheus"
+     },
+     "refId": "A",
+     "expr": "count by (namespace, workload_kind, workload) (gman:kube_pod_workload:info and on (source_id, namespace, pod) gman:kube_pod_service:info{service_id=\"$service\",environment=~\"$environment\"} and on (source_id, namespace, pod) (max by (source_id, namespace, pod) (kube_pod_status_phase{phase=\"Pending\"}) == 1))",
+     "legendFormat": "{{workload_kind}} {{namespace}}/{{workload}}"
+    }
+   ]
   }
  ]
 }

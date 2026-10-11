@@ -17,6 +17,25 @@
  "templating": {
   "list": [
    {
+    "name": "cluster",
+    "label": "Кластер",
+    "type": "query",
+    "datasource": {
+     "type": "prometheus",
+     "uid": "prometheus"
+    },
+    "query": {
+     "query": "label_values(k8s_node_cpu_usage, k8s_cluster_name)",
+     "refId": "v"
+    },
+    "definition": "label_values(k8s_node_cpu_usage, k8s_cluster_name)",
+    "refresh": 2,
+    "sort": 1,
+    "includeAll": true,
+    "multi": true,
+    "allValue": ".*"
+   },
+   {
     "name": "node",
     "label": "Узел",
     "type": "query",
@@ -25,10 +44,10 @@
      "uid": "prometheus"
     },
     "query": {
-     "query": "label_values(k8s_node_cpu_usage, host_id)",
+     "query": "label_values(k8s_node_cpu_usage{k8s_cluster_name=~\"$cluster\"}, host_id)",
      "refId": "v"
     },
-    "definition": "label_values(k8s_node_cpu_usage, host_id)",
+    "definition": "label_values(k8s_node_cpu_usage{k8s_cluster_name=~\"$cluster\"}, host_id)",
     "refresh": 2,
     "sort": 1,
     "includeAll": true,
@@ -48,6 +67,25 @@
      "refId": "v"
     },
     "definition": "label_values(k8s_pod_memory_working_set_bytes{host_id=~\"$node\"}, k8s_namespace_name)",
+    "refresh": 2,
+    "sort": 1,
+    "includeAll": true,
+    "multi": true,
+    "allValue": ".*"
+   },
+   {
+    "name": "environment",
+    "label": "Окружение",
+    "type": "query",
+    "datasource": {
+     "type": "prometheus",
+     "uid": "prometheus"
+    },
+    "query": {
+     "query": "label_values(gman:kube_workload_service:info{source_id=~\"$cluster\"}, environment)",
+     "refId": "v"
+    },
+    "definition": "label_values(gman:kube_workload_service:info{source_id=~\"$cluster\"}, environment)",
     "refresh": 2,
     "sort": 1,
     "includeAll": true,
@@ -119,7 +157,7 @@
       "uid": "prometheus"
      },
      "refId": "A",
-     "expr": "k8s_node_cpu_usage{host_id=~\"$node\"}",
+     "expr": "k8s_node_cpu_usage{k8s_cluster_name=~\"$cluster\",host_id=~\"$node\"}",
      "legendFormat": "{{host_id}}"
     }
    ]
@@ -174,7 +212,7 @@
       "uid": "prometheus"
      },
      "refId": "A",
-     "expr": "k8s_node_memory_working_set_bytes{host_id=~\"$node\"}",
+     "expr": "k8s_node_memory_working_set_bytes{k8s_cluster_name=~\"$cluster\",host_id=~\"$node\"}",
      "legendFormat": "working set {{host_id}}"
     },
     {
@@ -183,7 +221,7 @@
       "uid": "prometheus"
      },
      "refId": "B",
-     "expr": "k8s_node_memory_available_bytes{host_id=~\"$node\"}",
+     "expr": "k8s_node_memory_available_bytes{k8s_cluster_name=~\"$cluster\",host_id=~\"$node\"}",
      "legendFormat": "available {{host_id}}"
     }
    ]
@@ -238,7 +276,7 @@
       "uid": "prometheus"
      },
      "refId": "A",
-     "expr": "rate(k8s_node_network_io_bytes_total{host_id=~\"$node\"}[2m])",
+     "expr": "rate(k8s_node_network_io_bytes_total{k8s_cluster_name=~\"$cluster\",host_id=~\"$node\"}[2m])",
      "legendFormat": "{{host_id}} {{interface}} {{direction}}"
     }
    ]
@@ -293,7 +331,7 @@
       "uid": "prometheus"
      },
      "refId": "A",
-     "expr": "k8s_node_filesystem_usage_bytes{host_id=~\"$node\"} / k8s_node_filesystem_capacity_bytes{host_id=~\"$node\"}",
+     "expr": "k8s_node_filesystem_usage_bytes{k8s_cluster_name=~\"$cluster\",host_id=~\"$node\"} / k8s_node_filesystem_capacity_bytes{k8s_cluster_name=~\"$cluster\",host_id=~\"$node\"}",
      "legendFormat": "{{host_id}}"
     }
    ]
@@ -348,7 +386,7 @@
       "uid": "prometheus"
      },
      "refId": "A",
-     "expr": "count by (k8s_namespace_name) (max by (k8s_namespace_name, k8s_pod_uid) (k8s_pod_memory_working_set_bytes{host_id=~\"$node\",k8s_namespace_name=~\"$namespace\"}))",
+     "expr": "count by (k8s_namespace_name) (max by (k8s_namespace_name, k8s_pod_uid) (k8s_pod_memory_working_set_bytes{k8s_cluster_name=~\"$cluster\",host_id=~\"$node\",k8s_namespace_name=~\"$namespace\"}))",
      "legendFormat": "{{k8s_namespace_name}}"
     }
    ]
@@ -403,7 +441,7 @@
       "uid": "prometheus"
      },
      "refId": "A",
-     "expr": "DCGM_FI_DEV_GPU_UTIL{host_id=~\"$node\"}",
+     "expr": "DCGM_FI_DEV_GPU_UTIL{k8s_cluster_name=~\"$cluster\",host_id=~\"$node\"}",
      "legendFormat": "{{host_id}} GPU {{gpu}}"
     }
    ]
@@ -470,7 +508,7 @@
       "uid": "prometheus"
      },
      "refId": "A",
-     "expr": "topk(15, max by (host_id, k8s_namespace_name, k8s_pod_name, k8s_container_name) (rate(container_cpu_time_seconds_total{host_id=~\"$node\",k8s_namespace_name=~\"$namespace\"}[2m])))",
+     "expr": "topk(15, max by (host_id, k8s_namespace_name, k8s_pod_name, k8s_container_name) (rate(container_cpu_time_seconds_total{k8s_cluster_name=~\"$cluster\",host_id=~\"$node\",k8s_namespace_name=~\"$namespace\"}[2m])))",
      "legendFormat": "{{host_id}} / {{k8s_namespace_name}}/{{k8s_pod_name}}/{{k8s_container_name}}"
     }
    ]
@@ -525,7 +563,7 @@
       "uid": "prometheus"
      },
      "refId": "A",
-     "expr": "topk(15, max by (host_id, k8s_namespace_name, k8s_pod_name, k8s_container_name) (container_memory_working_set_bytes{host_id=~\"$node\",k8s_namespace_name=~\"$namespace\"}))",
+     "expr": "topk(15, max by (host_id, k8s_namespace_name, k8s_pod_name, k8s_container_name) (container_memory_working_set_bytes{k8s_cluster_name=~\"$cluster\",host_id=~\"$node\",k8s_namespace_name=~\"$namespace\"}))",
      "legendFormat": "{{host_id}} / {{k8s_namespace_name}}/{{k8s_pod_name}}/{{k8s_container_name}}"
     }
    ]
@@ -580,7 +618,7 @@
       "uid": "prometheus"
      },
      "refId": "A",
-     "expr": "max by (host_id, k8s_namespace_name, k8s_pod_name, k8s_container_name) (k8s_container_cpu_limit_utilization_ratio{host_id=~\"$node\",k8s_namespace_name=~\"$namespace\"})",
+     "expr": "max by (host_id, k8s_namespace_name, k8s_pod_name, k8s_container_name) (k8s_container_cpu_limit_utilization_ratio{k8s_cluster_name=~\"$cluster\",host_id=~\"$node\",k8s_namespace_name=~\"$namespace\"})",
      "legendFormat": "{{host_id}} / {{k8s_namespace_name}}/{{k8s_pod_name}}/{{k8s_container_name}}"
     }
    ]
@@ -635,7 +673,7 @@
       "uid": "prometheus"
      },
      "refId": "A",
-     "expr": "max by (host_id, k8s_namespace_name, k8s_pod_name, k8s_container_name) (k8s_container_memory_limit_utilization_ratio{host_id=~\"$node\",k8s_namespace_name=~\"$namespace\"})",
+     "expr": "max by (host_id, k8s_namespace_name, k8s_pod_name, k8s_container_name) (k8s_container_memory_limit_utilization_ratio{k8s_cluster_name=~\"$cluster\",host_id=~\"$node\",k8s_namespace_name=~\"$namespace\"})",
      "legendFormat": "{{host_id}} / {{k8s_namespace_name}}/{{k8s_pod_name}}/{{k8s_container_name}}"
     }
    ]
@@ -690,7 +728,7 @@
       "uid": "prometheus"
      },
      "refId": "A",
-     "expr": "topk(15, sum by (host_id, k8s_namespace_name, k8s_pod_name) (max by (host_id, k8s_namespace_name, k8s_pod_name, interface) (rate(k8s_pod_network_io_bytes_total{host_id=~\"$node\",k8s_namespace_name=~\"$namespace\",direction=\"receive\"}[2m]))))",
+     "expr": "topk(15, sum by (host_id, k8s_namespace_name, k8s_pod_name) (max by (host_id, k8s_namespace_name, k8s_pod_name, interface) (rate(k8s_pod_network_io_bytes_total{k8s_cluster_name=~\"$cluster\",host_id=~\"$node\",k8s_namespace_name=~\"$namespace\",direction=\"receive\"}[2m]))))",
      "legendFormat": "rx {{host_id}} / {{k8s_namespace_name}}/{{k8s_pod_name}}"
     },
     {
@@ -699,7 +737,7 @@
       "uid": "prometheus"
      },
      "refId": "B",
-     "expr": "topk(15, sum by (host_id, k8s_namespace_name, k8s_pod_name) (max by (host_id, k8s_namespace_name, k8s_pod_name, interface) (rate(k8s_pod_network_io_bytes_total{host_id=~\"$node\",k8s_namespace_name=~\"$namespace\",direction=\"transmit\"}[2m]))))",
+     "expr": "topk(15, sum by (host_id, k8s_namespace_name, k8s_pod_name) (max by (host_id, k8s_namespace_name, k8s_pod_name, interface) (rate(k8s_pod_network_io_bytes_total{k8s_cluster_name=~\"$cluster\",host_id=~\"$node\",k8s_namespace_name=~\"$namespace\",direction=\"transmit\"}[2m]))))",
      "legendFormat": "tx {{host_id}} / {{k8s_namespace_name}}/{{k8s_pod_name}}"
     }
    ]
@@ -754,7 +792,7 @@
       "uid": "prometheus"
      },
      "refId": "A",
-     "expr": "max by (host_id, k8s_namespace_name, k8s_pod_name, k8s_container_name) (k8s_container_cpu_request_utilization_ratio{host_id=~\"$node\",k8s_namespace_name=~\"$namespace\"})",
+     "expr": "max by (host_id, k8s_namespace_name, k8s_pod_name, k8s_container_name) (k8s_container_cpu_request_utilization_ratio{k8s_cluster_name=~\"$cluster\",host_id=~\"$node\",k8s_namespace_name=~\"$namespace\"})",
      "legendFormat": "cpu {{host_id}} / {{k8s_namespace_name}}/{{k8s_pod_name}}/{{k8s_container_name}}"
     },
     {
@@ -763,8 +801,374 @@
       "uid": "prometheus"
      },
      "refId": "B",
-     "expr": "max by (host_id, k8s_namespace_name, k8s_pod_name, k8s_container_name) (k8s_container_memory_request_utilization_ratio{host_id=~\"$node\",k8s_namespace_name=~\"$namespace\"})",
+     "expr": "max by (host_id, k8s_namespace_name, k8s_pod_name, k8s_container_name) (k8s_container_memory_request_utilization_ratio{k8s_cluster_name=~\"$cluster\",host_id=~\"$node\",k8s_namespace_name=~\"$namespace\"})",
      "legendFormat": "memory {{host_id}} / {{k8s_namespace_name}}/{{k8s_pod_name}}/{{k8s_container_name}}"
+    }
+   ]
+  },
+  {
+   "type": "row",
+   "title": "Workloads (kube-state-metrics)",
+   "collapsed": false,
+   "gridPos": {
+    "x": 0,
+    "y": 50,
+    "w": 24,
+    "h": 1
+   },
+   "panels": []
+  },
+  {
+   "type": "timeseries",
+   "title": "Недоступные реплики",
+   "description": "Желаемые минус доступные реплики Deployment, готовые StatefulSet, доступные pod-ы DaemonSet (алерт GManWorkloadReplicasUnavailable — дольше 10 минут).",
+   "datasource": {
+    "type": "prometheus",
+    "uid": "prometheus"
+   },
+   "gridPos": {
+    "x": 0,
+    "y": 51,
+    "w": 12,
+    "h": 8
+   },
+   "fieldConfig": {
+    "defaults": {
+     "unit": "short",
+     "min": 0,
+     "custom": {
+      "fillOpacity": 10,
+      "showPoints": "never",
+      "lineWidth": 1
+     },
+     "decimals": 0
+    },
+    "overrides": []
+   },
+   "options": {
+    "legend": {
+     "displayMode": "table",
+     "placement": "bottom",
+     "calcs": [
+      "lastNotNull",
+      "max"
+     ]
+    },
+    "tooltip": {
+     "mode": "multi",
+     "sort": "desc"
+    }
+   },
+   "targets": [
+    {
+     "datasource": {
+      "type": "prometheus",
+      "uid": "prometheus"
+     },
+     "refId": "A",
+     "expr": "gman:kube_workload_replicas_desired:max{source_id=~\"$cluster\",namespace=~\"$namespace\",environment=~\"$environment\"} - gman:kube_workload_replicas_available:max{source_id=~\"$cluster\",namespace=~\"$namespace\",environment=~\"$environment\"} > 0",
+     "legendFormat": "{{workload_kind}} {{namespace}}/{{workload}}"
+    }
+   ]
+  },
+  {
+   "type": "timeseries",
+   "title": "Pod-ы в Pending",
+   "description": "Число pod-ов workload в фазе Pending (алерт GManWorkloadPodsPending — дольше 10 минут).",
+   "datasource": {
+    "type": "prometheus",
+    "uid": "prometheus"
+   },
+   "gridPos": {
+    "x": 12,
+    "y": 51,
+    "w": 12,
+    "h": 8
+   },
+   "fieldConfig": {
+    "defaults": {
+     "unit": "short",
+     "min": 0,
+     "custom": {
+      "fillOpacity": 10,
+      "showPoints": "never",
+      "lineWidth": 1
+     },
+     "decimals": 0
+    },
+    "overrides": []
+   },
+   "options": {
+    "legend": {
+     "displayMode": "table",
+     "placement": "bottom",
+     "calcs": [
+      "lastNotNull",
+      "max"
+     ]
+    },
+    "tooltip": {
+     "mode": "multi",
+     "sort": "desc"
+    }
+   },
+   "targets": [
+    {
+     "datasource": {
+      "type": "prometheus",
+      "uid": "prometheus"
+     },
+     "refId": "A",
+     "expr": "count by (source_id, namespace, workload_kind, workload) (gman:kube_pod_workload:info{source_id=~\"$cluster\",namespace=~\"$namespace\"} and on (source_id, namespace, pod) (max by (source_id, namespace, pod) (kube_pod_status_phase{phase=\"Pending\"}) == 1)) and on (source_id, namespace, workload_kind, workload) gman:kube_workload_service:info{environment=~\"$environment\"}",
+     "legendFormat": "{{workload_kind}} {{namespace}}/{{workload}}"
+    }
+   ]
+  },
+  {
+   "type": "timeseries",
+   "title": "Застрявшие rollout",
+   "description": "1 — Progressing=false (progressDeadlineSeconds истек) или контроллер не обработал новую генерацию спецификации.",
+   "datasource": {
+    "type": "prometheus",
+    "uid": "prometheus"
+   },
+   "gridPos": {
+    "x": 0,
+    "y": 59,
+    "w": 12,
+    "h": 8
+   },
+   "fieldConfig": {
+    "defaults": {
+     "unit": "short",
+     "min": 0,
+     "custom": {
+      "fillOpacity": 10,
+      "showPoints": "never",
+      "lineWidth": 1
+     },
+     "decimals": 0
+    },
+    "overrides": []
+   },
+   "options": {
+    "legend": {
+     "displayMode": "table",
+     "placement": "bottom",
+     "calcs": [
+      "lastNotNull",
+      "max"
+     ]
+    },
+    "tooltip": {
+     "mode": "multi",
+     "sort": "desc"
+    }
+   },
+   "targets": [
+    {
+     "datasource": {
+      "type": "prometheus",
+      "uid": "prometheus"
+     },
+     "refId": "A",
+     "expr": "max by (namespace, deployment) (kube_deployment_status_condition{condition=\"Progressing\",status=\"false\",source_id=~\"$cluster\",namespace=~\"$namespace\"}) == 1",
+     "legendFormat": "Progressing=false Deployment {{namespace}}/{{deployment}}"
+    },
+    {
+     "datasource": {
+      "type": "prometheus",
+      "uid": "prometheus"
+     },
+     "refId": "B",
+     "expr": "clamp_max(gman:kube_workload_generation_lag:max{source_id=~\"$cluster\",namespace=~\"$namespace\",environment=~\"$environment\"} > 0, 1)",
+     "legendFormat": "generation {{workload_kind}} {{namespace}}/{{workload}}"
+    }
+   ]
+  },
+  {
+   "type": "timeseries",
+   "title": "Упавшие Job и DaemonSet не на своих узлах",
+   "description": "Job с условием Failed; число pod-ов DaemonSet на узлах, где их быть не должно.",
+   "datasource": {
+    "type": "prometheus",
+    "uid": "prometheus"
+   },
+   "gridPos": {
+    "x": 12,
+    "y": 59,
+    "w": 12,
+    "h": 8
+   },
+   "fieldConfig": {
+    "defaults": {
+     "unit": "short",
+     "min": 0,
+     "custom": {
+      "fillOpacity": 10,
+      "showPoints": "never",
+      "lineWidth": 1
+     },
+     "decimals": 0
+    },
+    "overrides": []
+   },
+   "options": {
+    "legend": {
+     "displayMode": "table",
+     "placement": "bottom",
+     "calcs": [
+      "lastNotNull",
+      "max"
+     ]
+    },
+    "tooltip": {
+     "mode": "multi",
+     "sort": "desc"
+    }
+   },
+   "targets": [
+    {
+     "datasource": {
+      "type": "prometheus",
+      "uid": "prometheus"
+     },
+     "refId": "A",
+     "expr": "max by (namespace, job_name) (kube_job_failed{condition=\"true\",source_id=~\"$cluster\",namespace=~\"$namespace\"}) == 1",
+     "legendFormat": "Job {{namespace}}/{{job_name}}"
+    },
+    {
+     "datasource": {
+      "type": "prometheus",
+      "uid": "prometheus"
+     },
+     "refId": "B",
+     "expr": "max by (namespace, daemonset) (kube_daemonset_status_number_misscheduled{source_id=~\"$cluster\",namespace=~\"$namespace\"}) > 0",
+     "legendFormat": "misscheduled DaemonSet {{namespace}}/{{daemonset}}"
+    }
+   ]
+  },
+  {
+   "type": "timeseries",
+   "title": "Узлы: Ready и всего",
+   "description": "По kube-state-metrics; Ready по inventory — карточка кластера и алерт GManK8sNodeNotReady.",
+   "datasource": {
+    "type": "prometheus",
+    "uid": "prometheus"
+   },
+   "gridPos": {
+    "x": 0,
+    "y": 67,
+    "w": 12,
+    "h": 8
+   },
+   "fieldConfig": {
+    "defaults": {
+     "unit": "short",
+     "min": 0,
+     "custom": {
+      "fillOpacity": 10,
+      "showPoints": "never",
+      "lineWidth": 1
+     },
+     "decimals": 0
+    },
+    "overrides": []
+   },
+   "options": {
+    "legend": {
+     "displayMode": "table",
+     "placement": "bottom",
+     "calcs": [
+      "lastNotNull",
+      "max"
+     ]
+    },
+    "tooltip": {
+     "mode": "multi",
+     "sort": "desc"
+    }
+   },
+   "targets": [
+    {
+     "datasource": {
+      "type": "prometheus",
+      "uid": "prometheus"
+     },
+     "refId": "A",
+     "expr": "sum by (source_id) (max by (source_id, node) (kube_node_status_condition{condition=\"Ready\",status=\"true\",source_id=~\"$cluster\"}))",
+     "legendFormat": "Ready {{source_id}}"
+    },
+    {
+     "datasource": {
+      "type": "prometheus",
+      "uid": "prometheus"
+     },
+     "refId": "B",
+     "expr": "count by (source_id) (max by (source_id, node) (kube_node_info{source_id=~\"$cluster\"}))",
+     "legendFormat": "всего {{source_id}}"
+    },
+    {
+     "datasource": {
+      "type": "prometheus",
+      "uid": "prometheus"
+     },
+     "refId": "C",
+     "expr": "sum by (source_id) (max by (source_id, node) (kube_node_spec_unschedulable{source_id=~\"$cluster\"}))",
+     "legendFormat": "cordon {{source_id}}"
+    }
+   ]
+  },
+  {
+   "type": "timeseries",
+   "title": "Pod-ы, которые не удается разместить",
+   "description": "Pending с причиной Unschedulable: нет подходящего узла по ресурсам, taints или affinity.",
+   "datasource": {
+    "type": "prometheus",
+    "uid": "prometheus"
+   },
+   "gridPos": {
+    "x": 12,
+    "y": 67,
+    "w": 12,
+    "h": 8
+   },
+   "fieldConfig": {
+    "defaults": {
+     "unit": "short",
+     "min": 0,
+     "custom": {
+      "fillOpacity": 10,
+      "showPoints": "never",
+      "lineWidth": 1
+     },
+     "decimals": 0
+    },
+    "overrides": []
+   },
+   "options": {
+    "legend": {
+     "displayMode": "table",
+     "placement": "bottom",
+     "calcs": [
+      "lastNotNull",
+      "max"
+     ]
+    },
+    "tooltip": {
+     "mode": "multi",
+     "sort": "desc"
+    }
+   },
+   "targets": [
+    {
+     "datasource": {
+      "type": "prometheus",
+      "uid": "prometheus"
+     },
+     "refId": "A",
+     "expr": "count by (namespace) (max by (source_id, namespace, pod) (kube_pod_status_unschedulable{source_id=~\"$cluster\",namespace=~\"$namespace\"}) == 1)",
+     "legendFormat": "{{namespace}}"
     }
    ]
   }

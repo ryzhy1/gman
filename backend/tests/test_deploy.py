@@ -1,4 +1,6 @@
 """Consistency of deploy/ files with the API (no YAML parser in the dev requirements: plain text checks)."""
+import json
+import re
 from pathlib import Path
 
 DEPLOY = Path(__file__).resolve().parents[2] / "deploy"
@@ -19,3 +21,68 @@ def test_stand_accepts_inventory_as_large_as_production():
         assert "client_max_body_size 20m;" in block[:block.index("}")]
     # /metrics is internal (Prometheus in the Compose network): neither proxy forwards it.
     assert "/metrics" not in stand and "location /metrics" not in prod and "location = /metrics" not in prod
+
+
+def dcgm_fields():
+    """Enabled fields of deploy/dcgm-counters.csv: name -> Prometheus type."""
+    fields = {}
+    for line in (DEPLOY / "dcgm-counters.csv").read_text().splitlines():
+        if line.strip() and not line.startswith("#"):
+            name, kind, _ = [part.strip() for part in line.split(",", 2)]
+            fields[name] = kind
+    return fields
+
+
+def test_dcgm_names_match_counters_csv():
+    # Through the OTel pipeline a DCGM counter gains the suffix _total (verified on otelcol-contrib 0.162.0);
+    # gauges keep the field name. Every DCGM name used by rules, API and dashboards must be enabled.
+    fields = dcgm_fields()
+    sources = [DEPLOY / "alerts/rules.yaml", DEPLOY.parent / "backend/app/metrics.py",
+               *sorted((DEPLOY / "grafana/dashboards").glob("*.json"))]
+    # Field 112 before DCGM 3.3: the rules and the host dashboard accept both names.
+    legacy = {"DCGM_FI_DEV_CLOCK_THROTTLE_REASONS": "DCGM_FI_DEV_CLOCKS_EVENT_REASONS"}
+    used = set()
+    for path in sources:
+        for name in re.findall(r"DCGM_FI_[A-Z0-9]+(?:_[A-Z0-9]+)*(?:_total)?", path.read_text()):
+            used.add(name)
+            if name.endswith("_total"):
+                assert fields.get(name[:-len("_total")]) == "counter", f"{path.name}: {name} is not a counter in the CSV"
+            elif name in legacy:
+                assert legacy[name] in fields
+            else:
+                assert fields.get(name) in ("gauge", "label"), f"{path.name}: {name} is not a gauge in the CSV"
+    for name in ("DCGM_FI_DEV_XID_ERRORS", "DCGM_FI_DEV_ECC_DBE_VOL_TOTAL_total", "DCGM_FI_DEV_ECC_SBE_VOL_TOTAL_total",
+                 "DCGM_FI_DEV_CLOCKS_EVENT_REASONS", "DCGM_FI_DEV_GPU_TEMP", "DCGM_FI_DEV_MEMORY_TEMP",
+                 "DCGM_FI_DEV_POWER_USAGE", "DCGM_FI_DEV_GPU_UTIL", "DCGM_FI_DEV_FB_USED", "DCGM_FI_DEV_ROW_REMAP_FAILURE"):
+        assert name in used
+
+
+def test_every_alert_has_a_runbook():
+    rules = set(re.findall(r"- alert: (\w+)", (DEPLOY / "alerts/rules.yaml").read_text()))
+    runbooks = set(re.findall(r"\['(GMan\w+)', ", (DEPLOY.parent / "frontend/src/alerts.tsx").read_text()))
+    assert rules and rules <= runbooks, rules - runbooks
+
+
+def test_portal_grafana_links_match_dashboard_variables():
+    # frontend/src: grafanaLink(<base>, '<uid>', {<variables>}, range).
+    variables = {}
+    for path in (DEPLOY / "grafana/dashboards").glob("*.json"):
+        board = json.loads(path.read_text())
+        variables[board["uid"]] = {v["name"] for v in board["templating"]["list"]}
+    calls = []
+    for path in (DEPLOY.parent / "frontend/src").glob("*.tsx"):
+        calls += re.findall(r"grafanaLink\(\w+, '([\w-]+)', \{([^}]*)\}", path.read_text())
+    assert {uid for uid, _ in calls} == {"gman-service", "gman-host", "gman-k8s"}
+    for uid, body in calls:
+        names = set(re.findall(r"(\w+):", body))
+        assert names and names <= variables[uid], (uid, names)
+
+
+def test_kube_state_metrics_allowlist_covers_rules_and_dashboards():
+    manifest = (DEPLOY / "kube-state-metrics.yaml").read_text()
+    allow = set(re.findall(r"kube_\w+", manifest[manifest.index("--metric-allowlist"):manifest.index("--metric-labels")]))
+    used = set()
+    for path in [DEPLOY / "alerts/rules.yaml", *(DEPLOY / "grafana/dashboards").glob("*.json")]:
+        # Not the gman:kube_* recording rules.
+        used |= set(re.findall(r"(?<![:\w])kube_[a-z_]+", path.read_text()))
+    assert used and used <= allow, used - allow

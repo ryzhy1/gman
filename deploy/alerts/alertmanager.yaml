@@ -3,8 +3,8 @@
 # (Alertmanager itself does not expand variables in its config).
 route:
   receiver: gman
-  # One notification per object: a node, a GPU or an instance.
-  group_by: [alertname, source_id, host_id, UUID, instance_id]
+  # One notification per object: a node, a GPU, an instance or a Kubernetes workload.
+  group_by: [alertname, source_id, host_id, UUID, instance_id, namespace, workload_kind, workload]
   # Prometheus re-sends firing alerts once a minute per rule group. After an Alertmanager restart, waiting
   # longer than that lets inhibiting alerts (node down) arrive before their children are notified.
   group_wait: 90s
@@ -28,10 +28,21 @@ inhibit_rules:
   - source_matchers: ['alertname="GManHostTelemetryAbsent"']
     target_matchers: ['alertname="GManGpuTelemetryAbsent"']
     equal: [host_id]
-  # The critical variant of the same alert replaces the warning one (XID, overheating).
+  # The critical variant of the same alert replaces the warning one (XID, overheating, replicas).
+  # Labels missing on both sides count as equal: the list must name every object label.
   - source_matchers: ['severity="critical"']
     target_matchers: ['severity="warning"']
-    equal: [alertname, host_id, UUID]
+    equal: [alertname, host_id, UUID, source_id, namespace, workload_kind, workload]
+  # Workloads (kube-state-metrics). A pending pod or a stuck rollout explains the missing replicas of the same
+  # workload; the critical «no replicas at all» is never hidden by them.
+  - source_matchers: ['alertname=~"GManWorkloadPodsPending|GManWorkloadRolloutStuck"']
+    target_matchers: ['alertname="GManWorkloadReplicasUnavailable"', 'severity="warning"']
+    equal: [source_id, namespace, workload_kind, workload]
+  # A NotReady node leaves a pod of every DaemonSet unavailable: one node alert instead of one per DaemonSet.
+  # Deployments and StatefulSets are not suppressed: their replicas should move to other nodes.
+  - source_matchers: ['alertname="GManK8sNodeNotReady"']
+    target_matchers: ['alertname="GManWorkloadReplicasUnavailable"', 'workload_kind="DaemonSet"']
+    equal: [source_id]
   # CrashLoopBackOff already explains the restarts.
   - source_matchers: ['alertname="GManInstanceCrashLoopBackOff"']
     target_matchers: ['alertname="GManInstanceRestartLoop"']

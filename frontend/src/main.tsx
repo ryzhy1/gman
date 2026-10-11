@@ -6,7 +6,7 @@ import { ConfigView, History, InstanceTable, placeInstances, type Placed } from 
 import { ConfigHistory } from './configs';
 import { ServiceEditor } from './edit';
 import { ClusterCard, HostCard } from './hardware';
-import { date, stale, syncServerClock } from './format';
+import { date, grafanaLink, stale, syncServerClock } from './format';
 import { Resources } from './resources';
 import './style.css';
 
@@ -165,7 +165,9 @@ function App() {
   const openService = (id: string) => { if (data?.services.some(s => s.id === id)) { setPage('Сервисы'); setSelected(id); setTab('Обзор'); } };
   const open = (p: string) => { setPage(p); setSelected(''); setQuery(''); };
   const grafana = data?.grafana_url ?? '';
-  const serviceDashboard = service && grafana ? `${grafana}/d/gman-service/gman-service?var-service=${encodeURIComponent(service.id)}` : '';
+  // The card's environment and period travel to the dashboard; an explicit catalog link is used as is.
+  const serviceDashboard = service
+    ? grafanaLink(grafana, 'gman-service', { service: service.id, environment: environment === ALL ? null : environment }, range) : '';
   const links = service ? { repository: service.repository, grafana: service.grafana || serviceDashboard, splunk: service.splunk || splunk?.service || '', bamboo: service.bamboo } : null;
 
   return <div className="shell">
@@ -264,8 +266,8 @@ function App() {
 
           {page === 'Серверы и GPU' && <div className="host-grid">
             {hostSources.map(s => s.source_type === 'kubernetes-cluster'
-              ? <ClusterCard key={s.source_id} source={s} sources={data.sources} metrics={metrics} onService={openService} />
-              : <HostCard key={s.source_id} source={s} metrics={metrics} grafanaUrl={grafana} onService={openService} />)}
+              ? <ClusterCard key={s.source_id} source={s} sources={data.sources} metrics={metrics} grafanaUrl={grafana} range={range} onService={openService} />
+              : <HostCard key={s.source_id} source={s} metrics={metrics} grafanaUrl={grafana} range={range} onService={openService} />)}
             {!data.sources.length && <section className="empty">Источники еще не подключены. Начните с одного Docker-хоста или Kubernetes-кластера.</section>}
           </div>}
 

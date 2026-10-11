@@ -119,6 +119,10 @@ Events не используются; доступ к Docker — через Dock
    127.0.0.1:9400. Атрибут host.id = GMAN_HOST_ID.
 2. Kubernetes: DaemonSet deploy/otel-k8s.yaml — host_metrics узла, kubelet_stats,
    k8s_attributes, DCGM на узле; host.id = имя узла, k8s.cluster.name = source_id кластера.
+   kube-state-metrics (deploy/kube-state-metrics.yaml, v2.20.0, list/watch только pods,
+   nodes, deployments, statefulsets, daemonsets, replicasets, jobs; allowlist метрик)
+   забирает Collector узла его pod-а, отдельным pipeline без host.id и k8s_attributes, с
+   метками source_id и k8s_cluster_name кластера.
 3. Узловые Collector отправляют OTLP gRPC в gateway (в production — mTLS, порт 4317).
 4. Gateway (memory_limiter, batch) отдает метрики через prometheus exporter
    (resource_to_telemetry_conversion; ряды молчащих источников удаляются через 90 с).
@@ -130,8 +134,10 @@ Events не используются; доступ к Docker — через Dock
 Логи приложений не собираются: портал строит ссылки на поиск в Splunk
 (`GET /api/logs/splunk`, шаблон SPL с экранированием значений). Трейсы не включены.
 
-Отличие от проекта: kube-state-metrics и отдельный экземпляр Collector для метрик кластера
-не развернуты; состояние Kubernetes-объектов (ready, причины, рестарты) берется из inventory.
+Отличие от проекта: отдельного экземпляра Collector для метрик кластера нет —
+kube-state-metrics читает Collector DaemonSet-а на узле его pod-а. Состояние экземпляров
+(причины, рестарты) по-прежнему берется из inventory, состояние workloads (реплики,
+rollout, Pending, Job) — из kube-state-metrics.
 
 ### Алерты
 
@@ -143,14 +149,21 @@ API /metrics ──┘                                                   │
   экземпляры, GPU из nvidia-smi)
 ```
 
+Через OTel gateway приходят и метрики хостов и DCGM, и kube-state-metrics кластеров.
+
 API отдает на `/metrics` состояние inventory (backend/app/exposition.py): время последнего
 снимка источника, число ошибок сбора, Ready узлов, рестарты и причины состояния экземпляров
 (только из фиксированного списка), температуру/ECC/причины троттлинга GPU из nvidia-smi
 (не старше 5 минут). Путь не проксируется nginx и читается Prometheus внутри сети Compose.
-Recording rules объединяют DCGM и nvidia-smi (DCGM важнее). 18 алертов: узел, источник,
-телеметрия и gateway молчат, узел Kubernetes NotReady, GPU XID/ECC/перегрев/троттлинг,
-OOMKilled, CrashLoopBackOff, частые перезапуски, образ не скачивается. Inhibition: упавший
-узел скрывает алерты своих GPU и контейнеров, молчащий источник — алерты своих экземпляров.
+Recording rules объединяют DCGM и nvidia-smi (DCGM важнее), выбирают порог перегрева по
+модели GPU (таблица gman-gpu-thresholds, по умолчанию 85/90 °C) и связывают pod-ы
+kube-state-metrics с workload (Deployment через ReplicaSet) и сервисом (метки gman.* pod-ов).
+24 алерта: узел, источник, телеметрия, gateway и kube-state-metrics молчат, узел Kubernetes
+NotReady, GPU XID/ECC/перегрев/троттлинг, OOMKilled, CrashLoopBackOff, частые перезапуски,
+образ не скачивается, недоступные реплики, застрявший rollout, Pending, упавшая Job,
+DaemonSet не на своих узлах. Inhibition: упавший узел скрывает алерты своих GPU и
+контейнеров, молчащий источник — алерты своих экземпляров, NotReady узла — недоступные
+pod-ы DaemonSet-ов кластера, Pending/rollout — warning о репликах того же workload.
 Runbook — страница портала `#alerts/<имя>`. Silence — в UI Alertmanager.
 
 ### Вход и доступ
@@ -320,7 +333,8 @@ CPU контейнера — в ядрах (1.0 = одно ядро), проце
 
 Отличие от проекта: отдельных экранов «состояние интеграций» и списка «последние деплои»
 нет (деплои — в истории); открытые проблемы сервиса на карточке не показываются (только
-на странице «Алерты»); ссылка в Grafana передает service_id, но не окружение и период.
+на странице «Алерты»). Ссылки в Grafana передают сервис (хост, кластер), окружение фильтра
+портала и период вкладки «Ресурсы» (var-*, from/to).
 
 ## Метрики
 
@@ -334,7 +348,8 @@ CPU контейнера — в ядрах (1.0 = одно ядро), проце
 | Контейнеры Kubernetes | kubelet_stats | CPU, working set, сеть pod-а, доля от limits/requests |
 | Состояние экземпляров | inventory | status, health, ready, причина, exit code, рестарты, прошлое завершение |
 | Узлы Kubernetes | inventory | Ready, pressure, cordon, taints, capacity/allocatable, сумма requests CPU/RAM/GPU |
-| GPU NVIDIA | DCGM Exporter | загрузка, copy util, VRAM, температуры, мощность, частоты, XID; ECC и throttle reasons при включении в CSV |
+| GPU NVIDIA | DCGM Exporter (deploy/dcgm-counters.csv) | загрузка, copy util, VRAM, температуры и slowdown, мощность, энергия, частоты, XID, ECC SBE/DBE, переназначение строк, причины снижения частот, PCIe replay |
+| Workloads Kubernetes | kube-state-metrics | желаемые/доступные реплики, generation, Progressing, фаза и владелец pod-ов, Unschedulable, Failed у Job, misscheduled DaemonSet, Ready узлов |
 | GPU NVIDIA | nvidia-smi (inventory) | модель, PCI, драйвер, pstate, загрузка, VRAM, температуры, мощность/лимит, частоты, вентилятор, throttle reasons, ECC, PCIe, MIG, persistence, процессы с VRAM |
 | GPU AMD | sysfs (inventory) | busy, VRAM, датчики edge/junction/mem, частоты, вентилятор (локальная проверка) |
 | Pipeline | Prometheus, /metrics | up gateway и API, время последнего снимка и ошибки сбора источников |
@@ -345,8 +360,8 @@ CPU контейнера — в ядрах (1.0 = одно ядро), проце
 через device plugin.
 
 Не собираются: PSI, OOM-события как метрика, SMART/NVMe, hwmon хоста, BMC/IPMI/Redfish,
-PCIe/NVLink-счетчики, retired pages, SM/tensor profiling, метрики MIG-инстансов,
-kube-state-metrics (desired/available replicas, Pending, rollout).
+NVLink-счетчики, retired pages, SM/tensor profiling, метрики MIG-инстансов, прочие
+объекты kube-state-metrics (Services, PVC, HPA, CronJob, ResourceQuota).
 
 ## Сбор, хранение и надежность
 
@@ -454,7 +469,7 @@ Prometheus и Grafana не бэкапятся: дашборды и datasource о
 | 4. Bamboo: успешный/неудачный деплой, инициатор, commit, digest; ручной запуск без Bamboo и меток | Endpoint и скрипт сделаны, проверены против локального API; настоящий Bamboo и корреляция с runtime — нет |
 | 5. Каталог, карточки, исторические графики, внешние ссылки | Сделано (Grafana, Splunk); браузерная проверка новых страниц не завершена |
 | 6. Остальные серверы, SSO и роли, разрыв связи, повторная доставка, устаревание, рестарт агента, backup/restore | SSO и роли — против mock IdP; надежность агента — тестами; backup/restore — на PostgreSQL 17 вне контейнера; на реальной инфраструктуре не проверено |
-| Алерты (вне исходного плана) | Правила проверены promtool, доставка — локальными бинарными релизами; на реальных DCGM/SMTP нет |
+| Алерты (вне исходного плана) | Правила проверены promtool, доставка и inhibition — локальными бинарными релизами; workloads — на kube-state-metrics v2.20.0 против локального kube-apiserver; на реальных DCGM/кластере/SMTP нет |
 
 Приемка первой версии (ни один пункт пока не подтвержден на шести серверах): все
 согласованные workloads видимы; реплики и версии не смешиваются; время хранится в UTC,

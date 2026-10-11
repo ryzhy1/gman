@@ -1,11 +1,16 @@
 # GMan alert rules for Prometheus. Tests: deploy/alerts/rules.test.yaml (promtool test rules).
 # Sources of series:
 #   system_*, DCGM_FI_*  telemetry through the OTel gateway (deploy/otel-*.yaml); host_id = GMAN_HOST_ID or node name.
+#                        DCGM fields as enabled in deploy/dcgm-counters.csv; counters carry the suffix _total.
+#   kube_*               kube-state-metrics (deploy/kube-state-metrics.yaml) through the cluster's node Collector;
+#                        source_id = cluster (K8S_CLUSTER_NAME), no host_id.
 #   gman_*               inventory state from the API's /metrics (backend/app/exposition.py).
+# The gateway re-exports `up` of the Collectors' own scrapes (DCGM, kube-state-metrics) with exported_job set:
+# the gateway's own target is up{job="otel", exported_job=""}.
 # Labels used by Alertmanager (deploy/alerts/alertmanager.yaml):
 #   severity  critical | warning
-#   scope     pipeline | node | gpu | instance: inhibition suppresses gpu/instance alerts of a node that is down
-#             (GManNodeDown, GManK8sNodeNotReady) and instance alerts of a silent inventory source.
+#   scope     pipeline | node | gpu | instance | workload: inhibition suppresses gpu/instance alerts of a node that
+#             is down (GManNodeDown, GManK8sNodeNotReady) and instance alerts of a silent inventory source.
 # runbook_url opens the portal's alerts page; GMAN_PORTAL_URL reaches it as external label gman_portal.
 groups:
   - name: gman-recording
@@ -29,10 +34,49 @@ groups:
       - record: gman:host_telemetry_missing:max
         expr: gman:host_expected:max unless on (host_id) max by (host_id) (system_cpu_load_average_1m)
 
+  # Overheating thresholds of GManGpuOverheating per GPU model. A GPU of a model without a row uses 85 °C
+  # (warning) and 90 °C (critical). model is the exact name as DCGM (label modelName) and nvidia-smi report it.
+  # Values: warning = GPU Max Operating Temp, critical = GPU Slowdown Temp - 2 from
+  # `nvidia-smi -q -d TEMPERATURE` (DCGM_FI_DEV_SLOWDOWN_TEMP on the «Хост» dashboard). Check them on the
+  # pilot's cards; add a model with two rules (warning and critical).
+  - name: gman-gpu-thresholds
+    rules:
+      - record: gman:gpu_model_temperature_threshold_celsius
+        expr: vector(85)
+        labels: {model: NVIDIA A100-SXM4-80GB, severity: warning}
+      - record: gman:gpu_model_temperature_threshold_celsius
+        expr: vector(87)
+        labels: {model: NVIDIA A100-SXM4-80GB, severity: critical}
+      - record: gman:gpu_model_temperature_threshold_celsius
+        expr: vector(85)
+        labels: {model: NVIDIA A100-SXM4-40GB, severity: warning}
+      - record: gman:gpu_model_temperature_threshold_celsius
+        expr: vector(87)
+        labels: {model: NVIDIA A100-SXM4-40GB, severity: critical}
+      # Model of each GPU: DCGM first, nvidia-smi from inventory where DCGM is absent. One series per GPU.
+      - record: gman:gpu_model:info
+        expr: |
+          topk by (host_id, UUID) (1,
+            group by (host_id, UUID, model) (label_replace(DCGM_FI_DEV_GPU_TEMP, "model", "$1", "modelName", "(.+)"))
+            or on (host_id, UUID) group by (host_id, UUID, model) (gman_gpu_temperature_celsius{model!=""}))
+      # Threshold of every GPU with a temperature: the model's row, otherwise the default.
+      - record: gman:gpu_temperature_threshold_celsius
+        expr: |
+          max by (host_id, UUID) (
+            gman:gpu_model:info * on (model) group_left () gman:gpu_model_temperature_threshold_celsius{severity="warning"})
+          or max by (host_id, UUID) (gman:gpu_temperature_celsius:max) * 0 + 85
+        labels: {severity: warning}
+      - record: gman:gpu_temperature_threshold_celsius
+        expr: |
+          max by (host_id, UUID) (
+            gman:gpu_model:info * on (model) group_left () gman:gpu_model_temperature_threshold_celsius{severity="critical"})
+          or max by (host_id, UUID) (gman:gpu_temperature_celsius:max) * 0 + 90
+        labels: {severity: critical}
+
   - name: gman-pipeline
     rules:
       - alert: GManTelemetryGatewayDown
-        expr: up{job="otel"} == 0
+        expr: up{job="otel", exported_job=""} == 0
         for: 2m
         labels: {severity: critical, scope: pipeline}
         annotations:
@@ -62,7 +106,7 @@ groups:
           runbook_url: '{{ $externalLabels.gman_portal }}/#alerts/GManSourceSilent'
       # Not raised while the gateway itself is down: GManTelemetryGatewayDown covers that case.
       - alert: GManHostTelemetryAbsent
-        expr: gman:host_telemetry_missing:max and on () (up{job="otel"} == 1)
+        expr: gman:host_telemetry_missing:max and on () (up{job="otel", exported_job=""} == 1)
         for: 5m
         labels: {severity: warning, scope: node}
         annotations:
@@ -100,7 +144,7 @@ groups:
         expr: |
           max by (host_id, UUID) (max_over_time(DCGM_FI_DEV_GPU_TEMP[6h]))
           unless on (host_id, UUID) max by (host_id, UUID) (DCGM_FI_DEV_GPU_TEMP)
-          and on () (up{job="otel"} == 1)
+          and on () (up{job="otel", exported_job=""} == 1)
         for: 5m
         labels: {severity: warning, scope: gpu}
         annotations:
@@ -130,7 +174,7 @@ groups:
           runbook_url: '{{ $externalLabels.gman_portal }}/#alerts/GManGpuXidError'
       - alert: GManGpuEccUncorrectable
         expr: |
-          max by (host_id, UUID) (increase(DCGM_FI_DEV_ECC_DBE_VOL_TOTAL[10m]) > 0)
+          max by (host_id, UUID) (increase(DCGM_FI_DEV_ECC_DBE_VOL_TOTAL_total[10m]) > 0)
           or max by (host_id, UUID) (increase(gman_gpu_ecc_uncorrected_errors[10m]) > 0)
           or max by (host_id, UUID) (DCGM_FI_DEV_ROW_REMAP_FAILURE > 0)
         labels: {severity: critical, scope: gpu}
@@ -139,29 +183,32 @@ groups:
           description: Рост double-bit ECC (DCGM или nvidia-smi) либо сбой переназначения строк памяти.
           runbook_url: '{{ $externalLabels.gman_portal }}/#alerts/GManGpuEccUncorrectable'
       - alert: GManGpuEccCorrectableHigh
-        expr: max by (host_id, UUID) (increase(DCGM_FI_DEV_ECC_SBE_VOL_TOTAL[1h])) > 100
+        expr: max by (host_id, UUID) (increase(DCGM_FI_DEV_ECC_SBE_VOL_TOTAL_total[1h])) > 100
         labels: {severity: warning, scope: gpu}
         annotations:
           summary: 'Частые исправимые ошибки ECC на GPU {{ $labels.UUID }} ({{ $labels.host_id }})'
           description: 'Более 100 single-bit ECC за час ({{ $value | humanize }}). Предвестник деградации памяти.'
           runbook_url: '{{ $externalLabels.gman_portal }}/#alerts/GManGpuEccCorrectableHigh'
-      # Thresholds are a generic default for data center GPUs; the slowdown temperature is model specific
-      # (nvidia-smi -q -d TEMPERATURE). Adjust after the pilot measures the real fleet.
+      # Thresholds per GPU: the model's row in group gman-gpu-thresholds, otherwise 85/90 °C.
       - alert: GManGpuOverheating
-        expr: gman:gpu_temperature_celsius:max > 85
+        expr: gman:gpu_temperature_celsius:max > on (host_id, UUID) gman:gpu_temperature_threshold_celsius{severity="warning"}
         for: 5m
         labels: {severity: warning, scope: gpu}
         annotations:
           summary: 'GPU {{ $labels.UUID }} на {{ $labels.host_id }}: {{ $value }} °C'
-          description: Температура GPU выше 85 °C пять минут.
+          description: >-
+            Температура GPU выше {{ with printf "gman:gpu_temperature_threshold_celsius{severity='warning',host_id='%s',UUID='%s'}" $labels.host_id $labels.UUID | query }}{{ . | first | value }}{{ end }} °C
+            пять минут.
           runbook_url: '{{ $externalLabels.gman_portal }}/#alerts/GManGpuOverheating'
       - alert: GManGpuOverheating
-        expr: gman:gpu_temperature_celsius:max > 90
+        expr: gman:gpu_temperature_celsius:max > on (host_id, UUID) gman:gpu_temperature_threshold_celsius{severity="critical"}
         for: 2m
         labels: {severity: critical, scope: gpu}
         annotations:
           summary: 'GPU {{ $labels.UUID }} на {{ $labels.host_id }}: {{ $value }} °C'
-          description: Температура GPU выше 90 °C, близко к аппаратному снижению частот.
+          description: >-
+            Температура GPU выше {{ with printf "gman:gpu_temperature_threshold_celsius{severity='critical',host_id='%s',UUID='%s'}" $labels.host_id $labels.UUID | query }}{{ . | first | value }}{{ end }} °C,
+            близко к аппаратному снижению частот.
           runbook_url: '{{ $externalLabels.gman_portal }}/#alerts/GManGpuOverheating'
       - alert: GManGpuMemoryOverheating
         expr: max by (host_id, UUID) (DCGM_FI_DEV_MEMORY_TEMP) > 95
@@ -231,3 +278,217 @@ groups:
           summary: '{{ $labels.instance_name }} не может скачать образ'
           description: 'Pod {{ $labels.namespace }}/{{ $labels.instance_name }}: {{ $labels.reason }} дольше 10 минут.'
           runbook_url: '{{ $externalLabels.gman_portal }}/#alerts/GManInstanceImagePullFailing'
+
+  # Kubernetes workloads from kube-state-metrics. Object key: source_id (cluster), namespace, workload_kind,
+  # workload; service_id/environment come from the pod labels gman.service/gman.environment of the workload's
+  # pods (absent when the pods carry none). Recording rules come first: rules of a group are evaluated in order,
+  # so the alerts below always see the join tables of the same evaluation.
+  # Every query aggregates by the object key: series of the old and the new kube-state-metrics pod overlap
+  # for up to 90 s after it moves to another node.
+  - name: gman-workloads
+    rules:
+      # Workload of every pod: a Deployment through its ReplicaSet, the controller owner otherwise
+      # (StatefulSet, DaemonSet, Job, a ReplicaSet of its own, custom controllers), the pod itself without one.
+      - record: gman:kube_pod_workload:info
+        expr: |
+          topk by (source_id, namespace, pod) (1,
+            label_replace(
+              group by (source_id, namespace, pod, workload) (
+                group by (source_id, namespace, pod, replicaset) (
+                  label_replace(kube_pod_owner{owner_kind="ReplicaSet"}, "replicaset", "$1", "owner_name", "(.+)"))
+                * on (source_id, namespace, replicaset) group_left (workload)
+                topk by (source_id, namespace, replicaset) (1, group by (source_id, namespace, replicaset, workload) (
+                  label_replace(kube_replicaset_owner{owner_kind="Deployment"}, "workload", "$1", "owner_name", "(.+)")))),
+              "workload_kind", "Deployment", "workload", ".*")
+            or on (source_id, namespace, pod)
+            group by (source_id, namespace, pod, workload_kind, workload) (
+              label_replace(label_replace(kube_pod_owner{owner_kind!=""},
+                "workload_kind", "$1", "owner_kind", "(.+)"), "workload", "$1", "owner_name", "(.+)"))
+            or on (source_id, namespace, pod)
+            label_replace(label_replace(group by (source_id, namespace, pod) (kube_pod_owner),
+              "workload", "$1", "pod", "(.+)"), "workload_kind", "Pod", "workload", ".*"))
+      - record: gman:kube_pod_service:info
+        expr: |
+          topk by (source_id, namespace, pod) (1,
+            group by (source_id, namespace, pod, service_id, environment) (
+              label_replace(label_replace(kube_pod_labels{label_gman_service!=""},
+                "service_id", "$1", "label_gman_service", "(.+)"), "environment", "$1", "label_gman_environment", "(.*)")))
+      # One series per workload, with the service of its pods when known. Workloads without pods are listed too,
+      # so joins with this table never drop an alert.
+      - record: gman:kube_workload_service:info
+        expr: |
+          group by (source_id, namespace, workload_kind, workload, service_id, environment) (
+            topk by (source_id, namespace, workload_kind, workload) (1,
+              group by (source_id, namespace, workload_kind, workload, service_id, environment) (
+                gman:kube_pod_workload:info
+                * on (source_id, namespace, pod) group_left (service_id, environment) gman:kube_pod_service:info))
+            or on (source_id, namespace, workload_kind, workload)
+            group by (source_id, namespace, workload_kind, workload) (gman:kube_pod_workload:info)
+            or on (source_id, namespace, workload_kind, workload)
+            label_replace(label_replace(group by (source_id, namespace, deployment) (kube_deployment_metadata_generation),
+              "workload", "$1", "deployment", "(.+)"), "workload_kind", "Deployment", "workload", ".*")
+            or on (source_id, namespace, workload_kind, workload)
+            label_replace(label_replace(group by (source_id, namespace, statefulset) (kube_statefulset_metadata_generation),
+              "workload", "$1", "statefulset", "(.+)"), "workload_kind", "StatefulSet", "workload", ".*")
+            or on (source_id, namespace, workload_kind, workload)
+            label_replace(label_replace(group by (source_id, namespace, daemonset) (kube_daemonset_metadata_generation),
+              "workload", "$1", "daemonset", "(.+)"), "workload_kind", "DaemonSet", "workload", ".*")
+            or on (source_id, namespace, workload_kind, workload)
+            label_replace(label_replace(group by (source_id, namespace, job_name) (kube_job_owner),
+              "workload", "$1", "job_name", "(.+)"), "workload_kind", "Job", "workload", ".*"))
+      # Desired and available replicas of Deployments, StatefulSets (ready) and DaemonSets (scheduled nodes).
+      - record: gman:kube_workload_replicas_desired:max
+        expr: |
+          max by (source_id, namespace, workload_kind, workload, service_id, environment) (
+            (
+              label_replace(label_replace(max by (source_id, namespace, deployment) (kube_deployment_spec_replicas),
+                "workload", "$1", "deployment", "(.+)"), "workload_kind", "Deployment", "workload", ".*")
+              or label_replace(label_replace(max by (source_id, namespace, statefulset) (kube_statefulset_replicas),
+                "workload", "$1", "statefulset", "(.+)"), "workload_kind", "StatefulSet", "workload", ".*")
+              or label_replace(label_replace(max by (source_id, namespace, daemonset) (kube_daemonset_status_desired_number_scheduled),
+                "workload", "$1", "daemonset", "(.+)"), "workload_kind", "DaemonSet", "workload", ".*")
+            )
+            * on (source_id, namespace, workload_kind, workload) group_left (service_id, environment) gman:kube_workload_service:info)
+      - record: gman:kube_workload_replicas_available:max
+        expr: |
+          max by (source_id, namespace, workload_kind, workload, service_id, environment) (
+            (
+              label_replace(label_replace(max by (source_id, namespace, deployment) (kube_deployment_status_replicas_available),
+                "workload", "$1", "deployment", "(.+)"), "workload_kind", "Deployment", "workload", ".*")
+              or label_replace(label_replace(max by (source_id, namespace, statefulset) (kube_statefulset_status_replicas_ready),
+                "workload", "$1", "statefulset", "(.+)"), "workload_kind", "StatefulSet", "workload", ".*")
+              or label_replace(label_replace(max by (source_id, namespace, daemonset) (kube_daemonset_status_number_available),
+                "workload", "$1", "daemonset", "(.+)"), "workload_kind", "DaemonSet", "workload", ".*")
+            )
+            * on (source_id, namespace, workload_kind, workload) group_left (service_id, environment) gman:kube_workload_service:info)
+      # metadata.generation not yet processed by the controller (paused Deployments excluded).
+      - record: gman:kube_workload_generation_lag:max
+        expr: |
+          max by (source_id, namespace, workload_kind, workload, service_id, environment) (
+            (
+              label_replace(label_replace(
+                max by (source_id, namespace, deployment) (kube_deployment_metadata_generation)
+                - max by (source_id, namespace, deployment) (kube_deployment_status_observed_generation)
+                unless on (source_id, namespace, deployment) (max by (source_id, namespace, deployment) (kube_deployment_spec_paused) == 1),
+                "workload", "$1", "deployment", "(.+)"), "workload_kind", "Deployment", "workload", ".*")
+              or label_replace(label_replace(
+                max by (source_id, namespace, statefulset) (kube_statefulset_metadata_generation)
+                - max by (source_id, namespace, statefulset) (kube_statefulset_status_observed_generation),
+                "workload", "$1", "statefulset", "(.+)"), "workload_kind", "StatefulSet", "workload", ".*")
+              or label_replace(label_replace(
+                max by (source_id, namespace, daemonset) (kube_daemonset_metadata_generation)
+                - max by (source_id, namespace, daemonset) (kube_daemonset_status_observed_generation),
+                "workload", "$1", "daemonset", "(.+)"), "workload_kind", "DaemonSet", "workload", ".*")
+            )
+            * on (source_id, namespace, workload_kind, workload) group_left (service_id, environment) gman:kube_workload_service:info)
+
+      # The cluster sent kube-state-metrics series in the last 6 hours, but none now. Not raised while the
+      # gateway itself is down (GManTelemetryGatewayDown).
+      - alert: GManKubeStateMetricsAbsent
+        expr: |
+          max by (source_id) (max_over_time(kube_node_info[6h]))
+          unless on (source_id) max by (source_id) (kube_node_info)
+          and on () (up{job="otel", exported_job=""} == 1)
+        for: 5m
+        labels: {severity: warning, scope: pipeline}
+        annotations:
+          summary: 'Нет метрик kube-state-metrics кластера {{ $labels.source_id }}'
+          description: >-
+            Алерты workloads этого кластера (реплики, rollout, Pending, Job, DaemonSet) не вычисляются:
+            остановлен kube-state-metrics или Collector его узла.
+          runbook_url: '{{ $externalLabels.gman_portal }}/#alerts/GManKubeStateMetricsAbsent'
+      - alert: GManWorkloadReplicasUnavailable
+        expr: |
+          gman:kube_workload_replicas_desired:max - gman:kube_workload_replicas_available:max > 0
+        for: 10m
+        labels: {severity: warning, scope: workload}
+        annotations:
+          summary: '{{ $labels.workload_kind }} {{ $labels.namespace }}/{{ $labels.workload }}: недоступно реплик — {{ $value }}'
+          description: >-
+            Кластер {{ $labels.source_id }}{{ with $labels.service_id }}, сервис {{ . }}{{ end }}: часть реплик
+            не готова дольше 10 минут.
+          runbook_url: '{{ $externalLabels.gman_portal }}/#alerts/GManWorkloadReplicasUnavailable'
+      - alert: GManWorkloadReplicasUnavailable
+        expr: |
+          gman:kube_workload_replicas_desired:max > 0
+          and gman:kube_workload_replicas_available:max == 0
+        for: 5m
+        labels: {severity: critical, scope: workload}
+        annotations:
+          summary: '{{ $labels.workload_kind }} {{ $labels.namespace }}/{{ $labels.workload }}: нет доступных реплик'
+          description: >-
+            Кластер {{ $labels.source_id }}{{ with $labels.service_id }}, сервис {{ . }}{{ end }}: ни одна из
+            {{ $value }} реплик не готова дольше 5 минут.
+          runbook_url: '{{ $externalLabels.gman_portal }}/#alerts/GManWorkloadReplicasUnavailable'
+      # progressDeadlineSeconds (10 minutes by default) has already passed when the condition turns false.
+      - alert: GManWorkloadRolloutStuck
+        expr: |
+          max by (source_id, namespace, workload_kind, workload, service_id, environment, reason) (
+            label_replace(label_replace(
+              max by (source_id, namespace, deployment, reason) (kube_deployment_status_condition{condition="Progressing", status="false"}) == 1,
+              "workload", "$1", "deployment", "(.+)"), "workload_kind", "Deployment", "workload", ".*")
+            * on (source_id, namespace, workload_kind, workload) group_left (service_id, environment) gman:kube_workload_service:info)
+        labels: {severity: warning, scope: workload}
+        annotations:
+          summary: '{{ $labels.workload_kind }} {{ $labels.namespace }}/{{ $labels.workload }}: rollout не продвигается'
+          description: >-
+            Кластер {{ $labels.source_id }}{{ with $labels.service_id }}, сервис {{ . }}{{ end }}: условие
+            Progressing ложно ({{ $labels.reason }}) — новые pod-ы не стали доступными за progressDeadlineSeconds.
+          runbook_url: '{{ $externalLabels.gman_portal }}/#alerts/GManWorkloadRolloutStuck'
+      - alert: GManWorkloadRolloutStuck
+        expr: gman:kube_workload_generation_lag:max > 0
+        for: 15m
+        labels: {severity: warning, scope: workload, reason: GenerationNotObserved}
+        annotations:
+          summary: '{{ $labels.workload_kind }} {{ $labels.namespace }}/{{ $labels.workload }}: rollout не продвигается'
+          description: >-
+            Кластер {{ $labels.source_id }}{{ with $labels.service_id }}, сервис {{ . }}{{ end }}: контроллер
+            15 минут не обработал изменение спецификации (metadata.generation больше status.observedGeneration).
+          runbook_url: '{{ $externalLabels.gman_portal }}/#alerts/GManWorkloadRolloutStuck'
+      # A pod never returns to Pending: created more than 10 minutes ago and Pending now means Pending that long.
+      - alert: GManWorkloadPodsPending
+        expr: |
+          count by (source_id, namespace, workload_kind, workload) (
+            gman:kube_pod_workload:info
+            and on (source_id, namespace, pod) (max by (source_id, namespace, pod) (kube_pod_status_phase{phase="Pending"}) == 1)
+            and on (source_id, namespace, pod) (time() - max by (source_id, namespace, pod) (kube_pod_created) > 600))
+          * on (source_id, namespace, workload_kind, workload) group_left (service_id, environment) gman:kube_workload_service:info
+        for: 1m
+        labels: {severity: warning, scope: workload}
+        annotations:
+          summary: '{{ $labels.workload_kind }} {{ $labels.namespace }}/{{ $labels.workload }}: pod-ов в Pending — {{ $value }}'
+          description: >-
+            Кластер {{ $labels.source_id }}{{ with $labels.service_id }}, сервис {{ . }}{{ end }}: pod-ы не запущены
+            дольше 10 минут — не хватает ресурсов, taints/affinity, PVC или образ.
+          runbook_url: '{{ $externalLabels.gman_portal }}/#alerts/GManWorkloadPodsPending'
+      # Failed condition: backoffLimit or activeDeadlineSeconds exceeded. Stays until the Job is deleted
+      # (for CronJob runs — by failedJobsHistoryLimit).
+      - alert: GManJobFailed
+        expr: |
+          max by (source_id, namespace, workload_kind, workload, service_id, environment) (
+            label_replace(label_replace(
+              max by (source_id, namespace, job_name) (kube_job_failed{condition="true"}) == 1,
+              "workload", "$1", "job_name", "(.+)"), "workload_kind", "Job", "workload", ".*")
+            * on (source_id, namespace, workload_kind, workload) group_left (service_id, environment) gman:kube_workload_service:info)
+        labels: {severity: warning, scope: workload}
+        annotations:
+          summary: 'Job {{ $labels.namespace }}/{{ $labels.workload }} завершилась ошибкой'
+          description: >-
+            Кластер {{ $labels.source_id }}{{ with $labels.service_id }}, сервис {{ . }}{{ end }}: исчерпаны
+            попытки (backoffLimit) или время (activeDeadlineSeconds).
+          runbook_url: '{{ $externalLabels.gman_portal }}/#alerts/GManJobFailed'
+      - alert: GManDaemonSetMisscheduled
+        expr: |
+          max by (source_id, namespace, workload_kind, workload, service_id, environment) (
+            label_replace(label_replace(
+              max by (source_id, namespace, daemonset) (kube_daemonset_status_number_misscheduled) > 0,
+              "workload", "$1", "daemonset", "(.+)"), "workload_kind", "DaemonSet", "workload", ".*")
+            * on (source_id, namespace, workload_kind, workload) group_left (service_id, environment) gman:kube_workload_service:info)
+        for: 15m
+        labels: {severity: warning, scope: workload}
+        annotations:
+          summary: 'DaemonSet {{ $labels.namespace }}/{{ $labels.workload }}: {{ $value }} pod-ов на неподходящих узлах'
+          description: >-
+            Кластер {{ $labels.source_id }}{{ with $labels.service_id }}, сервис {{ . }}{{ end }}: pod-ы DaemonSet
+            работают на узлах, где по nodeSelector/affinity/taints их быть не должно.
+          runbook_url: '{{ $externalLabels.gman_portal }}/#alerts/GManDaemonSetMisscheduled'

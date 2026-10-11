@@ -1,0 +1,115 @@
+# kube-state-metrics for workload alerts (deploy/alerts/rules.yaml, group gman-workloads) and the
+# «Workloads» row of the GMan · Kubernetes dashboard. Apply after deploy/otel-k8s.yaml (same namespace).
+# Not scraped by Prometheus directly: the node Collector of the node this pod runs on discovers it
+# (prometheus/ksm in deploy/otel-k8s.yaml) and sends the series to the gateway with the cluster labels.
+# Only the resources and metrics the rules and the dashboard use; pod labels gman.service/gman.environment
+# attribute workloads to catalog services. Version: client-go 1.36 (Kubernetes 1.34–1.36 tested upstream).
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: gman-kube-state-metrics
+  namespace: gman-otel
+automountServiceAccountToken: false
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: gman-kube-state-metrics
+rules:
+  # list/watch of the allowlisted resources only: no Secrets, ConfigMaps, get or write access.
+  - apiGroups: ['']
+    resources: ['pods', 'nodes']
+    verbs: ['list', 'watch']
+  - apiGroups: ['apps']
+    resources: ['deployments', 'statefulsets', 'daemonsets', 'replicasets']
+    verbs: ['list', 'watch']
+  - apiGroups: ['batch']
+    resources: ['jobs']
+    verbs: ['list', 'watch']
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: gman-kube-state-metrics
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: gman-kube-state-metrics
+subjects:
+  - kind: ServiceAccount
+    name: gman-kube-state-metrics
+    namespace: gman-otel
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: gman-kube-state-metrics
+  namespace: gman-otel
+  labels:
+    app.kubernetes.io/name: kube-state-metrics
+    app.kubernetes.io/version: 2.20.0
+spec:
+  # One replica: two would double every series (the rules aggregate, but cardinality doubles).
+  replicas: 1
+  # Recreate: during a rolling update both pods would be scraped at once.
+  strategy: {type: Recreate}
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: kube-state-metrics
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: kube-state-metrics
+        app.kubernetes.io/version: 2.20.0
+    spec:
+      serviceAccountName: gman-kube-state-metrics
+      automountServiceAccountToken: true
+      nodeSelector:
+        kubernetes.io/os: linux
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 65534
+        runAsGroup: 65534
+        seccompProfile: {type: RuntimeDefault}
+      containers:
+        - name: kube-state-metrics
+          image: registry.k8s.io/kube-state-metrics/kube-state-metrics:v2.20.0
+          args:
+            - --port=8080
+            - --telemetry-port=8081
+            - --resources=daemonsets,deployments,jobs,nodes,pods,replicasets,statefulsets
+            # Keep in sync with deploy/alerts/rules.yaml and deploy/grafana/dashboards/gman-k8s.json.
+            - >-
+              --metric-allowlist=kube_deployment_spec_replicas,kube_deployment_spec_paused,kube_deployment_metadata_generation,
+              kube_deployment_status_observed_generation,kube_deployment_status_condition,
+              kube_deployment_status_replicas_available,kube_deployment_status_replicas_unavailable,
+              kube_deployment_status_replicas_updated,
+              kube_statefulset_replicas,kube_statefulset_metadata_generation,kube_statefulset_status_observed_generation,
+              kube_statefulset_status_replicas_ready,kube_statefulset_status_replicas_updated,
+              kube_daemonset_metadata_generation,kube_daemonset_status_observed_generation,
+              kube_daemonset_status_desired_number_scheduled,kube_daemonset_status_current_number_scheduled,
+              kube_daemonset_status_number_available,kube_daemonset_status_number_unavailable,
+              kube_daemonset_status_number_misscheduled,kube_daemonset_status_updated_number_scheduled,
+              kube_replicaset_owner,
+              kube_pod_owner,kube_pod_labels,kube_pod_created,kube_pod_status_phase,kube_pod_status_unschedulable,
+              kube_job_owner,kube_job_failed,kube_job_status_active,
+              kube_node_info,kube_node_status_condition,kube_node_spec_unschedulable
+            - --metric-labels-allowlist=pods=[gman.service,gman.environment]
+          ports:
+            - {name: http-metrics, containerPort: 8080}
+            - {name: telemetry, containerPort: 8081}
+          livenessProbe:
+            httpGet: {path: /livez, port: http-metrics}
+            initialDelaySeconds: 5
+            timeoutSeconds: 5
+          readinessProbe:
+            httpGet: {path: /readyz, port: telemetry}
+            initialDelaySeconds: 5
+            timeoutSeconds: 5
+          resources:
+            requests: {cpu: 50m, memory: 128Mi}
+            limits: {cpu: 500m, memory: 512Mi}
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities: {drop: [ALL]}

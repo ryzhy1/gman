@@ -1,6 +1,6 @@
 import type { CurrentMetrics, GPU, GPUProcess, MetricValues, Node, Source } from './api';
 import { nodeGpuSource, type Placed } from './components';
-import { bytes, cores, date, num, percent, rate, size, stale, unit, uptime } from './format';
+import { bytes, cores, date, grafanaLink, num, percent, rate, size, stale, unit, uptime } from './format';
 
 type Open = (serviceId: string) => void;
 
@@ -139,20 +139,20 @@ function gpuTitle(g: { vendor: string; model: string }, index: number) {
   return `GPU ${index} · ${g.vendor}${g.model ? ` ${g.model}` : ''}`;
 }
 
-function SourceHead({ source, grafanaUrl }: { source: Source; grafanaUrl: string }) {
+function SourceHead({ source, grafana }: { source: Source; grafana: string }) {
   return <>
     <div className="section-head">
       <h2>{source.hostname}</h2>
       <span className={`badge ${stale(source) ? 'warn' : ''}`}>{stale(source) ? 'Устарело' : 'Получены данные'}</span>
     </div>
     <p className="muted">{source.source_type} · {source.source_id}{source.agent_version && ` · агент ${source.agent_version}`} · снимок {date(source.observed_at)}
-      {grafanaUrl && source.source_type === 'docker-host' && <> · <a href={`${grafanaUrl}/d/gman-host/gman-host?var-host=${encodeURIComponent(source.source_id)}`} target="_blank" rel="noreferrer">Grafana ↗</a></>}</p>
+      {grafana && <> · <a href={grafana} target="_blank" rel="noreferrer">Grafana ↗</a></>}</p>
     {source.errors?.map(e => <div role="alert" className="alert" key={e}>Ошибка сбора: {e}</div>)}
   </>;
 }
 
-export function HostCard({ source, metrics, grafanaUrl, onService }: {
-  source: Source; metrics?: CurrentMetrics | null; grafanaUrl: string; onService?: Open;
+export function HostCard({ source, metrics, grafanaUrl, range, onService }: {
+  source: Source; metrics?: CurrentMetrics | null; grafanaUrl: string; range: string; onService?: Open;
 }) {
   const prefix = source.source_id + '/';
   const live = metrics?.gpu ?? {};
@@ -162,7 +162,8 @@ export function HostCard({ source, metrics, grafanaUrl, onService }: {
   const boot = source.uptime_seconds != null ? Date.parse(source.observed_at) - source.uptime_seconds * 1000 : null;
   const running = source.instances.filter(i => i.status === 'running').length;
   return <section>
-    <SourceHead source={source} grafanaUrl={grafanaUrl} />
+    <SourceHead source={source} grafana={source.source_type === 'docker-host'
+      ? grafanaLink(grafanaUrl, 'gman-host', { host: source.source_id }, range) : ''} />
     <HostGauges host={metrics?.host?.[source.source_id]} cpuCount={source.cpu_count} memoryTotal={source.memory_total_bytes}
       missing={<>Метрики хоста не получены: проверьте OTel Collector с GMAN_HOST_ID={source.source_id}.</>} />
     <dl>
@@ -247,14 +248,14 @@ function NodeCard({ node, source, gpuSource, metrics, onService }: {
   </div>;
 }
 
-export function ClusterCard({ source, sources, metrics, onService }: {
-  source: Source; sources: Source[]; metrics?: CurrentMetrics | null; onService?: Open;
+export function ClusterCard({ source, sources, metrics, grafanaUrl, range, onService }: {
+  source: Source; sources: Source[]; metrics?: CurrentMetrics | null; grafanaUrl: string; range: string; onService?: Open;
 }) {
   const nodes = source.nodes ?? [];
   const sum = (f: (n: Node) => number | null) => nodes.some(n => f(n) == null) ? null : nodes.reduce((s, n) => s + f(n)!, 0);
   const gpus = sum(n => n.gpu_allocatable);
   return <section>
-    <SourceHead source={source} grafanaUrl="" />
+    <SourceHead source={source} grafana={grafanaLink(grafanaUrl, 'gman-k8s', { cluster: source.source_id }, range)} />
     <div className="meters">
       <div className="meter"><span>Узлы</span><b>{nodes.filter(n => n.ready).length} <i>из {nodes.length} Ready</i></b>
         <small>{nodes.filter(n => n.unschedulable).length} cordon · {nodes.filter(n => n.pressure.length).length} с нехваткой ресурсов</small></div>

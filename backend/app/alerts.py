@@ -5,7 +5,7 @@ import httpx
 
 # Labels the portal shows; anything else (e.g. the external portal label) stays in Alertmanager.
 LABELS = ("severity", "scope", "source_id", "host_id", "UUID", "instance_id", "instance_name", "namespace",
-          "service_id", "environment", "reason")
+          "service_id", "environment", "reason", "workload_kind", "workload")
 
 # Tests replace this with a client on a mock transport.
 client = httpx.Client(timeout=5)

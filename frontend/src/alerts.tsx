@@ -41,7 +41,7 @@ const RUNBOOKS: [string, string, string[]][] = [
     'Наблюдать рост; сравнить с другими GPU хоста. Устойчивый рост — запланировать проверку памяти GPU.']],
   ['GManGpuOverheating', 'Перегрев GPU', [
     'Проверить обороты вентиляторов и температуру в стойке, загрузку и мощность GPU в карточке хоста.',
-    'Порог 85/90 °C общий; температура замедления зависит от модели (nvidia-smi -q -d TEMPERATURE).']],
+    'Порог — по модели GPU из группы gman-gpu-thresholds в deploy/alerts/rules.yaml, для остальных моделей 85/90 °C; температура замедления — nvidia-smi -q -d TEMPERATURE.']],
   ['GManGpuMemoryOverheating', 'Перегрев памяти GPU', [
     'Проверить охлаждение; длительная работа HBM выше 95 °C ведет к снижению частот и ошибкам ECC.']],
   ['GManGpuThermalThrottling', 'Тепловой троттлинг', [
@@ -61,10 +61,32 @@ const RUNBOOKS: [string, string, string[]][] = [
   ['GManInstanceImagePullFailing', 'Образ не скачивается', [
     'kubectl describe pod: имя образа, ошибка registry, imagePullSecrets.',
     'Проверить, что тег/digest существует и registry доступен с узла.']],
+  ['GManKubeStateMetricsAbsent', 'Нет метрик kube-state-metrics', [
+    'kubectl -n gman-otel get pods -l app.kubernetes.io/name=kube-state-metrics -o wide; логи pod-а (ошибки RBAC, OOM).',
+    'Проверить pod gman-otel на том же узле: его Collector забирает kube-state-metrics и отправляет в gateway.',
+    'Пока алерт активен, алерты workloads кластера не вычисляются.']],
+  ['GManWorkloadReplicasUnavailable', 'Недоступные реплики', [
+    'kubectl -n <namespace> describe deployment|statefulset|daemonset <имя>; kubectl get pods -o wide — какие pod-ы не готовы и почему.',
+    'Причины по экземплярам — на вкладке «Экземпляры» сервиса (CrashLoopBackOff, OOMKilled, образ) и в алертах GManInstance*.',
+    'critical — не готова ни одна реплика: сервис недоступен. Pending-pod-ы и застрявший rollout того же workload подавляют warning; NotReady узла — warning и critical DaemonSet-ов кластера.']],
+  ['GManWorkloadRolloutStuck', 'Rollout не продвигается', [
+    'ProgressDeadlineExceeded: kubectl rollout status и describe — новые pod-ы не становятся Ready (probe, образ, ресурсы, квоты).',
+    'Откат: kubectl rollout undo deployment/<имя>; сравнить версии на вкладке «Конфигурация».',
+    'GenerationNotObserved: контроллер не обрабатывает объект — проверить kube-controller-manager.']],
+  ['GManWorkloadPodsPending', 'Pod-ы в Pending', [
+    'kubectl describe pod <pod>: события планировщика (Insufficient cpu/memory/nvidia.com/gpu, taints, affinity, PVC).',
+    'Сравнить requests с allocatable узлов в карточке кластера «Серверы и GPU».']],
+  ['GManJobFailed', 'Job завершилась ошибкой', [
+    'kubectl -n <namespace> describe job <имя>; kubectl logs job/<имя> — причина последних попыток.',
+    'Алерт держится, пока Job не удалена (для CronJob — по failedJobsHistoryLimit); после разбора удалить Job или заглушить алерт.']],
+  ['GManDaemonSetMisscheduled', 'DaemonSet на неподходящих узлах', [
+    'Pod-ы остались на узлах после смены nodeSelector/affinity или меток/taints узла: kubectl get pods -o wide -l <селектор>.',
+    'Удалить лишние pod-ы или вернуть метки узлов.']],
 ];
 
 const OBJECT_LABELS = [['host_id', 'Хост'], ['source_id', 'Источник'], ['UUID', 'GPU'], ['instance_name', 'Экземпляр'],
-  ['namespace', 'Namespace'], ['service_id', 'Сервис'], ['environment', 'Окружение'], ['reason', 'Причина']] as const;
+  ['namespace', 'Namespace'], ['workload_kind', 'Тип'], ['workload', 'Workload'], ['service_id', 'Сервис'],
+  ['environment', 'Окружение'], ['reason', 'Причина']] as const;
 
 export function Alerts({ token, refreshKey }: { token: string; refreshKey: string }) {
   const [data, setData] = useState<AlertList | null>(null);
