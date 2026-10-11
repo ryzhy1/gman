@@ -1,0 +1,11 @@
+{
+  "id": "example-api",
+  "name": "Example API",
+  "description": "Замените пример сведениями о своем сервисе",
+  "owner": "",
+  "team": "",
+  "repository": "",
+  "grafana": "",
+  "splunk": "",
+  "bamboo": ""
+}

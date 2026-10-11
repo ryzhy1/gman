@@ -1,0 +1,78 @@
+# Node Collector for a Docker host. Run Collector contrib as a host process.
+# Docker socket access must be granted separately. No remote Docker API needed.
+# Environment:
+#   GMAN_HOST_ID   must equal the inventory agent's --source-id: GMan joins metrics on it.
+#   OTEL_GATEWAY   host:port of the central gateway's OTLP gRPC receiver.
+#   DOCKER_SOCKET  optional, defaults to unix:///var/run/docker.sock.
+receivers:
+  host_metrics:
+    collection_interval: 15s
+    scrapers:
+      cpu:
+        metrics:
+          system.cpu.utilization: {enabled: true}
+          system.cpu.frequency: {enabled: true}
+      memory:
+        metrics:
+          system.memory.utilization: {enabled: true}
+          system.memory.limit: {enabled: true}
+      load: {}
+      disk: {}
+      filesystem:
+        exclude_fs_types:
+          fs_types: [autofs, binfmt_misc, bpf, cgroup2, configfs, debugfs, devpts, devtmpfs, fusectl, hugetlbfs,
+                     mqueue, nsfs, overlay, proc, procfs, pstore, rpc_pipefs, securityfs, selinuxfs, squashfs,
+                     sysfs, tracefs, tmpfs]
+          match_type: strict
+        metrics:
+          system.filesystem.utilization: {enabled: true}
+      network: {}
+      paging: {}
+      processes: {}
+  docker_stats:
+    endpoint: ${env:DOCKER_SOCKET:-unix:///var/run/docker.sock}
+    collection_interval: 15s
+    # Catalog binding labels become metric labels so dashboards can filter by service.
+    container_labels_to_metric_labels:
+      gman.service: gman_service
+      gman.environment: gman_environment
+    metrics:
+      container.cpu.throttling_data.throttled_periods: {enabled: true}
+      container.cpu.throttling_data.throttled_time: {enabled: true}
+      container.pids.count: {enabled: true}
+      container.uptime: {enabled: true}
+      container.restarts: {enabled: true}
+  # NVIDIA DCGM Exporter on the same host; see README for its deployment.
+  prometheus/gpu:
+    config:
+      scrape_configs:
+        - job_name: dcgm
+          scrape_interval: 15s
+          static_configs:
+            - targets: ['127.0.0.1:9400']
+processors:
+  memory_limiter:
+    check_interval: 1s
+    limit_mib: 256
+    spike_limit_mib: 64
+  resource:
+    attributes:
+      - key: host.id
+        value: ${env:GMAN_HOST_ID}
+        action: upsert
+  batch: {}
+exporters:
+  otlp_grpc:
+    endpoint: ${env:OTEL_GATEWAY}
+    tls:
+      ca_file: /etc/gman/ca.pem
+      cert_file: /etc/gman/client.pem
+      key_file: /etc/gman/client-key.pem
+    sending_queue: {queue_size: 1000}
+    retry_on_failure: {enabled: true}
+service:
+  pipelines:
+    metrics:
+      receivers: [host_metrics, docker_stats, prometheus/gpu]
+      processors: [memory_limiter, resource, batch]
+      exporters: [otlp_grpc]

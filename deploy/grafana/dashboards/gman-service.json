@@ -1,0 +1,890 @@
+{
+ "uid": "gman-service",
+ "title": "GMan · Сервис",
+ "description": "Ресурсы контейнеров сервиса (Docker и Kubernetes) по меткам gman.service/gman.environment.",
+ "tags": [
+  "gman"
+ ],
+ "timezone": "browser",
+ "schemaVersion": 39,
+ "version": 1,
+ "editable": true,
+ "refresh": "30s",
+ "time": {
+  "from": "now-6h",
+  "to": "now"
+ },
+ "templating": {
+  "list": [
+   {
+    "name": "service",
+    "label": "Сервис",
+    "type": "query",
+    "datasource": {
+     "type": "prometheus",
+     "uid": "prometheus"
+    },
+    "query": {
+     "query": "label_values({__name__=~\"container_memory_usage_total_bytes|container_memory_working_set_bytes\"}, gman_service)",
+     "refId": "v"
+    },
+    "definition": "label_values({__name__=~\"container_memory_usage_total_bytes|container_memory_working_set_bytes\"}, gman_service)",
+    "refresh": 2,
+    "sort": 1,
+    "includeAll": false,
+    "multi": false
+   },
+   {
+    "name": "environment",
+    "label": "Окружение",
+    "type": "query",
+    "datasource": {
+     "type": "prometheus",
+     "uid": "prometheus"
+    },
+    "query": {
+     "query": "label_values({__name__=~\"container_memory_usage_total_bytes|container_memory_working_set_bytes\",gman_service=\"$service\"}, gman_environment)",
+     "refId": "v"
+    },
+    "definition": "label_values({__name__=~\"container_memory_usage_total_bytes|container_memory_working_set_bytes\",gman_service=\"$service\"}, gman_environment)",
+    "refresh": 2,
+    "sort": 1,
+    "includeAll": true,
+    "multi": true,
+    "allValue": ".*"
+   }
+  ]
+ },
+ "panels": [
+  {
+   "type": "row",
+   "title": "Docker-хосты",
+   "collapsed": false,
+   "gridPos": {
+    "x": 0,
+    "y": 0,
+    "w": 24,
+    "h": 1
+   },
+   "panels": []
+  },
+  {
+   "type": "timeseries",
+   "title": "CPU, ядра",
+   "description": "1.0 = одно полностью занятое ядро. Сравнивайте с лимитом во вкладке «Конфигурация» в GMan.",
+   "datasource": {
+    "type": "prometheus",
+    "uid": "prometheus"
+   },
+   "gridPos": {
+    "x": 0,
+    "y": 1,
+    "w": 12,
+    "h": 8
+   },
+   "fieldConfig": {
+    "defaults": {
+     "unit": "short",
+     "min": 0,
+     "custom": {
+      "fillOpacity": 5,
+      "stacking": {
+       "mode": "none"
+      },
+      "showPoints": "never",
+      "lineWidth": 1
+     }
+    },
+    "overrides": []
+   },
+   "options": {
+    "legend": {
+     "displayMode": "table",
+     "placement": "bottom",
+     "calcs": [
+      "lastNotNull",
+      "max"
+     ]
+    },
+    "tooltip": {
+     "mode": "multi",
+     "sort": "desc"
+    }
+   },
+   "targets": [
+    {
+     "datasource": {
+      "type": "prometheus",
+      "uid": "prometheus"
+     },
+     "refId": "A",
+     "expr": "sum by (host_id, container_name) (rate(container_cpu_usage_nanoseconds_total{gman_service=\"$service\",gman_environment=~\"$environment\"}[2m])) / 1e9",
+     "legendFormat": "{{host_id}} / {{container_name}}"
+    }
+   ]
+  },
+  {
+   "type": "timeseries",
+   "title": "Память",
+   "description": "",
+   "datasource": {
+    "type": "prometheus",
+    "uid": "prometheus"
+   },
+   "gridPos": {
+    "x": 12,
+    "y": 1,
+    "w": 12,
+    "h": 8
+   },
+   "fieldConfig": {
+    "defaults": {
+     "unit": "bytes",
+     "min": 0,
+     "custom": {
+      "fillOpacity": 5,
+      "stacking": {
+       "mode": "none"
+      },
+      "showPoints": "never",
+      "lineWidth": 1
+     }
+    },
+    "overrides": []
+   },
+   "options": {
+    "legend": {
+     "displayMode": "table",
+     "placement": "bottom",
+     "calcs": [
+      "lastNotNull",
+      "max"
+     ]
+    },
+    "tooltip": {
+     "mode": "multi",
+     "sort": "desc"
+    }
+   },
+   "targets": [
+    {
+     "datasource": {
+      "type": "prometheus",
+      "uid": "prometheus"
+     },
+     "refId": "A",
+     "expr": "max by (host_id, container_name) (container_memory_usage_total_bytes{gman_service=\"$service\",gman_environment=~\"$environment\"})",
+     "legendFormat": "{{host_id}} / {{container_name}}"
+    },
+    {
+     "datasource": {
+      "type": "prometheus",
+      "uid": "prometheus"
+     },
+     "refId": "B",
+     "expr": "max by (host_id, container_name) (container_memory_usage_limit_bytes{gman_service=\"$service\",gman_environment=~\"$environment\"})",
+     "legendFormat": "limit {{host_id}} / {{container_name}}"
+    }
+   ]
+  },
+  {
+   "type": "timeseries",
+   "title": "CPU throttling, с/с",
+   "description": "Сколько секунд в секунду контейнер ждал из-за CPU-лимита. Рост — признак нехватки лимита.",
+   "datasource": {
+    "type": "prometheus",
+    "uid": "prometheus"
+   },
+   "gridPos": {
+    "x": 0,
+    "y": 9,
+    "w": 12,
+    "h": 8
+   },
+   "fieldConfig": {
+    "defaults": {
+     "unit": "short",
+     "min": 0,
+     "custom": {
+      "fillOpacity": 5,
+      "stacking": {
+       "mode": "none"
+      },
+      "showPoints": "never",
+      "lineWidth": 1
+     }
+    },
+    "overrides": []
+   },
+   "options": {
+    "legend": {
+     "displayMode": "table",
+     "placement": "bottom",
+     "calcs": [
+      "lastNotNull",
+      "max"
+     ]
+    },
+    "tooltip": {
+     "mode": "multi",
+     "sort": "desc"
+    }
+   },
+   "targets": [
+    {
+     "datasource": {
+      "type": "prometheus",
+      "uid": "prometheus"
+     },
+     "refId": "A",
+     "expr": "sum by (host_id, container_name) (rate(container_cpu_throttling_data_throttled_time_nanoseconds_total{gman_service=\"$service\",gman_environment=~\"$environment\"}[2m])) / 1e9",
+     "legendFormat": "{{host_id}} / {{container_name}}"
+    }
+   ]
+  },
+  {
+   "type": "timeseries",
+   "title": "Сеть",
+   "description": "",
+   "datasource": {
+    "type": "prometheus",
+    "uid": "prometheus"
+   },
+   "gridPos": {
+    "x": 12,
+    "y": 9,
+    "w": 12,
+    "h": 8
+   },
+   "fieldConfig": {
+    "defaults": {
+     "unit": "Bps",
+     "min": 0,
+     "custom": {
+      "fillOpacity": 5,
+      "stacking": {
+       "mode": "none"
+      },
+      "showPoints": "never",
+      "lineWidth": 1
+     }
+    },
+    "overrides": []
+   },
+   "options": {
+    "legend": {
+     "displayMode": "table",
+     "placement": "bottom",
+     "calcs": [
+      "lastNotNull",
+      "max"
+     ]
+    },
+    "tooltip": {
+     "mode": "multi",
+     "sort": "desc"
+    }
+   },
+   "targets": [
+    {
+     "datasource": {
+      "type": "prometheus",
+      "uid": "prometheus"
+     },
+     "refId": "A",
+     "expr": "sum by (host_id, container_name) (rate(container_network_io_usage_rx_bytes_total{gman_service=\"$service\",gman_environment=~\"$environment\"}[2m]))",
+     "legendFormat": "rx {{host_id}} / {{container_name}}"
+    },
+    {
+     "datasource": {
+      "type": "prometheus",
+      "uid": "prometheus"
+     },
+     "refId": "B",
+     "expr": "sum by (host_id, container_name) (rate(container_network_io_usage_tx_bytes_total{gman_service=\"$service\",gman_environment=~\"$environment\"}[2m]))",
+     "legendFormat": "tx {{host_id}} / {{container_name}}"
+    }
+   ]
+  },
+  {
+   "type": "timeseries",
+   "title": "Дисковый I/O",
+   "description": "",
+   "datasource": {
+    "type": "prometheus",
+    "uid": "prometheus"
+   },
+   "gridPos": {
+    "x": 0,
+    "y": 17,
+    "w": 12,
+    "h": 8
+   },
+   "fieldConfig": {
+    "defaults": {
+     "unit": "Bps",
+     "min": 0,
+     "custom": {
+      "fillOpacity": 5,
+      "stacking": {
+       "mode": "none"
+      },
+      "showPoints": "never",
+      "lineWidth": 1
+     }
+    },
+    "overrides": []
+   },
+   "options": {
+    "legend": {
+     "displayMode": "table",
+     "placement": "bottom",
+     "calcs": [
+      "lastNotNull",
+      "max"
+     ]
+    },
+    "tooltip": {
+     "mode": "multi",
+     "sort": "desc"
+    }
+   },
+   "targets": [
+    {
+     "datasource": {
+      "type": "prometheus",
+      "uid": "prometheus"
+     },
+     "refId": "A",
+     "expr": "sum by (host_id, container_name) (rate(container_blockio_io_service_bytes_recursive_total{gman_service=\"$service\",gman_environment=~\"$environment\"}[2m]))",
+     "legendFormat": "{{host_id}} / {{container_name}}"
+    }
+   ]
+  },
+  {
+   "type": "timeseries",
+   "title": "Процессы (pids)",
+   "description": "",
+   "datasource": {
+    "type": "prometheus",
+    "uid": "prometheus"
+   },
+   "gridPos": {
+    "x": 12,
+    "y": 17,
+    "w": 12,
+    "h": 8
+   },
+   "fieldConfig": {
+    "defaults": {
+     "unit": "short",
+     "min": 0,
+     "custom": {
+      "fillOpacity": 5,
+      "stacking": {
+       "mode": "none"
+      },
+      "showPoints": "never",
+      "lineWidth": 1
+     }
+    },
+    "overrides": []
+   },
+   "options": {
+    "legend": {
+     "displayMode": "table",
+     "placement": "bottom",
+     "calcs": [
+      "lastNotNull",
+      "max"
+     ]
+    },
+    "tooltip": {
+     "mode": "multi",
+     "sort": "desc"
+    }
+   },
+   "targets": [
+    {
+     "datasource": {
+      "type": "prometheus",
+      "uid": "prometheus"
+     },
+     "refId": "A",
+     "expr": "max by (host_id, container_name) (container_pids_count{gman_service=\"$service\",gman_environment=~\"$environment\"})",
+     "legendFormat": "{{host_id}} / {{container_name}}"
+    }
+   ]
+  },
+  {
+   "type": "timeseries",
+   "title": "Перезапуски",
+   "description": "",
+   "datasource": {
+    "type": "prometheus",
+    "uid": "prometheus"
+   },
+   "gridPos": {
+    "x": 0,
+    "y": 25,
+    "w": 12,
+    "h": 8
+   },
+   "fieldConfig": {
+    "defaults": {
+     "unit": "short",
+     "min": 0,
+     "custom": {
+      "fillOpacity": 5,
+      "stacking": {
+       "mode": "none"
+      },
+      "showPoints": "never",
+      "lineWidth": 1
+     }
+    },
+    "overrides": []
+   },
+   "options": {
+    "legend": {
+     "displayMode": "table",
+     "placement": "bottom",
+     "calcs": [
+      "lastNotNull",
+      "max"
+     ]
+    },
+    "tooltip": {
+     "mode": "multi",
+     "sort": "desc"
+    }
+   },
+   "targets": [
+    {
+     "datasource": {
+      "type": "prometheus",
+      "uid": "prometheus"
+     },
+     "refId": "A",
+     "expr": "max by (host_id, container_name) (container_restarts_total{gman_service=\"$service\",gman_environment=~\"$environment\"})",
+     "legendFormat": "{{host_id}} / {{container_name}}"
+    }
+   ]
+  },
+  {
+   "type": "timeseries",
+   "title": "Uptime",
+   "description": "",
+   "datasource": {
+    "type": "prometheus",
+    "uid": "prometheus"
+   },
+   "gridPos": {
+    "x": 12,
+    "y": 25,
+    "w": 12,
+    "h": 8
+   },
+   "fieldConfig": {
+    "defaults": {
+     "unit": "s",
+     "min": 0,
+     "custom": {
+      "fillOpacity": 5,
+      "stacking": {
+       "mode": "none"
+      },
+      "showPoints": "never",
+      "lineWidth": 1
+     }
+    },
+    "overrides": []
+   },
+   "options": {
+    "legend": {
+     "displayMode": "table",
+     "placement": "bottom",
+     "calcs": [
+      "lastNotNull",
+      "max"
+     ]
+    },
+    "tooltip": {
+     "mode": "multi",
+     "sort": "desc"
+    }
+   },
+   "targets": [
+    {
+     "datasource": {
+      "type": "prometheus",
+      "uid": "prometheus"
+     },
+     "refId": "A",
+     "expr": "max by (host_id, container_name) (container_uptime_seconds{gman_service=\"$service\",gman_environment=~\"$environment\"})",
+     "legendFormat": "{{host_id}} / {{container_name}}"
+    }
+   ]
+  },
+  {
+   "type": "row",
+   "title": "Kubernetes",
+   "collapsed": false,
+   "gridPos": {
+    "x": 0,
+    "y": 33,
+    "w": 24,
+    "h": 1
+   },
+   "panels": []
+  },
+  {
+   "type": "timeseries",
+   "title": "CPU контейнеров, ядра",
+   "description": "1.0 = одно полностью занятое ядро.",
+   "datasource": {
+    "type": "prometheus",
+    "uid": "prometheus"
+   },
+   "gridPos": {
+    "x": 0,
+    "y": 34,
+    "w": 12,
+    "h": 8
+   },
+   "fieldConfig": {
+    "defaults": {
+     "unit": "short",
+     "min": 0,
+     "custom": {
+      "fillOpacity": 5,
+      "stacking": {
+       "mode": "none"
+      },
+      "showPoints": "never",
+      "lineWidth": 1
+     }
+    },
+    "overrides": []
+   },
+   "options": {
+    "legend": {
+     "displayMode": "table",
+     "placement": "bottom",
+     "calcs": [
+      "lastNotNull",
+      "max"
+     ]
+    },
+    "tooltip": {
+     "mode": "multi",
+     "sort": "desc"
+    }
+   },
+   "targets": [
+    {
+     "datasource": {
+      "type": "prometheus",
+      "uid": "prometheus"
+     },
+     "refId": "A",
+     "expr": "max by (host_id, k8s_namespace_name, k8s_pod_name, k8s_container_name) (rate(container_cpu_time_seconds_total{gman_service=\"$service\",gman_environment=~\"$environment\"}[2m]))",
+     "legendFormat": "{{host_id}} / {{k8s_namespace_name}}/{{k8s_pod_name}}/{{k8s_container_name}}"
+    }
+   ]
+  },
+  {
+   "type": "timeseries",
+   "title": "Память контейнеров (working set)",
+   "description": "Working set — то, что учитывает OOM killer и лимит памяти Kubernetes.",
+   "datasource": {
+    "type": "prometheus",
+    "uid": "prometheus"
+   },
+   "gridPos": {
+    "x": 12,
+    "y": 34,
+    "w": 12,
+    "h": 8
+   },
+   "fieldConfig": {
+    "defaults": {
+     "unit": "bytes",
+     "min": 0,
+     "custom": {
+      "fillOpacity": 5,
+      "stacking": {
+       "mode": "none"
+      },
+      "showPoints": "never",
+      "lineWidth": 1
+     }
+    },
+    "overrides": []
+   },
+   "options": {
+    "legend": {
+     "displayMode": "table",
+     "placement": "bottom",
+     "calcs": [
+      "lastNotNull",
+      "max"
+     ]
+    },
+    "tooltip": {
+     "mode": "multi",
+     "sort": "desc"
+    }
+   },
+   "targets": [
+    {
+     "datasource": {
+      "type": "prometheus",
+      "uid": "prometheus"
+     },
+     "refId": "A",
+     "expr": "max by (host_id, k8s_namespace_name, k8s_pod_name, k8s_container_name) (container_memory_working_set_bytes{gman_service=\"$service\",gman_environment=~\"$environment\"})",
+     "legendFormat": "{{host_id}} / {{k8s_namespace_name}}/{{k8s_pod_name}}/{{k8s_container_name}}"
+    }
+   ]
+  },
+  {
+   "type": "timeseries",
+   "title": "CPU относительно лимита",
+   "description": "100% — контейнер упёрся в CPU-лимит (дальше throttling). Нет линии — лимит не задан.",
+   "datasource": {
+    "type": "prometheus",
+    "uid": "prometheus"
+   },
+   "gridPos": {
+    "x": 0,
+    "y": 42,
+    "w": 12,
+    "h": 8
+   },
+   "fieldConfig": {
+    "defaults": {
+     "unit": "percentunit",
+     "min": 0,
+     "custom": {
+      "fillOpacity": 5,
+      "stacking": {
+       "mode": "none"
+      },
+      "showPoints": "never",
+      "lineWidth": 1
+     }
+    },
+    "overrides": []
+   },
+   "options": {
+    "legend": {
+     "displayMode": "table",
+     "placement": "bottom",
+     "calcs": [
+      "lastNotNull",
+      "max"
+     ]
+    },
+    "tooltip": {
+     "mode": "multi",
+     "sort": "desc"
+    }
+   },
+   "targets": [
+    {
+     "datasource": {
+      "type": "prometheus",
+      "uid": "prometheus"
+     },
+     "refId": "A",
+     "expr": "max by (host_id, k8s_namespace_name, k8s_pod_name, k8s_container_name) (k8s_container_cpu_limit_utilization_ratio{gman_service=\"$service\",gman_environment=~\"$environment\"})",
+     "legendFormat": "{{host_id}} / {{k8s_namespace_name}}/{{k8s_pod_name}}/{{k8s_container_name}}"
+    }
+   ]
+  },
+  {
+   "type": "timeseries",
+   "title": "Память относительно лимита",
+   "description": "100% — OOM kill. Нет линии — лимит не задан.",
+   "datasource": {
+    "type": "prometheus",
+    "uid": "prometheus"
+   },
+   "gridPos": {
+    "x": 12,
+    "y": 42,
+    "w": 12,
+    "h": 8
+   },
+   "fieldConfig": {
+    "defaults": {
+     "unit": "percentunit",
+     "min": 0,
+     "custom": {
+      "fillOpacity": 5,
+      "stacking": {
+       "mode": "none"
+      },
+      "showPoints": "never",
+      "lineWidth": 1
+     }
+    },
+    "overrides": []
+   },
+   "options": {
+    "legend": {
+     "displayMode": "table",
+     "placement": "bottom",
+     "calcs": [
+      "lastNotNull",
+      "max"
+     ]
+    },
+    "tooltip": {
+     "mode": "multi",
+     "sort": "desc"
+    }
+   },
+   "targets": [
+    {
+     "datasource": {
+      "type": "prometheus",
+      "uid": "prometheus"
+     },
+     "refId": "A",
+     "expr": "max by (host_id, k8s_namespace_name, k8s_pod_name, k8s_container_name) (k8s_container_memory_limit_utilization_ratio{gman_service=\"$service\",gman_environment=~\"$environment\"})",
+     "legendFormat": "{{host_id}} / {{k8s_namespace_name}}/{{k8s_pod_name}}/{{k8s_container_name}}"
+    }
+   ]
+  },
+  {
+   "type": "timeseries",
+   "title": "Сеть подов",
+   "description": "",
+   "datasource": {
+    "type": "prometheus",
+    "uid": "prometheus"
+   },
+   "gridPos": {
+    "x": 0,
+    "y": 50,
+    "w": 12,
+    "h": 8
+   },
+   "fieldConfig": {
+    "defaults": {
+     "unit": "Bps",
+     "min": 0,
+     "custom": {
+      "fillOpacity": 5,
+      "stacking": {
+       "mode": "none"
+      },
+      "showPoints": "never",
+      "lineWidth": 1
+     }
+    },
+    "overrides": []
+   },
+   "options": {
+    "legend": {
+     "displayMode": "table",
+     "placement": "bottom",
+     "calcs": [
+      "lastNotNull",
+      "max"
+     ]
+    },
+    "tooltip": {
+     "mode": "multi",
+     "sort": "desc"
+    }
+   },
+   "targets": [
+    {
+     "datasource": {
+      "type": "prometheus",
+      "uid": "prometheus"
+     },
+     "refId": "A",
+     "expr": "sum by (host_id, k8s_namespace_name, k8s_pod_name) (max by (host_id, k8s_namespace_name, k8s_pod_name, interface) (rate(k8s_pod_network_io_bytes_total{gman_service=\"$service\",gman_environment=~\"$environment\",direction=\"receive\"}[2m])))",
+     "legendFormat": "rx {{host_id}} / {{k8s_namespace_name}}/{{k8s_pod_name}}"
+    },
+    {
+     "datasource": {
+      "type": "prometheus",
+      "uid": "prometheus"
+     },
+     "refId": "B",
+     "expr": "sum by (host_id, k8s_namespace_name, k8s_pod_name) (max by (host_id, k8s_namespace_name, k8s_pod_name, interface) (rate(k8s_pod_network_io_bytes_total{gman_service=\"$service\",gman_environment=~\"$environment\",direction=\"transmit\"}[2m])))",
+     "legendFormat": "tx {{host_id}} / {{k8s_namespace_name}}/{{k8s_pod_name}}"
+    }
+   ]
+  },
+  {
+   "type": "timeseries",
+   "title": "Использование requests",
+   "description": "Выше 100% — контейнер потребляет больше запрошенного; планировщик этого не учитывает.",
+   "datasource": {
+    "type": "prometheus",
+    "uid": "prometheus"
+   },
+   "gridPos": {
+    "x": 12,
+    "y": 50,
+    "w": 12,
+    "h": 8
+   },
+   "fieldConfig": {
+    "defaults": {
+     "unit": "percentunit",
+     "min": 0,
+     "custom": {
+      "fillOpacity": 5,
+      "stacking": {
+       "mode": "none"
+      },
+      "showPoints": "never",
+      "lineWidth": 1
+     }
+    },
+    "overrides": []
+   },
+   "options": {
+    "legend": {
+     "displayMode": "table",
+     "placement": "bottom",
+     "calcs": [
+      "lastNotNull",
+      "max"
+     ]
+    },
+    "tooltip": {
+     "mode": "multi",
+     "sort": "desc"
+    }
+   },
+   "targets": [
+    {
+     "datasource": {
+      "type": "prometheus",
+      "uid": "prometheus"
+     },
+     "refId": "A",
+     "expr": "max by (host_id, k8s_namespace_name, k8s_pod_name, k8s_container_name) (k8s_container_cpu_request_utilization_ratio{gman_service=\"$service\",gman_environment=~\"$environment\"})",
+     "legendFormat": "cpu {{host_id}} / {{k8s_namespace_name}}/{{k8s_pod_name}}/{{k8s_container_name}}"
+    },
+    {
+     "datasource": {
+      "type": "prometheus",
+      "uid": "prometheus"
+     },
+     "refId": "B",
+     "expr": "max by (host_id, k8s_namespace_name, k8s_pod_name, k8s_container_name) (k8s_container_memory_request_utilization_ratio{gman_service=\"$service\",gman_environment=~\"$environment\"})",
+     "legendFormat": "memory {{host_id}} / {{k8s_namespace_name}}/{{k8s_pod_name}}/{{k8s_container_name}}"
+    }
+   ]
+  }
+ ]
+}

@@ -1,0 +1,24 @@
+# Local pilot only. Remote production ingress requires authenticated TLS.
+receivers:
+  otlp:
+    protocols:
+      grpc: {endpoint: '0.0.0.0:4317'}
+      http: {endpoint: '0.0.0.0:4318'}
+processors:
+  memory_limiter:
+    check_interval: 1s
+    limit_mib: 384
+    spike_limit_mib: 96
+  batch: {}
+exporters:
+  prometheus:
+    endpoint: '0.0.0.0:8889'
+    resource_to_telemetry_conversion: {enabled: true}
+    # Drop series of silent hosts/containers quickly, so absence is not shown as zero load.
+    metric_expiration: 90s
+service:
+  pipelines:
+    metrics:
+      receivers: [otlp]
+      processors: [memory_limiter, batch]
+      exporters: [prometheus]

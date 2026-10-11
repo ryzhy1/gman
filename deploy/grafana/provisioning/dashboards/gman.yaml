@@ -1,0 +1,7 @@
+apiVersion: 1
+providers:
+  - name: gman
+    folder: GMan
+    type: file
+    allowUiUpdates: false
+    options: {path: /etc/grafana/dashboards}

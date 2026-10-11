@@ -1,0 +1,206 @@
+# Node Collector for the Kubernetes cluster: one pod per node (DaemonSet).
+# Before applying: create Secret gman-otel-tls (ca.pem, client.pem, client-key.pem) in
+# namespace gman-otel and set OTEL_GATEWAY and K8S_CLUSTER_NAME below.
+# host.id is the node name: GMan joins node metrics with nodes from the inventory agent.
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: gman-otel
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: gman-otel
+  namespace: gman-otel
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: gman-otel
+rules:
+  # kubelet_stats reads the kubelet summary API (nodes/stats) and pod specs (nodes/proxy, /pods) of its own node.
+  - apiGroups: ['']
+    resources: ['nodes/stats', 'nodes/proxy']
+    verbs: ['get']
+  # k8s_attributes and DCGM discovery: metadata only, no Secrets, no exec.
+  - apiGroups: ['']
+    resources: ['pods', 'namespaces', 'nodes']
+    verbs: ['get', 'list', 'watch']
+  - apiGroups: ['apps']
+    resources: ['replicasets']
+    verbs: ['get', 'list', 'watch']
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: gman-otel
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: gman-otel
+subjects:
+  - kind: ServiceAccount
+    name: gman-otel
+    namespace: gman-otel
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: gman-otel
+  namespace: gman-otel
+data:
+  config.yaml: |
+    receivers:
+      host_metrics:
+        root_path: /hostfs
+        collection_interval: 15s
+        scrapers:
+          cpu:
+            metrics:
+              system.cpu.utilization: {enabled: true}
+          memory:
+            metrics:
+              system.memory.utilization: {enabled: true}
+          load: {}
+          disk: {}
+          filesystem:
+            exclude_fs_types:
+              fs_types: [autofs, binfmt_misc, bpf, cgroup2, configfs, debugfs, devpts, devtmpfs, fusectl, hugetlbfs,
+                         mqueue, nsfs, overlay, proc, procfs, pstore, rpc_pipefs, securityfs, selinuxfs, squashfs,
+                         sysfs, tracefs, tmpfs]
+              match_type: strict
+            metrics:
+              system.filesystem.utilization: {enabled: true}
+          network: {}
+          paging: {}
+      kubelet_stats:
+        collection_interval: 15s
+        auth_type: serviceAccount
+        endpoint: https://${env:K8S_NODE_IP}:10250
+        # The kubelet serving certificate is usually self-signed per node.
+        insecure_skip_verify: true
+        metric_groups: [node, pod, container]
+        # Limit/request utilization needs pod specs from the kubelet /pods endpoint (nodes/proxy).
+        metrics:
+          k8s.container.cpu_limit_utilization: {enabled: true}
+          k8s.container.cpu_request_utilization: {enabled: true}
+          k8s.container.memory_limit_utilization: {enabled: true}
+          k8s.container.memory_request_utilization: {enabled: true}
+          k8s.pod.cpu_limit_utilization: {enabled: true}
+          k8s.pod.memory_limit_utilization: {enabled: true}
+          container.uptime: {enabled: true}
+          k8s.pod.uptime: {enabled: true}
+      # NVIDIA DCGM Exporter of this node, as deployed by the GPU Operator.
+      prometheus/gpu:
+        config:
+          scrape_configs:
+            - job_name: dcgm
+              scrape_interval: 15s
+              kubernetes_sd_configs:
+                - role: pod
+                  selectors:
+                    - role: pod
+                      field: spec.nodeName=${env:K8S_NODE_NAME}
+                      label: app=nvidia-dcgm-exporter
+              relabel_configs:
+                - source_labels: [__meta_kubernetes_pod_container_port_number]
+                  regex: '9400'
+                  action: keep
+    processors:
+      memory_limiter:
+        check_interval: 1s
+        limit_mib: 384
+        spike_limit_mib: 96
+      # Pod labels become metric labels so dashboards and GMan can filter by service.
+      k8s_attributes:
+        auth_type: serviceAccount
+        # Hold the pipeline until the pod cache is synced: otherwise the first minutes of metrics
+        # after a restart carry no gman_service/gman_environment labels.
+        wait_for_metadata: true
+        wait_for_metadata_timeout: 30s
+        filter:
+          node_from_env_var: K8S_NODE_NAME
+        extract:
+          metadata: [k8s.namespace.name, k8s.pod.name, k8s.pod.uid, k8s.node.name]
+          labels:
+            - tag_name: gman_service
+              key: gman.service
+              from: pod
+            - tag_name: gman_environment
+              key: gman.environment
+              from: pod
+        pod_association:
+          - sources: [{from: resource_attribute, name: k8s.pod.uid}]
+      resource:
+        attributes:
+          - key: host.id
+            value: ${env:K8S_NODE_NAME}
+            action: upsert
+          - key: k8s.cluster.name
+            value: ${env:K8S_CLUSTER_NAME}
+            action: upsert
+      batch: {}
+    exporters:
+      otlp_grpc:
+        endpoint: ${env:OTEL_GATEWAY}
+        tls:
+          ca_file: /etc/gman/ca.pem
+          cert_file: /etc/gman/client.pem
+          key_file: /etc/gman/client-key.pem
+        sending_queue: {queue_size: 1000}
+        retry_on_failure: {enabled: true}
+    service:
+      pipelines:
+        metrics:
+          receivers: [host_metrics, kubelet_stats, prometheus/gpu]
+          processors: [memory_limiter, k8s_attributes, resource, batch]
+          exporters: [otlp_grpc]
+---
+apiVersion: apps/v1
+kind: DaemonSet
+metadata:
+  name: gman-otel
+  namespace: gman-otel
+spec:
+  selector:
+    matchLabels: {app: gman-otel}
+  template:
+    metadata:
+      labels: {app: gman-otel}
+    spec:
+      serviceAccountName: gman-otel
+      # host_metrics reads network counters of its own network namespace: use the node's one.
+      hostNetwork: true
+      dnsPolicy: ClusterFirstWithHostNet
+      # Run on GPU and control-plane nodes too.
+      tolerations: [{operator: Exists}]
+      containers:
+        - name: otelcol
+          image: otel/opentelemetry-collector-contrib:0.162.0
+          args: ['--config=/etc/otelcol/config.yaml']
+          env:
+            - name: K8S_NODE_NAME
+              valueFrom: {fieldRef: {fieldPath: spec.nodeName}}
+            - name: K8S_NODE_IP
+              valueFrom: {fieldRef: {fieldPath: status.hostIP}}
+            - name: K8S_CLUSTER_NAME
+              value: cluster-01  # Same as the inventory agent's --source-id.
+            - name: OTEL_GATEWAY
+              value: gman-gateway.example:4317  # Replace with the central gateway address.
+          resources:
+            requests: {cpu: 100m, memory: 256Mi}
+            limits: {cpu: 500m, memory: 512Mi}
+          securityContext:
+            readOnlyRootFilesystem: true
+            allowPrivilegeEscalation: false
+          volumeMounts:
+            - {name: config, mountPath: /etc/otelcol}
+            - {name: tls, mountPath: /etc/gman, readOnly: true}
+            - {name: hostfs, mountPath: /hostfs, readOnly: true, mountPropagation: HostToContainer}
+      volumes:
+        - name: config
+          configMap: {name: gman-otel}
+        - name: tls
+          secret: {secretName: gman-otel-tls}
+        - name: hostfs
+          hostPath: {path: /}

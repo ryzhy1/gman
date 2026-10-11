@@ -1,0 +1,772 @@
+{
+ "uid": "gman-k8s",
+ "title": "GMan · Kubernetes",
+ "description": "Узлы, поды и контейнеры Kubernetes-кластера по данным kubelet.",
+ "tags": [
+  "gman"
+ ],
+ "timezone": "browser",
+ "schemaVersion": 39,
+ "version": 1,
+ "editable": true,
+ "refresh": "30s",
+ "time": {
+  "from": "now-6h",
+  "to": "now"
+ },
+ "templating": {
+  "list": [
+   {
+    "name": "node",
+    "label": "Узел",
+    "type": "query",
+    "datasource": {
+     "type": "prometheus",
+     "uid": "prometheus"
+    },
+    "query": {
+     "query": "label_values(k8s_node_cpu_usage, host_id)",
+     "refId": "v"
+    },
+    "definition": "label_values(k8s_node_cpu_usage, host_id)",
+    "refresh": 2,
+    "sort": 1,
+    "includeAll": true,
+    "multi": true,
+    "allValue": ".*"
+   },
+   {
+    "name": "namespace",
+    "label": "Namespace",
+    "type": "query",
+    "datasource": {
+     "type": "prometheus",
+     "uid": "prometheus"
+    },
+    "query": {
+     "query": "label_values(k8s_pod_memory_working_set_bytes{host_id=~\"$node\"}, k8s_namespace_name)",
+     "refId": "v"
+    },
+    "definition": "label_values(k8s_pod_memory_working_set_bytes{host_id=~\"$node\"}, k8s_namespace_name)",
+    "refresh": 2,
+    "sort": 1,
+    "includeAll": true,
+    "multi": true,
+    "allValue": ".*"
+   }
+  ]
+ },
+ "panels": [
+  {
+   "type": "row",
+   "title": "Узлы",
+   "collapsed": false,
+   "gridPos": {
+    "x": 0,
+    "y": 0,
+    "w": 24,
+    "h": 1
+   },
+   "panels": []
+  },
+  {
+   "type": "timeseries",
+   "title": "CPU узла, ядра",
+   "description": "По данным kubelet. Загрузка в процентах и по состояниям — в дашборде «GMan · Хост» (host_id = имя узла).",
+   "datasource": {
+    "type": "prometheus",
+    "uid": "prometheus"
+   },
+   "gridPos": {
+    "x": 0,
+    "y": 1,
+    "w": 12,
+    "h": 8
+   },
+   "fieldConfig": {
+    "defaults": {
+     "unit": "short",
+     "min": 0,
+     "custom": {
+      "fillOpacity": 5,
+      "stacking": {
+       "mode": "none"
+      },
+      "showPoints": "never",
+      "lineWidth": 1
+     }
+    },
+    "overrides": []
+   },
+   "options": {
+    "legend": {
+     "displayMode": "table",
+     "placement": "bottom",
+     "calcs": [
+      "lastNotNull",
+      "max"
+     ]
+    },
+    "tooltip": {
+     "mode": "multi",
+     "sort": "desc"
+    }
+   },
+   "targets": [
+    {
+     "datasource": {
+      "type": "prometheus",
+      "uid": "prometheus"
+     },
+     "refId": "A",
+     "expr": "k8s_node_cpu_usage{host_id=~\"$node\"}",
+     "legendFormat": "{{host_id}}"
+    }
+   ]
+  },
+  {
+   "type": "timeseries",
+   "title": "Память узла",
+   "description": "",
+   "datasource": {
+    "type": "prometheus",
+    "uid": "prometheus"
+   },
+   "gridPos": {
+    "x": 12,
+    "y": 1,
+    "w": 12,
+    "h": 8
+   },
+   "fieldConfig": {
+    "defaults": {
+     "unit": "bytes",
+     "min": 0,
+     "custom": {
+      "fillOpacity": 5,
+      "stacking": {
+       "mode": "none"
+      },
+      "showPoints": "never",
+      "lineWidth": 1
+     }
+    },
+    "overrides": []
+   },
+   "options": {
+    "legend": {
+     "displayMode": "table",
+     "placement": "bottom",
+     "calcs": [
+      "lastNotNull",
+      "max"
+     ]
+    },
+    "tooltip": {
+     "mode": "multi",
+     "sort": "desc"
+    }
+   },
+   "targets": [
+    {
+     "datasource": {
+      "type": "prometheus",
+      "uid": "prometheus"
+     },
+     "refId": "A",
+     "expr": "k8s_node_memory_working_set_bytes{host_id=~\"$node\"}",
+     "legendFormat": "working set {{host_id}}"
+    },
+    {
+     "datasource": {
+      "type": "prometheus",
+      "uid": "prometheus"
+     },
+     "refId": "B",
+     "expr": "k8s_node_memory_available_bytes{host_id=~\"$node\"}",
+     "legendFormat": "available {{host_id}}"
+    }
+   ]
+  },
+  {
+   "type": "timeseries",
+   "title": "Сеть узла",
+   "description": "",
+   "datasource": {
+    "type": "prometheus",
+    "uid": "prometheus"
+   },
+   "gridPos": {
+    "x": 0,
+    "y": 9,
+    "w": 12,
+    "h": 8
+   },
+   "fieldConfig": {
+    "defaults": {
+     "unit": "Bps",
+     "min": 0,
+     "custom": {
+      "fillOpacity": 5,
+      "stacking": {
+       "mode": "none"
+      },
+      "showPoints": "never",
+      "lineWidth": 1
+     }
+    },
+    "overrides": []
+   },
+   "options": {
+    "legend": {
+     "displayMode": "table",
+     "placement": "bottom",
+     "calcs": [
+      "lastNotNull",
+      "max"
+     ]
+    },
+    "tooltip": {
+     "mode": "multi",
+     "sort": "desc"
+    }
+   },
+   "targets": [
+    {
+     "datasource": {
+      "type": "prometheus",
+      "uid": "prometheus"
+     },
+     "refId": "A",
+     "expr": "rate(k8s_node_network_io_bytes_total{host_id=~\"$node\"}[2m])",
+     "legendFormat": "{{host_id}} {{interface}} {{direction}}"
+    }
+   ]
+  },
+  {
+   "type": "timeseries",
+   "title": "Файловая система узла (kubelet)",
+   "description": "Файловая система, где kubelet хранит данные подов (обычно /var/lib/kubelet).",
+   "datasource": {
+    "type": "prometheus",
+    "uid": "prometheus"
+   },
+   "gridPos": {
+    "x": 12,
+    "y": 9,
+    "w": 12,
+    "h": 8
+   },
+   "fieldConfig": {
+    "defaults": {
+     "unit": "percentunit",
+     "min": 0,
+     "custom": {
+      "fillOpacity": 5,
+      "stacking": {
+       "mode": "none"
+      },
+      "showPoints": "never",
+      "lineWidth": 1
+     }
+    },
+    "overrides": []
+   },
+   "options": {
+    "legend": {
+     "displayMode": "table",
+     "placement": "bottom",
+     "calcs": [
+      "lastNotNull",
+      "max"
+     ]
+    },
+    "tooltip": {
+     "mode": "multi",
+     "sort": "desc"
+    }
+   },
+   "targets": [
+    {
+     "datasource": {
+      "type": "prometheus",
+      "uid": "prometheus"
+     },
+     "refId": "A",
+     "expr": "k8s_node_filesystem_usage_bytes{host_id=~\"$node\"} / k8s_node_filesystem_capacity_bytes{host_id=~\"$node\"}",
+     "legendFormat": "{{host_id}}"
+    }
+   ]
+  },
+  {
+   "type": "timeseries",
+   "title": "Поды по namespace",
+   "description": "Поды, о которых kubelet отдаёт статистику (запущенные).",
+   "datasource": {
+    "type": "prometheus",
+    "uid": "prometheus"
+   },
+   "gridPos": {
+    "x": 0,
+    "y": 17,
+    "w": 12,
+    "h": 8
+   },
+   "fieldConfig": {
+    "defaults": {
+     "unit": "short",
+     "min": 0,
+     "custom": {
+      "fillOpacity": 5,
+      "stacking": {
+       "mode": "none"
+      },
+      "showPoints": "never",
+      "lineWidth": 1
+     }
+    },
+    "overrides": []
+   },
+   "options": {
+    "legend": {
+     "displayMode": "table",
+     "placement": "bottom",
+     "calcs": [
+      "lastNotNull",
+      "max"
+     ]
+    },
+    "tooltip": {
+     "mode": "multi",
+     "sort": "desc"
+    }
+   },
+   "targets": [
+    {
+     "datasource": {
+      "type": "prometheus",
+      "uid": "prometheus"
+     },
+     "refId": "A",
+     "expr": "count by (k8s_namespace_name) (max by (k8s_namespace_name, k8s_pod_uid) (k8s_pod_memory_working_set_bytes{host_id=~\"$node\",k8s_namespace_name=~\"$namespace\"}))",
+     "legendFormat": "{{k8s_namespace_name}}"
+    }
+   ]
+  },
+  {
+   "type": "timeseries",
+   "title": "Загрузка GPU",
+   "description": "DCGM Exporter узла (GPU Operator). Подробнее — дашборд «GMan · Хост».",
+   "datasource": {
+    "type": "prometheus",
+    "uid": "prometheus"
+   },
+   "gridPos": {
+    "x": 12,
+    "y": 17,
+    "w": 12,
+    "h": 8
+   },
+   "fieldConfig": {
+    "defaults": {
+     "unit": "percent",
+     "min": 0,
+     "custom": {
+      "fillOpacity": 5,
+      "stacking": {
+       "mode": "none"
+      },
+      "showPoints": "never",
+      "lineWidth": 1
+     }
+    },
+    "overrides": []
+   },
+   "options": {
+    "legend": {
+     "displayMode": "table",
+     "placement": "bottom",
+     "calcs": [
+      "lastNotNull",
+      "max"
+     ]
+    },
+    "tooltip": {
+     "mode": "multi",
+     "sort": "desc"
+    }
+   },
+   "targets": [
+    {
+     "datasource": {
+      "type": "prometheus",
+      "uid": "prometheus"
+     },
+     "refId": "A",
+     "expr": "DCGM_FI_DEV_GPU_UTIL{host_id=~\"$node\"}",
+     "legendFormat": "{{host_id}} GPU {{gpu}}"
+    }
+   ]
+  },
+  {
+   "type": "row",
+   "title": "Поды и контейнеры",
+   "collapsed": false,
+   "gridPos": {
+    "x": 0,
+    "y": 25,
+    "w": 24,
+    "h": 1
+   },
+   "panels": []
+  },
+  {
+   "type": "timeseries",
+   "title": "CPU контейнеров, ядра (топ 15)",
+   "description": "1.0 = одно полностью занятое ядро.",
+   "datasource": {
+    "type": "prometheus",
+    "uid": "prometheus"
+   },
+   "gridPos": {
+    "x": 0,
+    "y": 26,
+    "w": 12,
+    "h": 8
+   },
+   "fieldConfig": {
+    "defaults": {
+     "unit": "short",
+     "min": 0,
+     "custom": {
+      "fillOpacity": 5,
+      "stacking": {
+       "mode": "none"
+      },
+      "showPoints": "never",
+      "lineWidth": 1
+     }
+    },
+    "overrides": []
+   },
+   "options": {
+    "legend": {
+     "displayMode": "table",
+     "placement": "bottom",
+     "calcs": [
+      "lastNotNull",
+      "max"
+     ]
+    },
+    "tooltip": {
+     "mode": "multi",
+     "sort": "desc"
+    }
+   },
+   "targets": [
+    {
+     "datasource": {
+      "type": "prometheus",
+      "uid": "prometheus"
+     },
+     "refId": "A",
+     "expr": "topk(15, max by (host_id, k8s_namespace_name, k8s_pod_name, k8s_container_name) (rate(container_cpu_time_seconds_total{host_id=~\"$node\",k8s_namespace_name=~\"$namespace\"}[2m])))",
+     "legendFormat": "{{host_id}} / {{k8s_namespace_name}}/{{k8s_pod_name}}/{{k8s_container_name}}"
+    }
+   ]
+  },
+  {
+   "type": "timeseries",
+   "title": "Память контейнеров (working set) (топ 15)",
+   "description": "Working set — то, что учитывает OOM killer и лимит памяти Kubernetes.",
+   "datasource": {
+    "type": "prometheus",
+    "uid": "prometheus"
+   },
+   "gridPos": {
+    "x": 12,
+    "y": 26,
+    "w": 12,
+    "h": 8
+   },
+   "fieldConfig": {
+    "defaults": {
+     "unit": "bytes",
+     "min": 0,
+     "custom": {
+      "fillOpacity": 5,
+      "stacking": {
+       "mode": "none"
+      },
+      "showPoints": "never",
+      "lineWidth": 1
+     }
+    },
+    "overrides": []
+   },
+   "options": {
+    "legend": {
+     "displayMode": "table",
+     "placement": "bottom",
+     "calcs": [
+      "lastNotNull",
+      "max"
+     ]
+    },
+    "tooltip": {
+     "mode": "multi",
+     "sort": "desc"
+    }
+   },
+   "targets": [
+    {
+     "datasource": {
+      "type": "prometheus",
+      "uid": "prometheus"
+     },
+     "refId": "A",
+     "expr": "topk(15, max by (host_id, k8s_namespace_name, k8s_pod_name, k8s_container_name) (container_memory_working_set_bytes{host_id=~\"$node\",k8s_namespace_name=~\"$namespace\"}))",
+     "legendFormat": "{{host_id}} / {{k8s_namespace_name}}/{{k8s_pod_name}}/{{k8s_container_name}}"
+    }
+   ]
+  },
+  {
+   "type": "timeseries",
+   "title": "CPU относительно лимита",
+   "description": "100% — контейнер упёрся в CPU-лимит (дальше throttling). Нет линии — лимит не задан.",
+   "datasource": {
+    "type": "prometheus",
+    "uid": "prometheus"
+   },
+   "gridPos": {
+    "x": 0,
+    "y": 34,
+    "w": 12,
+    "h": 8
+   },
+   "fieldConfig": {
+    "defaults": {
+     "unit": "percentunit",
+     "min": 0,
+     "custom": {
+      "fillOpacity": 5,
+      "stacking": {
+       "mode": "none"
+      },
+      "showPoints": "never",
+      "lineWidth": 1
+     }
+    },
+    "overrides": []
+   },
+   "options": {
+    "legend": {
+     "displayMode": "table",
+     "placement": "bottom",
+     "calcs": [
+      "lastNotNull",
+      "max"
+     ]
+    },
+    "tooltip": {
+     "mode": "multi",
+     "sort": "desc"
+    }
+   },
+   "targets": [
+    {
+     "datasource": {
+      "type": "prometheus",
+      "uid": "prometheus"
+     },
+     "refId": "A",
+     "expr": "max by (host_id, k8s_namespace_name, k8s_pod_name, k8s_container_name) (k8s_container_cpu_limit_utilization_ratio{host_id=~\"$node\",k8s_namespace_name=~\"$namespace\"})",
+     "legendFormat": "{{host_id}} / {{k8s_namespace_name}}/{{k8s_pod_name}}/{{k8s_container_name}}"
+    }
+   ]
+  },
+  {
+   "type": "timeseries",
+   "title": "Память относительно лимита",
+   "description": "100% — OOM kill. Нет линии — лимит не задан.",
+   "datasource": {
+    "type": "prometheus",
+    "uid": "prometheus"
+   },
+   "gridPos": {
+    "x": 12,
+    "y": 34,
+    "w": 12,
+    "h": 8
+   },
+   "fieldConfig": {
+    "defaults": {
+     "unit": "percentunit",
+     "min": 0,
+     "custom": {
+      "fillOpacity": 5,
+      "stacking": {
+       "mode": "none"
+      },
+      "showPoints": "never",
+      "lineWidth": 1
+     }
+    },
+    "overrides": []
+   },
+   "options": {
+    "legend": {
+     "displayMode": "table",
+     "placement": "bottom",
+     "calcs": [
+      "lastNotNull",
+      "max"
+     ]
+    },
+    "tooltip": {
+     "mode": "multi",
+     "sort": "desc"
+    }
+   },
+   "targets": [
+    {
+     "datasource": {
+      "type": "prometheus",
+      "uid": "prometheus"
+     },
+     "refId": "A",
+     "expr": "max by (host_id, k8s_namespace_name, k8s_pod_name, k8s_container_name) (k8s_container_memory_limit_utilization_ratio{host_id=~\"$node\",k8s_namespace_name=~\"$namespace\"})",
+     "legendFormat": "{{host_id}} / {{k8s_namespace_name}}/{{k8s_pod_name}}/{{k8s_container_name}}"
+    }
+   ]
+  },
+  {
+   "type": "timeseries",
+   "title": "Сеть подов (топ 15)",
+   "description": "",
+   "datasource": {
+    "type": "prometheus",
+    "uid": "prometheus"
+   },
+   "gridPos": {
+    "x": 0,
+    "y": 42,
+    "w": 12,
+    "h": 8
+   },
+   "fieldConfig": {
+    "defaults": {
+     "unit": "Bps",
+     "min": 0,
+     "custom": {
+      "fillOpacity": 5,
+      "stacking": {
+       "mode": "none"
+      },
+      "showPoints": "never",
+      "lineWidth": 1
+     }
+    },
+    "overrides": []
+   },
+   "options": {
+    "legend": {
+     "displayMode": "table",
+     "placement": "bottom",
+     "calcs": [
+      "lastNotNull",
+      "max"
+     ]
+    },
+    "tooltip": {
+     "mode": "multi",
+     "sort": "desc"
+    }
+   },
+   "targets": [
+    {
+     "datasource": {
+      "type": "prometheus",
+      "uid": "prometheus"
+     },
+     "refId": "A",
+     "expr": "topk(15, sum by (host_id, k8s_namespace_name, k8s_pod_name) (max by (host_id, k8s_namespace_name, k8s_pod_name, interface) (rate(k8s_pod_network_io_bytes_total{host_id=~\"$node\",k8s_namespace_name=~\"$namespace\",direction=\"receive\"}[2m]))))",
+     "legendFormat": "rx {{host_id}} / {{k8s_namespace_name}}/{{k8s_pod_name}}"
+    },
+    {
+     "datasource": {
+      "type": "prometheus",
+      "uid": "prometheus"
+     },
+     "refId": "B",
+     "expr": "topk(15, sum by (host_id, k8s_namespace_name, k8s_pod_name) (max by (host_id, k8s_namespace_name, k8s_pod_name, interface) (rate(k8s_pod_network_io_bytes_total{host_id=~\"$node\",k8s_namespace_name=~\"$namespace\",direction=\"transmit\"}[2m]))))",
+     "legendFormat": "tx {{host_id}} / {{k8s_namespace_name}}/{{k8s_pod_name}}"
+    }
+   ]
+  },
+  {
+   "type": "timeseries",
+   "title": "Использование requests",
+   "description": "Выше 100% — контейнер потребляет больше запрошенного; планировщик этого не учитывает.",
+   "datasource": {
+    "type": "prometheus",
+    "uid": "prometheus"
+   },
+   "gridPos": {
+    "x": 12,
+    "y": 42,
+    "w": 12,
+    "h": 8
+   },
+   "fieldConfig": {
+    "defaults": {
+     "unit": "percentunit",
+     "min": 0,
+     "custom": {
+      "fillOpacity": 5,
+      "stacking": {
+       "mode": "none"
+      },
+      "showPoints": "never",
+      "lineWidth": 1
+     }
+    },
+    "overrides": []
+   },
+   "options": {
+    "legend": {
+     "displayMode": "table",
+     "placement": "bottom",
+     "calcs": [
+      "lastNotNull",
+      "max"
+     ]
+    },
+    "tooltip": {
+     "mode": "multi",
+     "sort": "desc"
+    }
+   },
+   "targets": [
+    {
+     "datasource": {
+      "type": "prometheus",
+      "uid": "prometheus"
+     },
+     "refId": "A",
+     "expr": "max by (host_id, k8s_namespace_name, k8s_pod_name, k8s_container_name) (k8s_container_cpu_request_utilization_ratio{host_id=~\"$node\",k8s_namespace_name=~\"$namespace\"})",
+     "legendFormat": "cpu {{host_id}} / {{k8s_namespace_name}}/{{k8s_pod_name}}/{{k8s_container_name}}"
+    },
+    {
+     "datasource": {
+      "type": "prometheus",
+      "uid": "prometheus"
+     },
+     "refId": "B",
+     "expr": "max by (host_id, k8s_namespace_name, k8s_pod_name, k8s_container_name) (k8s_container_memory_request_utilization_ratio{host_id=~\"$node\",k8s_namespace_name=~\"$namespace\"})",
+     "legendFormat": "memory {{host_id}} / {{k8s_namespace_name}}/{{k8s_pod_name}}/{{k8s_container_name}}"
+    }
+   ]
+  }
+ ]
+}
