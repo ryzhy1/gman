@@ -1,7 +1,10 @@
 """GPU process attribution on Kubernetes nodes: /proc/<pid>/cgroup -> container ID -> pod."""
 import json
+import os
+import shlex
 import subprocess
 from datetime import datetime, timezone
+from pathlib import Path
 
 import httpx
 import pytest
@@ -189,17 +192,24 @@ def test_token_file(monkeypatch, tmp_path):
 
 
 def node_snapshot(**extra):
-    return {"source_id": "node-2", "source_type": "kubernetes-node", "hostname": "gpu-1", "cluster": "node-1",
+    return {"source_id": "node-1.gpu-1", "source_type": "kubernetes-node", "hostname": "gpu-1", "cluster": "node-1",
             "observed_at": datetime.now(timezone.utc).isoformat(), "instances": [],
             "gpus": [{"id": "GPU-1", "vendor": "NVIDIA", "processes": [
                 {"pid": 100, "container_id": CID, "used_memory_bytes": 1024, "pod_uid": UID, "namespace": "ml",
                  "pod": "trainer-0", "container": "trainer", "instance_id": UID + ":trainer"}]}], **extra}
 
 
-def test_api_accepts_node_gpu_snapshot(client):
-    headers = auth("agent2")
+@pytest.fixture
+def node_token(monkeypatch):
+    monkeypatch.setenv("GMAN_AGENT_TOKENS", '{"node-1":"agent","node-1.gpu-1":"agent-gpu-1"}')
+    return auth("agent-gpu-1")
+
+
+def test_api_accepts_node_gpu_snapshot(client, node_token):
+    headers = node_token
     assert client.post("/api/inventory", headers=headers, json=node_snapshot()).status_code == 200
-    source = next(s for s in client.get("/api/overview", headers=auth("read")).json()["sources"] if s["source_id"] == "node-2")
+    source = next(s for s in client.get("/api/overview", headers=auth("read")).json()["sources"]
+                  if s["source_id"] == "node-1.gpu-1")
     assert source["cluster"] == "node-1" and source["instances"] == []
     assert source["gpus"][0]["processes"][0]["instance_id"] == UID + ":trainer"
     instance = {"id": UID + ":trainer", "name": "trainer-0/trainer", "runtime": "kubernetes", "status": "running",
@@ -207,6 +217,13 @@ def test_api_accepts_node_gpu_snapshot(client):
     # A node source never carries instances (they belong to the cluster source) and must name its cluster.
     for bad in (node_snapshot(instances=[instance]), node_snapshot(cluster=""), node_snapshot(cluster="a b")):
         assert client.post("/api/inventory", headers=headers, json=bad).status_code == 422
+
+
+def test_node_source_describes_only_the_node_it_is_named_after(client, node_token):
+    # The token of "node-1.gpu-1" cannot report another node or put the node into another cluster.
+    for bad in (node_snapshot(hostname="gpu-2"), node_snapshot(cluster="other"),
+                node_snapshot(cluster="node-1.gpu", hostname="1")):
+        assert client.post("/api/inventory", headers=node_token, json=bad).status_code == 422
 
 
 def test_k8s_gpu_metrics_by_pod(client, configured):
@@ -231,3 +248,26 @@ def test_k8s_gpu_metrics_by_pod(client, configured):
                 {**params, "scope": "k8s_container"}):
         assert client.get("/api/metrics/range", headers=auth("read"), params=bad).status_code == 422
     assert set(metrics.SCOPES["k8s_gpu"][1]) == {"namespace", "pod", "container"}
+
+
+def test_systemd_unit_runs_node_mode_from_environment(tmp_path, monkeypatch):
+    """deploy/systemd/gman-collect.service passes only --runtime/--source-id/--send: the node name and the
+    cluster of the kubernetes-node mode must come from the environment file (NODE_NAME, GMAN_CLUSTER)."""
+    unit = (Path(__file__).resolve().parents[2] / "deploy/systemd/gman-collect.service").read_text()
+    exec_start = next(line for line in unit.splitlines() if line.startswith("ExecStart="))
+    env = {"GMAN_RUNTIME": "kubernetes-node", "GMAN_SOURCE_ID": "cluster-01.gpu-1", "NODE_NAME": "gpu-1",
+           "GMAN_CLUSTER": "cluster-01", "GMAN_URL": "https://gman.example", "GMAN_AGENT_TOKEN": "t",
+           "GMAN_AGENT_STATE_DIR": str(tmp_path)}
+    for key, value in env.items():
+        monkeypatch.setenv(key, value)
+    argv = [os.path.expandvars(a) for a in shlex.split(exec_start.split("=", 1)[1])[2:]]
+    seen = []
+
+    def fake(*args):
+        seen.append(args)
+        raise RuntimeError("stop before sending")
+
+    monkeypatch.setattr(collect, "collect", fake)
+    with pytest.raises(RuntimeError, match="stop"):
+        collect.main(argv)
+    assert seen == [("kubernetes-node", "cluster-01.gpu-1", "gpu-1", "cluster-01")]

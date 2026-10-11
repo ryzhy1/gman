@@ -56,7 +56,8 @@ NVIDIA на серверах, Bitbucket/GitLab для исходного код�
   собираются и отклоняются схемой), поэтому значения не маскируются.
 - Endpoint событий Bamboo и скрипт отправки из deployment job, дедупликация событий.
 - Интерфейс каталога, экземпляров, конфигураций, серверов/GPU и постраничного журнала.
-  Отметка устаревания после трех минут, обновление интерфейса раз в 30 секунд.
+  Отметка устаревания через три минуты после приема последнего снимка (received_at по часам
+  сервера, а не часам агента или браузера), обновление интерфейса раз в 30 секунд.
 - Ресурсы в портале: CPU (в ядрах) и память экземпляров против лимитов, нагрузка хостов
   (CPU, RAM, ФС, диск, сеть), GPU NVIDIA из DCGM (загрузка, VRAM, температуры, мощность,
   частоты, XID); вкладка «Ресурсы» с графиками за 1 час / 24 часа / 7 дней.
@@ -142,9 +143,12 @@ docker compose --env-file .env -f deploy/compose.yaml -f deploy/compose.prod.yam
 ```
 
 Снаружи доступны: 443 (портал, /api, Grafana на /grafana/), 80 (только редирект на HTTPS)
-и 4317 (OTLP gRPC с mTLS). Prometheus и Alertmanager остаются на 127.0.0.1:9090/9093,
+и 4317 (OTLP gRPC с mTLS). Prometheus и Alertmanager остаются на 127.0.0.1:9090/9093
+(у Alertmanager нет аутентификации, поэтому nginx его не проксирует: ссылки «в Alertmanager»
+из уведомлений ведут на GMAN_ALERTMANAGER_URL, по умолчанию 127.0.0.1:9093 — через SSH-туннель),
 PostgreSQL и Grafana не публикуются. Получатели алертов — GMAN_ALERT_* (раздел «Алерты»),
 runbook-ссылки в уведомлениях ведут на https://GMAN_PUBLIC_HOST. Ссылки Grafana в портале ведут на https://GMAN_PUBLIC_HOST/grafana.
+GMAN_OIDC_REDIRECT_URI по умолчанию — https://GMAN_PUBLIC_HOST/api/auth/callback (его и регистрируйте в IdP).
 Ограничьте 443 и 4317 межсетевым экраном подсетями серверов и пользователей.
 
 nginx: HSTS, TLS 1.2/1.3; тело запроса до 1 МБ, для POST /api/inventory — до 20 МБ;
@@ -392,11 +396,21 @@ account). Процесс получает namespace, pod, контейнер и 
 Узел — отдельный источник `<кластер>.<узел>` (source_type kubernetes-node) со своим токеном
 в GMAN_AGENT_TOKENS. Экземпляров в нем нет: pod-ы по-прежнему сообщает источник кластера,
 поэтому история не дублируется. Портал показывает GPU узла внутри карточки кластера.
+API принимает от такого источника только снимок с source_id = `<cluster>.<hostname>`
+(иначе 422): токен узла не может описать другой узел или кластер. В /metrics GPU узла
+помечаются host_id = имя узла, как в DCGM и gman_k8s_node_ready.
+
+DaemonSet монтирует в каждый pod Secret с токенами всех GPU-узлов (выбрать Secret по
+имени узла DaemonSet не умеет): тот, кто управляет одним GPU-узлом, может присылать
+снимки GPU за другие GPU-узлы списка. Источники кластера и Docker-хостов это не
+затрагивает. Если такой риск неприемлем — systemd timer на каждом узле со своим токеном.
+Spool DaemonSet-а на emptyDir намеренно: у источника узла хранится только последний снимок.
 
 Варианты запуска: DaemonSet из deploy/gpu-attribution-k8s.yaml (hostPID, без
 capabilities, nvidia-smi от NVIDIA container runtime без запроса nvidia.com/gpu, токены в
 Secret с ключами по именам узлов через GMAN_AGENT_TOKEN_FILE, RBAC — только list pods)
-или systemd timer на узле с read-only kubeconfig. GMAN_PROC_ROOT задает другой путь к
+или systemd timer на узле с read-only kubeconfig (в /etc/gman/agent.env: GMAN_RUNTIME=kubernetes-node,
+NODE_NAME и GMAN_CLUSTER — значения по умолчанию для --node и --cluster). GMAN_PROC_ROOT задает другой путь к
 /proc хоста, если он смонтирован отдельно.
 
 Загрузку GPU по pod-ам дают метки namespace/pod/container DCGM Exporter в режиме
@@ -623,7 +637,8 @@ services, sources (последний снимок), instances (текущее �
 deployments, sessions (SSO-сессии, только хеш cookie). Новые поля снимков и каталога
 (например, owners, logs) хранятся в JSON и не требуют миграций.
 GMAN_RETENTION_DAYS (по умолчанию 180, 0 — отключить) удаляет события и неиспользуемые
-снимки конфигурации старше срока; деплои не удаляются.
+снимки конфигурации старше срока; деплои не удаляются. Истекшие SSO-сессии удаляются
+той же ежечасной очисткой (и при каждом входе) независимо от GMAN_RETENTION_DAYS.
 
 Переход с первой версии каркаса: старая таблица records не переносится. Агенты пришлют
 снимки заново (по одному событию source-connected), сервисы каталога нужно загрузить

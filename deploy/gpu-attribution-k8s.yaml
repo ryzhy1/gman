@@ -10,6 +10,12 @@
 #     --from-literal=gpu-1=<token of cluster-01.gpu-1> --from-literal=gpu-2=<token of cluster-01.gpu-2>
 # Secret keys are node names; GMAN_AGENT_TOKENS on the API maps "cluster-01.<node>" to the same tokens.
 # Set GMAN_URL and GMAN_CLUSTER (the cluster agent's --source-id) below.
+# Residual risk: a DaemonSet cannot mount a different Secret per node, so every agent pod sees all node tokens.
+# Whoever controls one GPU node (root, or exec into this pod) can send GPU snapshots as another GPU node of the
+# same list. The API limits the damage: a token is bound to its source "<cluster>.<node>", which must equal
+# cluster + "." + hostname of the snapshot, and node sources carry only GPU readings (no instances, no history),
+# so cluster and Docker sources cannot be touched. Where that is not acceptable, run the agent on each GPU node
+# from systemd with its own token (deploy/systemd, GMAN_RUNTIME=kubernetes-node) instead of this DaemonSet.
 apiVersion: v1
 kind: ServiceAccount
 metadata:
@@ -81,7 +87,9 @@ spec:
               value: https://gman.example  # Replace with the portal/API address (HTTPS).
             - name: GMAN_AGENT_TOKEN_FILE
               value: /etc/gman/tokens/$(NODE_NAME)
-            # Spool of unsent snapshots and the run lock; the root filesystem is read-only.
+            # Spool of unsent snapshots and the run lock; the root filesystem is read-only. emptyDir on purpose:
+            # the API keeps only the latest snapshot of a node source (no instances, so no history), so snapshots
+            # lost with a pod restart carry nothing the next snapshot a minute later does not.
             - name: GMAN_AGENT_STATE_DIR
               value: /var/lib/gman-agent
             # Expose the node's GPUs for nvidia-smi (utility only) without requesting nvidia.com/gpu,

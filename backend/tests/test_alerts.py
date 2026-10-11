@@ -82,6 +82,22 @@ def test_stale_gpu_readings_are_dropped(client, monkeypatch):
     assert 'gman_instance_restarts_total{source_id="node-1"' in text
 
 
+def test_node_gpu_source_is_labelled_with_its_node(client, monkeypatch):
+    """A kubernetes-node source "<cluster>.<node>" reports for the Kubernetes node (its hostname): the same host_id
+    as DCGM and gman_k8s_node_ready, so DCGM replaces nvidia-smi in the recording rules rather than adding a second
+    series for the same GPU, and GManK8sNodeNotReady inhibits the node source's GPU and GManSourceSilent alerts."""
+    monkeypatch.setenv("GMAN_AGENT_TOKENS", '{"cluster-01.gpu-1":"agent-gpu-1"}')
+    node = {"source_id": "cluster-01.gpu-1", "source_type": "kubernetes-node", "hostname": "gpu-1",
+            "cluster": "cluster-01", "observed_at": snapshot()["observed_at"], "instances": [],
+            "gpus": [{"id": "GPU-9", "vendor": "NVIDIA", "temperature_c": 80, "throttle_reasons": []}]}
+    assert client.post("/api/inventory", headers=auth("agent-gpu-1"), json=node).json()["accepted"]
+    data = samples(client.get("/metrics").text)
+    assert find(data, "gman_gpu_temperature_celsius", UUID="GPU-9") == 80
+    assert find(data, "gman_gpu_temperature_celsius", source_id="cluster-01.gpu-1", host_id="gpu-1") == 80
+    assert find(data, "gman_source_last_snapshot_timestamp_seconds", source_id="cluster-01.gpu-1", host_id="gpu-1",
+                source_type="kubernetes-node") > 0
+
+
 def test_label_values_are_escaped():
     assert exposition.line("m", {"a": 'x"y\\z\nw'}, 1) == 'm{a="x\\"y\\\\z\\nw"} 1.0'
 

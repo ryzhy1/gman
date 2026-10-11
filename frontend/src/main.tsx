@@ -6,7 +6,7 @@ import { ConfigView, History, InstanceTable, placeInstances, type Placed } from 
 import { ConfigHistory } from './configs';
 import { ServiceEditor } from './edit';
 import { ClusterCard, HostCard } from './hardware';
-import { date, stale } from './format';
+import { date, stale, syncServerClock } from './format';
 import { Resources } from './resources';
 import './style.css';
 
@@ -118,7 +118,9 @@ function App() {
     const ctrl = new AbortController();
     async function refresh() {
       try {
-        setData(await get<Overview>(token, '/api/overview', ctrl.signal));
+        const overview = await get<Overview>(token, '/api/overview', ctrl.signal);
+        syncServerClock(overview.server_time);
+        setData(overview);
         setError('');
         // Metrics are optional: the catalog stays usable when the store is down.
         setMetrics(await get<CurrentMetrics>(token, '/api/metrics/current', ctrl.signal)
@@ -154,12 +156,12 @@ function App() {
   const service = data?.services.find(s => s.id === selected);
   const own = instances.filter(i => i.service_id === selected);
   const unknown = instances.filter(i => !data?.services.some(s => s.id === i.service_id));
-  // GPUs of node-local sources are already counted in their cluster's node capacity.
-  const gpuCount = (data?.sources ?? []).reduce((n, s) => n + (s.source_type === 'kubernetes-node' ? 0 : s.gpus.length)
-    + (s.nodes ?? []).reduce((m, x) => m + x.gpu_capacity, 0), 0);
   // Node-local GPU sources are shown inside their cluster's node; without that cluster, as a host of their own.
   const hostSources = (data?.sources ?? []).filter(s => s.source_type !== 'kubernetes-node'
     || !data?.sources.some(c => c.source_type === 'kubernetes-cluster' && c.source_id === s.cluster));
+  // GPUs of node-local sources are already counted in their cluster's node capacity, unless that cluster is absent.
+  const gpuCount = hostSources.reduce((n, s) => n + s.gpus.length
+    + (s.nodes ?? []).reduce((m, x) => m + x.gpu_capacity, 0), 0);
   const openService = (id: string) => { if (data?.services.some(s => s.id === id)) { setPage('Сервисы'); setSelected(id); setTab('Обзор'); } };
   const open = (p: string) => { setPage(p); setSelected(''); setQuery(''); };
   const grafana = data?.grafana_url ?? '';

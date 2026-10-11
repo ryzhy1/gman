@@ -347,6 +347,10 @@ class Retention:
         if self.last is not None and now - self.last < self.interval:
             return False
         self.last = now
+        # Expired SSO sessions are useless whatever the history retention; sign-in purges them too, but
+        # without new sign-ins they would otherwise stay.
+        with engine.begin() as connection:
+            connection.execute(delete(UserSession).where(UserSession.expires_at < now))
         days = int(os.getenv("GMAN_RETENTION_DAYS", "180"))
         if days <= 0:
             return False

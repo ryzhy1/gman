@@ -17,6 +17,9 @@ services:
   api:
     environment:
       GMAN_GRAFANA_URL: https://${GMAN_PUBLIC_HOST:?Set GMAN_PUBLIC_HOST}/grafana
+      # SSO callback on the public HTTPS name: the login cookie is set on this host and must come back to it,
+      # and its https scheme makes the session cookie Secure (__Host-). Unused while GMAN_OIDC_ISSUER is empty.
+      GMAN_OIDC_REDIRECT_URI: ${GMAN_OIDC_REDIRECT_URI:-https://${GMAN_PUBLIC_HOST}/api/auth/callback}
     logging: *logging
   portal:
     ports: !override
@@ -46,6 +49,9 @@ services:
       GMAN_PORTAL_URL: https://${GMAN_PUBLIC_HOST:?Set GMAN_PUBLIC_HOST}
     logging: *logging
   alertmanager:
+    # Alertmanager has no authentication (anyone reaching it can silence alerts), so it is not proxied by nginx.
+    # Links in notifications therefore use GMAN_ALERTMANAGER_URL (default http://127.0.0.1:9093): open them
+    # through an SSH tunnel to the server, or set the variable to an address you publish with access control.
     logging: *logging
   grafana:
     environment:

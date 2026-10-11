@@ -346,6 +346,10 @@ class Snapshot(Strict):
         # Instances of a node are reported by the cluster source; reporting them twice would duplicate history.
         if self.source_type == "kubernetes-node" and (self.instances or not self.cluster):
             raise ValueError("kubernetes-node snapshots carry a cluster and no instances")
+        # The portal places node GPUs by (cluster, hostname) and alerts label them by hostname: a node token
+        # may only describe the node its source ID names, never another node or cluster.
+        if self.source_type == "kubernetes-node" and self.source_id != f"{self.cluster}.{self.hostname}":
+            raise ValueError("kubernetes-node source_id must be <cluster>.<node>, the node being the hostname")
         return self
 
 
@@ -551,7 +555,7 @@ def overview(session: Session = Depends(db)):
 
 @app.get("/api/logs/splunk", dependencies=[Depends(reader)])
 def splunk_links(service_id: str = Query(max_length=100), environment: str = Query("", max_length=200),
-                 range_: Literal["1h", "24h", "7d"] = Query("24h", alias="range"), session: Session = Depends(db)):
+                 range_: Literal["1h", "24h", "7d"] = Query("1h", alias="range"), session: Session = Depends(db)):
     """Splunk search links for a service and its instances; built here so values are SPL-escaped."""
     service = next((s for s in store.services(session) if s["id"] == service_id), None)
     if service is None:

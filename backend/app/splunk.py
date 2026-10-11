@@ -90,7 +90,7 @@ def index_for(settings, override, environment):
     return ""
 
 
-def link(settings, service, environment="", instance=None, host="", range_="24h"):
+def link(settings, service, environment="", instance=None, host="", range_="1h"):
     """Search URL for a catalog service, optionally narrowed to one inventory instance."""
     override = ((service.get("logs") or {}).get("splunk") or {})
     instance = instance or {}
@@ -110,7 +110,7 @@ def link(settings, service, environment="", instance=None, host="", range_="24h"
     return urlunsplit((parts.scheme, parts.netloc, parts.path, urlencode(query), ""))
 
 
-def links(service, sources, environment="", range_="24h"):
+def links(service, sources, environment="", range_="1h"):
     """Service-level link and one per instance of the service, keyed "<source_id>/<instance_id>"."""
     settings = config()
     if settings is None:

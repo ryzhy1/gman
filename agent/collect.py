@@ -930,7 +930,9 @@ def main(argv=None):
     parser.add_argument("--source-id", required=True)
     parser.add_argument("--node", default=os.environ.get("NODE_NAME", ""),
                         help="kubernetes-node: this node's name as in Kubernetes (default: NODE_NAME)")
-    parser.add_argument("--cluster", default="", help="kubernetes-node: --source-id of the cluster's inventory agent")
+    # Environment defaults let the systemd unit (deploy/systemd, ExecStart without these flags) run this mode.
+    parser.add_argument("--cluster", default=os.environ.get("GMAN_CLUSTER", ""),
+                        help="kubernetes-node: --source-id of the cluster's inventory agent (default: GMAN_CLUSTER)")
     parser.add_argument("--send", action="store_true")
     parser.add_argument("--watch", action="store_true", help="follow docker events (requires --send, docker)")
     parser.add_argument("--state-dir", help="spool and lock directory (default: GMAN_AGENT_STATE_DIR, "

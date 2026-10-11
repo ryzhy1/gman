@@ -55,10 +55,13 @@ def render(session):
 
     now = datetime.now(timezone.utc)
     for source in session.scalars(select(store.Source).order_by(store.Source.source_id)):
-        docker = source.source_type == "docker-host"
+        # On a Docker host GMAN_HOST_ID equals the source_id; a node-local GPU source ("<cluster>.<node>")
+        # reports for the node in its hostname, as DCGM and the k8s Collector label it; a cluster has no
+        # single host. The shared host_id lets GManK8sNodeNotReady inhibit the node source's alerts and lets
+        # DCGM series replace the nvidia-smi ones in the recording rules instead of duplicating the GPU.
+        host_id = {"docker-host": source.source_id, "kubernetes-node": source.hostname}.get(source.source_type)
         base = {"source_id": source.source_id, "source_type": source.source_type}
-        # On a Docker host GMAN_HOST_ID equals the source_id; a cluster has no single host.
-        add("gman_source_last_snapshot_timestamp_seconds", {**base, **({"host_id": source.source_id} if docker else {})},
+        add("gman_source_last_snapshot_timestamp_seconds", {**base, **({"host_id": host_id} if host_id else {})},
             source.received_at.timestamp())
         snapshot = source.snapshot or {}
         add("gman_source_collect_errors", base, len(snapshot.get("errors") or []))
@@ -68,7 +71,7 @@ def render(session):
         for gpu in (snapshot.get("gpus") or []) if fresh else []:
             if gpu.get("vendor") != "NVIDIA":
                 continue
-            labels = {"source_id": source.source_id, "host_id": source.source_id, "UUID": gpu["id"],
+            labels = {"source_id": source.source_id, "host_id": host_id or source.source_id, "UUID": gpu["id"],
                       "model": gpu.get("model", "")}
             if gpu.get("temperature_c") is not None:
                 add("gman_gpu_temperature_celsius", labels, gpu["temperature_c"])

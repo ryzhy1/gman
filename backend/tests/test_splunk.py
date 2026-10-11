@@ -80,7 +80,7 @@ def test_service_override(configured):
     settings = splunk.config()
     assert params(splunk.link(settings, service, "prod", range_="1h"))["q"] == \
         'search index="api_prod" app="api" earliest="-1h"'
-    assert params(splunk.link(settings, service, "test"))["q"] == 'search index="app_all" app="api" earliest="-24h"'
+    assert params(splunk.link(settings, service, "test"))["q"] == 'search index="app_all" app="api" earliest="-1h"'
     service["logs"]["splunk"]["index"] = "api_all"
     assert 'index="api_all"' in params(splunk.link(settings, service, "prod"))["q"]
 
@@ -100,6 +100,9 @@ def test_api_links(client, configured):  # noqa: F811
         'search index="api_idx" gman_service="api" gman_environment="prod" host="host" container_id="container-1"')
     assert client.get("/api/logs/splunk?service_id=api&environment=test", headers=auth("read")).json()["instances"] == {}
     assert client.get("/api/logs/splunk?service_id=api&range=1y", headers=auth("read")).status_code == 422
+    # Default period is one hour, as on the "Ресурсы" tab and in the README.
+    default = client.get("/api/logs/splunk?service_id=api", headers=auth("read")).json()
+    assert params(default["service"])["earliest"] == "-1h"
     assert client.get("/api/logs/splunk?service_id=api").status_code == 401
 
 

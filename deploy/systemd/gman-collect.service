@@ -17,7 +17,7 @@ User=gman-agent
 # Writable HOME for docker/kubectl caches; ProtectSystem=strict makes the rest read-only.
 StateDirectory=gman-agent
 Environment=HOME=/var/lib/gman-agent
-# Docker socket access (root-equivalent). For --runtime kubernetes remove it and set KUBECONFIG.
+# Docker socket access (root-equivalent). For kubernetes and kubernetes-node remove it and set KUBECONFIG.
 SupplementaryGroups=docker
 NoNewPrivileges=yes
 ProtectSystem=strict

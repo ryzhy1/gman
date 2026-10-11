@@ -96,6 +96,21 @@ def test_retention_deletes_old_history_at_most_hourly(client, monkeypatch):
     assert main.retention.run(main.engine, datetime.now(timezone.utc) + timedelta(hours=1, seconds=1))
 
 
+def test_retention_purges_expired_sessions(client, monkeypatch):
+    # Without new SSO sign-ins nothing else removes expired sessions; they go even with retention disabled.
+    main = main_module()
+    monkeypatch.setenv("GMAN_RETENTION_DAYS", "0")
+    now = datetime.now(timezone.utc)
+    with Session(main.engine) as session:
+        for name, expires in (("expired", now - timedelta(minutes=1)), ("live", now + timedelta(hours=1))):
+            session.add(store.UserSession(id=name, subject=name, role="viewer", data={}, csrf_token="x",
+                                          created_at=now - timedelta(hours=8), expires_at=expires))
+        session.commit()
+    main.retention.last = None
+    main.retention.run(main.engine, now)
+    assert [s.id for s in rows(store.UserSession, store.UserSession.id)] == ["live"]
+
+
 def test_concurrent_writes_are_serialized(client):
     main = main_module()
     if main.engine.dialect.name != "postgresql":
