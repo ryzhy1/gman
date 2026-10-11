@@ -12,7 +12,7 @@ from urllib.parse import urlsplit
 
 from fastapi import Depends, FastAPI, Header, HTTPException, Path, Query
 from fastapi.responses import JSONResponse
-from pydantic import BaseModel, ConfigDict, Field, field_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 from sqlalchemy import text
 from sqlalchemy.orm import Session
 
@@ -204,9 +204,16 @@ class Instance(Strict):
 
 
 class GPUProcess(Strict):
+    """A GPU process and its owner: Docker by container_id; Kubernetes pods also by pod and instance_id."""
     pid: int = Field(ge=0)
     container_id: str = Field(default="", max_length=100)
     used_memory_bytes: int | None = Field(default=None, ge=0)
+    pod_uid: str = Field(default="", max_length=100)
+    namespace: str = Field(default="", max_length=300)
+    pod: str = Field(default="", max_length=300)
+    container: str = Field(default="", max_length=300)
+    # Kubernetes inventory instance ID "<pod uid>:<container name>"; empty when not attributed to a container.
+    instance_id: str = Field(default="", max_length=700)
 
 
 def percent():
@@ -273,7 +280,10 @@ class Node(Strict):
 class Snapshot(Strict):
     source_id: str = Field(pattern=r"^[a-zA-Z0-9_.-]{1,100}$")
     observed_at: datetime
-    source_type: Literal["docker-host", "kubernetes-cluster"]
+    # kubernetes-node: node-local GPU snapshot of one cluster node; pods stay with the cluster source.
+    source_type: Literal["docker-host", "kubernetes-cluster", "kubernetes-node"]
+    # kubernetes-node only: source_id of the cluster source the node belongs to.
+    cluster: str = Field(default="", pattern=r"^[a-zA-Z0-9_.-]{0,100}$")
     agent_version: str = Field(default="", max_length=50)
     hostname: str = Field(max_length=300)
     os: str = Field(default="", max_length=300)
@@ -294,6 +304,13 @@ class Snapshot(Strict):
     @classmethod
     def short_errors(cls, value):
         return [e[:500] for e in value]
+
+    @model_validator(mode="after")
+    def node_snapshot(self):
+        # Instances of a node are reported by the cluster source; reporting them twice would duplicate history.
+        if self.source_type == "kubernetes-node" and (self.instances or not self.cluster):
+            raise ValueError("kubernetes-node snapshots carry a cluster and no instances")
+        return self
 
 
 class Deployment(Strict):
@@ -475,18 +492,22 @@ def metrics_current():
 
 
 @app.get("/api/metrics/range", dependencies=[Depends(reader)])
-def metrics_range(scope: Literal["host", "container", "gpu", "k8s_container", "k8s_pod"],
+def metrics_range(scope: Literal["host", "container", "gpu", "k8s_container", "k8s_pod", "k8s_gpu"],
                   metric: str = Query(max_length=100), range_: str = Query("1h", alias="range", max_length=10),
                   host_id: str | None = Query(None, max_length=300),
                   container_id: str | None = Query(None, max_length=300), uuid: str | None = Query(None, max_length=300),
                   pod_uid: str | None = Query(None, max_length=300),
-                  container_name: str | None = Query(None, max_length=300)):
+                  container_name: str | None = Query(None, max_length=300),
+                  namespace: str | None = Query(None, max_length=300), pod_name: str | None = Query(None, max_length=300)):
     """Object parameters by scope: host: host_id; container: host_id, container_id; gpu: host_id, uuid;
-    k8s_container: pod_uid, container_name; k8s_pod: pod_uid. Any other combination is a 422."""
+    k8s_container: pod_uid, container_name; k8s_pod: pod_uid; k8s_gpu: namespace, pod_name, container_name.
+    Any other combination is a 422."""
     if not metrics.base_url():
         raise HTTPException(503, "PROMETHEUS_URL is not configured")
-    matchers = {"host_id": host_id, "container_id": container_id, "UUID": uuid,
-                "k8s_pod_uid": pod_uid, "k8s_container_name": container_name}
+    # DCGM labels pods by name, kubelet_stats by UID: the same container_name parameter maps to either label.
+    container_label = "container" if scope == "k8s_gpu" else "k8s_container_name"
+    matchers = {"host_id": host_id, "container_id": container_id, "UUID": uuid, "k8s_pod_uid": pod_uid,
+                container_label: container_name, "namespace": namespace, "pod": pod_name}
     try:
         return metrics.series(scope, metric, {k: v for k, v in matchers.items() if v is not None}, range_)
     except KeyError:

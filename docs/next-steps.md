@@ -35,8 +35,12 @@
 8. Splunk: ссылки «Логи в Splunk» на карточке сервиса и у экземпляров, строятся API
    по конфигурации (GMAN_SPLUNK_URL, GMAN_SPLUNK_INDEXES, GMAN_SPLUNK_SEARCH) с
    экранированием SPL и переопределением logs.splunk в каталоге. См. README «Splunk».
+9. Атрибуция процессов GPU в Kubernetes (PID → pod): режим агента kubernetes-node на
+   GPU-узле (cgroup v1/v2, systemd/cgroupfs, containerd/CRI-O/cri-dockerd, static pod),
+   источник узла без экземпляров, DaemonSet deploy/gpu-attribution-k8s.yaml, процессы в
+   карточке узла и экземплярах сервиса; GPU по pod-ам из меток DCGM на вкладке «Ресурсы».
 
-Тесты: 74 passed, 1 skipped (тест конкурентности только для PostgreSQL).
+Тесты: 101 passed, 1 skipped (тест конкурентности только для PostgreSQL).
 Frontend: `npm run build` проходит. Подробности — в README.
 
 ## Подготовка на новой машине
@@ -99,9 +103,11 @@ kubectl), сервис backup в контейнере (busybox sh/find).
 ## Дальше по плану
 
 - SSO (OIDC) и роли viewer / service owner / platform admin вместо общего токена.
-- Атрибуция процессов GPU в Kubernetes (PID → pod) — сейчас только Docker-хосты.
+- ~~Атрибуция процессов GPU в Kubernetes (PID → pod)~~ — сделано (п. 9 выше). Не проверено
+  в реальном кластере: nvidia-smi через NVIDIA runtime без запроса GPU, список процессов
+  от non-root, PSA privileged для hostPID, метки DCGM pod/namespace/container.
 - Алерты (Grafana alerting или Alertmanager): узел/источник молчит, GPU XID/ECC,
   перегрев, троттлинг, OOMKilled, CrashLoopBackOff.
-- ~~Splunk: поиск по service/environment по ссылке из карточки~~ — сделано (п. 5 выше);
+- ~~Splunk: поиск по service/environment по ссылке из карточки~~ — сделано (п. 8 выше);
   осталось согласовать индексы и имена полей и задать их в GMAN_SPLUNK_*.
 - Обновить docs/architecture.md по фактической реализации.

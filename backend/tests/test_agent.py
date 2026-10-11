@@ -116,7 +116,7 @@ def test_nvidia_details_and_process_attribution(monkeypatch, tmp_path):
             return base + extended + "\n"
         return "GPU-1, 4242, 1024\nGPU-1, 77, [N/A]\n"
     monkeypatch.setattr(collect, "command", fake)
-    monkeypatch.setattr(collect, "container_of", lambda pid: "c" * 64 if pid == "4242" else "")
+    monkeypatch.setattr(collect, "cgroup_of", lambda pid: {"container_id": "c" * 64 if pid == "4242" else "", "pod_uid": ""})
     errors = []
     gpu = collect.nvidia_gpus(errors)[0]
     assert errors == []
@@ -148,9 +148,11 @@ def test_nvidia_old_driver_falls_back_to_base_fields(monkeypatch):
 def test_container_of_reads_cgroup(monkeypatch, tmp_path):
     cgroup = tmp_path / "cgroup"
     cgroup.write_text("0::/system.slice/docker-" + "ab" * 32 + ".scope\n")
-    real = collect.Path
-    monkeypatch.setattr(collect, "Path", lambda p: cgroup if p == "/proc/1/cgroup" else real(p))
+    (tmp_path / "1").mkdir()
+    cgroup.rename(tmp_path / "1" / "cgroup")
+    monkeypatch.setattr(collect, "PROC_ROOT", str(tmp_path))
     assert collect.container_of("1") == "ab" * 32
+    assert collect.container_of("2") == ""  # Exited process.
 
 
 def test_node_capacity_and_requests():

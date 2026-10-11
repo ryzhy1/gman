@@ -1,5 +1,5 @@
 import type { CurrentMetrics, GPU, GPUProcess, MetricValues, Node, Source } from './api';
-import type { Placed } from './components';
+import { nodeGpuSource, type Placed } from './components';
 import { bytes, cores, date, num, percent, rate, size, stale, unit, uptime } from './format';
 
 type Open = (serviceId: string) => void;
@@ -97,10 +97,18 @@ function GpuCard({ title, id, inventory, live, observedAt, instances, onService,
   </div>;
 }
 
+/** Docker containers match by container ID; Kubernetes pods by the instance ID the node agent attributed. */
 function Owner({ process, instances, onService }: { process: GPUProcess; instances: Placed[]; onService?: Open }) {
-  if (!process.container_id) return <>процесс хоста (PID {process.pid})</>;
-  const i = instances.find(x => x.id === process.container_id) ?? instances.find(x => x.id.startsWith(process.container_id));
-  if (!i) return <>контейнер {process.container_id.slice(0, 12)}<small>нет в инвентаре</small></>;
+  const cid = process.container_id;
+  const i = process.instance_id ? instances.find(x => x.id === process.instance_id)
+    : cid ? instances.find(x => x.id === cid) ?? instances.find(x => x.id.startsWith(cid)) : undefined;
+  if (!i) {
+    if (process.pod) return <>pod {process.namespace}/{process.pod}{process.container && ` · ${process.container}`}
+      <small>нет в инвентаре кластера · PID {process.pid}</small></>;
+    if (process.pod_uid) return <>pod {process.pod_uid.slice(0, 8)}…<small>pod не найден на узле · PID {process.pid}</small></>;
+    if (!cid) return <>процесс хоста (PID {process.pid})</>;
+    return <>контейнер {cid.slice(0, 12)}<small>нет в инвентаре · PID {process.pid}</small></>;
+  }
   return <>
     <b>{i.name}</b>
     <small>{i.service_id
@@ -113,7 +121,7 @@ function GpuProcesses({ gpu, instances, onService }: { gpu: GPU; instances: Plac
   if (!gpu.processes) return <p className="note">Список процессов не передан агентом.</p>;
   if (!gpu.processes.length) return <p className="note">Процессов на GPU нет по последнему снимку.</p>;
   const rows = [...gpu.processes].sort((a, b) => (b.used_memory_bytes ?? -1) - (a.used_memory_bytes ?? -1));
-  const owners = new Set(rows.map(p => p.container_id || `pid:${p.pid}`));
+  const owners = new Set(rows.map(p => p.container_id || p.pod_uid || `pid:${p.pid}`));
   return <>
     <div className="table-wrap"><table className="dense">
       <thead><tr><th>Владелец процесса</th><th>VRAM процесса</th></tr></thead>
@@ -197,10 +205,16 @@ function Meter({ label, used, total, show, capacity }: {
 const coreUnit = (v: number) => `${cores(v)} ядер`;
 const gpuUnit = (v: number) => `${v} GPU`;
 
-function NodeCard({ node, source, metrics }: { node: Node; source: Source; metrics?: CurrentMetrics | null }) {
+/** `gpuSource`: the node-local agent's snapshot (nvidia-smi with processes attributed to pods), if connected. */
+function NodeCard({ node, source, gpuSource, metrics, onService }: {
+  node: Node; source: Source; gpuSource?: Source; metrics?: CurrentMetrics | null; onService?: Open;
+}) {
   const host = metrics?.host?.[node.name];
   const prefix = node.name + '/';
   const dcgm = Object.entries(metrics?.gpu ?? {}).filter(([k]) => k.startsWith(prefix));
+  const inventory = gpuSource?.gpus ?? [];
+  const dcgmOnly = dcgm.filter(([k]) => !inventory.some(g => prefix + g.id === k));
+  const instances = source.instances.filter(i => i.node === node.name).map(i => ({ ...i, source }));
   const pods = new Set(source.instances.filter(i => i.node === node.name).map(i => i.id.split(':')[0])).size;
   return <div className="node">
     <div className="node-head">
@@ -221,12 +235,21 @@ function NodeCard({ node, source, metrics }: { node: Node; source: Source; metri
     {node.gpu_product && <p className="muted">GPU: {node.gpu_product}{node.gpu_memory_mib != null && ` · ${size(node.gpu_memory_mib * 1024 ** 2)}`}</p>}
     <HostGauges host={host} cpuCount={node.cpu_capacity} memoryTotal={node.memory_capacity_bytes}
       missing={<>Метрики узла не получены (нет рядов host_id={node.name}).</>} />
-    {dcgm.map(([k, m], n) => <GpuCard key={k} title={`GPU ${n} · ${node.gpu_product || 'NVIDIA'}`} id={k.slice(prefix.length)} live={m} instances={[]} />)}
+    {gpuSource?.errors?.map(e => <div role="alert" className="alert" key={e}>Ошибка сбора GPU на узле: {e}</div>)}
+    {gpuSource && stale(gpuSource) && <p className="note">Снимок GPU узла устарел: агент kubernetes-node не присылал данные больше трех минут.</p>}
+    {inventory.map((g, n) => <GpuCard key={g.id} title={gpuTitle(g, n)} id={g.id} inventory={g} live={metrics?.gpu?.[prefix + g.id]}
+      observedAt={gpuSource!.observed_at} instances={instances} onService={onService} />)}
+    {dcgmOnly.map(([k, m], n) => <GpuCard key={k} title={`GPU ${inventory.length + n} · ${node.gpu_product || 'NVIDIA'}`} id={k.slice(prefix.length)}
+      live={m} instances={[]} />)}
     {node.gpu_capacity > 0 && !dcgm.length && <p className="note">Метрики DCGM для GPU этого узла не получены.</p>}
+    {node.gpu_capacity > 0 && !gpuSource && <p className="note">Процессы GPU не привязаны к pod: на узле не подключен агент
+      kubernetes-node (deploy/gpu-attribution-k8s.yaml).</p>}
   </div>;
 }
 
-export function ClusterCard({ source, metrics }: { source: Source; metrics?: CurrentMetrics | null }) {
+export function ClusterCard({ source, sources, metrics, onService }: {
+  source: Source; sources: Source[]; metrics?: CurrentMetrics | null; onService?: Open;
+}) {
   const nodes = source.nodes ?? [];
   const sum = (f: (n: Node) => number | null) => nodes.some(n => f(n) == null) ? null : nodes.reduce((s, n) => s + f(n)!, 0);
   const gpus = sum(n => n.gpu_allocatable);
@@ -240,7 +263,8 @@ export function ClusterCard({ source, metrics }: { source: Source; metrics?: Cur
       {!!gpus && <Meter label="GPU requests" used={sum(n => n.gpu_requested)} total={gpus} show={gpuUnit} />}
     </div>
     <p className="note">Requests — зарезервированное планировщиком, а не фактическое потребление; текущая нагрузка узла — ниже по каждому узлу.</p>
-    {nodes.map(n => <NodeCard key={n.name} node={n} source={source} metrics={metrics} />)}
+    {nodes.map(n => <NodeCard key={n.name} node={n} source={source} gpuSource={nodeGpuSource(sources, source.source_id, n.name)}
+      metrics={metrics} onService={onService} />)}
     {!nodes.length && <p className="note">Агент не передал список узлов.</p>}
   </section>;
 }
