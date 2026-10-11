@@ -32,6 +32,14 @@ def kube_ev(uid, reason, pod_uid, message="", field_path="spec.containers{app}",
                                "fieldPath": field_path}, **extra}
 
 
+def node_ev(uid, reason, message="", node="node-1", component="kubelet", last="2026-10-11T10:03:00Z", **extra):
+    """A node Event as kubelet / node-problem-detector write it: namespace default, node UID = node name."""
+    return {"metadata": {"uid": uid, "namespace": "default", "resourceVersion": "9"}, "reason": reason,
+            "type": "Warning", "count": 1, "message": message, "firstTimestamp": "2026-10-11T10:00:00Z",
+            "lastTimestamp": last, "source": {"component": component, "host": node},
+            "involvedObject": {"kind": "Node", "name": node, "uid": node}, **extra}
+
+
 # --- Events mapping -------------------------------------------------------------------------------
 
 def refs(*pods):
@@ -80,23 +88,28 @@ def test_events_filtered_by_reason_kind_and_known_service():
 
 
 def test_one_shot_kubernetes_collects_events_and_tolerates_missing_rbac(monkeypatch):
-    calls = []
+    calls, forbidden = [], set()
 
     def kubectl(args):
         calls.append(args)
         if args[:2] == ["kubectl", "get"] and args[2] == "events":
-            if len(calls) > 3:
-                raise subprocess.CalledProcessError(1, args)  # forbidden
-            return json.dumps({"items": [kube_ev("e1", "BackOff", "p1")]})
+            kind = args[args.index("--field-selector") + 1].split("=")[1]
+            if kind in forbidden:
+                raise subprocess.CalledProcessError(1, args)
+            return json.dumps({"items": [kube_ev("e1", "BackOff", "p1")] if kind == "Pod" else [node_ev("n1", "Rebooted")]})
         return json.dumps({"items": [pod("p1")] if args[2] == "pods" else []})
 
     monkeypatch.setattr(collect, "command", kubectl)
     data = collect.collect("kubernetes", "cluster-01")
-    assert [e["uid"] for e in data["events"]] == ["e1"] and not data["errors"]
-    assert "involvedObject.kind=Pod" in calls[2]
+    assert [e["uid"] for e in data["events"]] == ["e1", "n1"] and not data["errors"]
+    assert "involvedObject.kind=Pod" in calls[2] and "involvedObject.kind=Node" in calls[3]
+    forbidden.add("Node")
     data = collect.collect("kubernetes", "cluster-01")
-    assert data["events"] == [] and data["errors"] == ["kubernetes events unavailable: CalledProcessError"]
-    assert len(data["instances"]) == 1
+    assert [e["uid"] for e in data["events"]] == ["e1"]
+    assert data["errors"] == ["kubernetes node events unavailable: CalledProcessError"]
+    forbidden.add("Pod")
+    data = collect.collect("kubernetes", "cluster-01")
+    assert data["events"] == [] and len(data["errors"]) == 2 and len(data["instances"]) == 1
 
 
 def test_pod_last_oom_from_termination_state():

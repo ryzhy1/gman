@@ -41,6 +41,11 @@ HELP = {
     "gman_source_last_snapshot_timestamp_seconds": ("gauge", "Server receive time of the last accepted snapshot."),
     "gman_source_collect_errors": ("gauge", "Partial collection errors reported in the last snapshot."),
     "gman_k8s_node_ready": ("gauge", "Kubernetes node Ready condition from the last snapshot (1 ready, 0 not)."),
+    "gman_k8s_node_pressure": ("gauge", "1 for each node condition other than Ready that is True in the last "
+                                        "snapshot (MemoryPressure, DiskPressure, PIDPressure, NetworkUnavailable)."),
+    "gman_k8s_node_event_last_timestamp_seconds": ("gauge", "Last time of an allowlisted Kubernetes Event of the "
+                                                            "node with this reason (OOMKilling, SystemOOM, "
+                                                            "pressure, Rebooted, KernelOops...)."),
     "gman_instance_restarts_total": ("counter", "Restart count of the container as reported by the runtime."),
     "gman_instance_state_reason": ("gauge", "1 for the current state reason of the container (allowlisted)."),
     "gman_instance_last_termination_reason": ("gauge", "1 for the reason of the previous termination (Kubernetes)."),
@@ -154,6 +159,9 @@ def render(session):
         add("gman_source_collect_errors", base, len(snapshot.get("errors") or []))
         for node in snapshot.get("nodes") or []:
             add("gman_k8s_node_ready", {"source_id": source.source_id, "host_id": node["name"]}, 1 if node["ready"] else 0)
+            for condition in sorted(set(node.get("pressure") or [])):
+                add("gman_k8s_node_pressure", {"source_id": source.source_id, "host_id": node["name"],
+                                               "condition": condition}, 1)
         fresh = (now - source.received_at).total_seconds() <= GPU_FRESH_SECONDS
         for gpu in (snapshot.get("gpus") or []) if fresh else []:
             if gpu.get("vendor") != "NVIDIA":
@@ -186,6 +194,11 @@ def render(session):
             # GManInstanceOOMKilled raises one alert when both report the same kill.
             add("gman_instance_last_oom_timestamp_seconds", {**labels, "reason": "OOMKilled"},
                 datetime.fromisoformat(item["last_oom_at"]).timestamp())
+
+    # node is the Kubernetes node name; host_id repeats it so that GManK8sNodeNotReady inhibits by host_id.
+    for source_id, node, reason, last_at in store.node_event_times(session):
+        add("gman_k8s_node_event_last_timestamp_seconds",
+            {"source_id": source_id, "host_id": node, "node": node, "reason": reason}, store.as_utc(last_at).timestamp())
 
     for release in latest_releases(session):
         labels = {"service_id": release.service_id, "environment": release.environment}

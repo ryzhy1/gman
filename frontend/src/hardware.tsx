@@ -1,4 +1,4 @@
-import type { CurrentMetrics, GPU, GPUProcess, MetricValues, Node, Source } from './api';
+import type { CurrentMetrics, GPU, GPUProcess, MetricValues, Node, NodeEvent, Source } from './api';
 import { nodeGpuSource, type Placed } from './components';
 import { bytes, cores, date, grafanaLink, num, percent, rate, size, stale, unit, uptime } from './format';
 
@@ -203,12 +203,35 @@ function Meter({ label, used, total, show, capacity }: {
   </div>;
 }
 
+// Node Events (agent/collect.py NODE_EVENT_REASONS): label and tone.
+const NODE_EVENTS: Record<string, [string, 'warn' | 'bad']> = {
+  OOMKilling: ['OOM kill (node-problem-detector)', 'bad'], SystemOOM: ['Память узла исчерпана (System OOM)', 'bad'],
+  NodeNotReady: ['Переход в NotReady', 'bad'], NodeHasDiskPressure: ['Нехватка диска', 'warn'],
+  NodeHasInsufficientMemory: ['Нехватка памяти', 'warn'], NodeHasInsufficientPID: ['Нехватка PID', 'warn'],
+  EvictionThresholdMet: ['Порог вытеснения pod-ов', 'warn'], Rebooted: ['Перезагрузка', 'warn'],
+  KernelOops: ['Kernel oops', 'bad'], TaskHung: ['Зависшая задача ядра', 'bad'],
+  FilesystemIsReadOnly: ['ФС только для чтения', 'bad'], ImageGCFailed: ['Сбой очистки образов', 'warn'],
+};
+
+/** Summary of the node's Events; each Event (with the pod an OOM kill was mapped to) is in the audit. */
+function NodeEvents({ events }: { events: NodeEvent[] }) {
+  if (!events.length) return null;
+  return <div className="table-wrap"><table className="dense" aria-label="События узла за 24 часа">
+    <thead><tr><th>События узла за 24 ч</th><th>Повторов</th><th>Последнее</th></tr></thead>
+    <tbody>{events.map(e => <tr key={e.reason}>
+      <td><span className={`dot ${NODE_EVENTS[e.reason]?.[1] ?? 'warn'}`} /> {NODE_EVENTS[e.reason]?.[0] ?? e.reason}<small>{e.reason}</small></td>
+      <td>{e.count}{e.events > 1 && <small>{e.events} событий Kubernetes</small>}</td>
+      <td>{date(e.last_at)}</td>
+    </tr>)}</tbody>
+  </table></div>;
+}
+
 const coreUnit = (v: number) => `${cores(v)} ядер`;
 const gpuUnit = (v: number) => `${v} GPU`;
 
 /** `gpuSource`: the node-local agent's snapshot (nvidia-smi with processes attributed to pods), if connected. */
-function NodeCard({ node, source, gpuSource, metrics, onService }: {
-  node: Node; source: Source; gpuSource?: Source; metrics?: CurrentMetrics | null; onService?: Open;
+function NodeCard({ node, source, gpuSource, metrics, events, onService }: {
+  node: Node; source: Source; gpuSource?: Source; metrics?: CurrentMetrics | null; events: NodeEvent[]; onService?: Open;
 }) {
   const host = metrics?.host?.[node.name];
   const prefix = node.name + '/';
@@ -233,6 +256,7 @@ function NodeCard({ node, source, gpuSource, metrics, onService }: {
       {(node.gpu_capacity > 0 || node.gpu_requested > 0) &&
         <Meter label="GPU requests" used={node.gpu_requested} total={node.gpu_allocatable} capacity={node.gpu_capacity} show={gpuUnit} />}
     </div>
+    <NodeEvents events={events} />
     {node.gpu_product && <p className="muted">GPU: {node.gpu_product}{node.gpu_memory_mib != null && ` · ${size(node.gpu_memory_mib * 1024 ** 2)}`}</p>}
     <HostGauges host={host} cpuCount={node.cpu_capacity} memoryTotal={node.memory_capacity_bytes}
       missing={<>Метрики узла не получены (нет рядов host_id={node.name}).</>} />
@@ -265,7 +289,7 @@ export function ClusterCard({ source, sources, metrics, grafanaUrl, range, onSer
     </div>
     <p className="note">Requests — зарезервированное планировщиком, а не фактическое потребление; текущая нагрузка узла — ниже по каждому узлу.</p>
     {nodes.map(n => <NodeCard key={n.name} node={n} source={source} gpuSource={nodeGpuSource(sources, source.source_id, n.name)}
-      metrics={metrics} onService={onService} />)}
+      metrics={metrics} events={(source.node_events ?? []).filter(e => e.node === n.name)} onService={onService} />)}
     {!nodes.length && <p className="note">Агент не передал список узлов.</p>}
   </section>;
 }

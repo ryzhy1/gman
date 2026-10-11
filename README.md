@@ -49,6 +49,10 @@ NVIDIA на серверах, Bitbucket/GitLab для исходного код�
 - Kubernetes Events pod-ов сервисов каталога (BackOff, FailedScheduling, Unhealthy, Killing,
   Failed, Evicted, OOMKilling и др.) в истории — без текста сообщения, один раз на новое
   повторение (uid + count/время).
+- Kubernetes Events узлов (OOMKilling от node-problem-detector, SystemOOM, NodeNotReady,
+  нехватка диска/памяти/PID, EvictionThresholdMet, Rebooted, KernelOops, TaskHung) — в аудите,
+  сводкой за 24 часа в карточке узла и метрикой для алертов; OOM узла, в сообщении которого
+  есть UID pod-а или ID контейнера, попадает и в историю сервиса этого pod-а.
 - Явная отметка пробела в истории: если источник молчал дольше GMAN_HISTORY_GAP_SECONDS
   (300 с, пять интервалов агента) или агент отбросил снимки при переполнении spool, в
   истории сервиса появляется «Пробел в истории» — «данные за период могут быть неполными».
@@ -84,6 +88,7 @@ NVIDIA на серверах, Bitbucket/GitLab для исходного код�
   каталога пишутся в журнал с автором. Без настройки SSO работает вход по токену.
 - Алерты: Prometheus rules + Alertmanager (молчащий узел/источник, GPU XID/ECC, перегрев,
   троттлинг с порогами по модели GPU, OOMKilled, CrashLoopBackOff, частые перезапуски;
+  OOM, нехватка ресурса, вытеснение, проблемы ядра и перезагрузка узла Kubernetes;
   workloads Kubernetes из kube-state-metrics: недоступные реплики, застрявший rollout,
   Pending, упавшие Job, DaemonSet не на своих узлах), подавление дочерних алертов
   упавшего узла, webhook/email из .env, страница «Алерты» с runbook в портале.
@@ -443,9 +448,15 @@ python3 agent/collect.py --runtime docker --source-id server-01 --send --watch
 OOM kill с restart policy. Docker сбрасывает State.OOMKilled, когда restart policy
 перезапускает контейнер, а OOM kill дочернего процесса вовсе не останавливает контейнер.
 В режиме --watch агент ловит событие `oom` и передает время в поле экземпляра
-last_oom_at (без --watch оно берется только из OOMKilled остановленного контейнера). API
-хранит последнее известное время, даже если следующий снимок его не содержит (перезапуск
-агента), пишет в историю событие «OOM kill» и отдает метрику
+last_oom_at. Без --watch (таймер) агент с --send при каждом запуске читает
+`docker events --since <прошлый запуск> --until <сейчас> --filter event=oom` и так же
+заполняет last_oom_at; время прошлого запуска хранится в каталоге состояния
+(`docker-oom-<source-id>.since`), первый запуск смотрит на час назад. Daemon держит в памяти
+только последние события (несколько сотен), поэтому при очень частых событиях и редком таймере
+OOM может выпасть из буфера; удаленный контейнер (`--rm`) некуда привязать. При ошибке
+`docker events` отметка не сдвигается, а в ошибках снимка пишется «docker oom events
+unavailable». API хранит последнее известное время, даже если следующий снимок его не
+содержит (перезапуск агента), пишет в историю событие «OOM kill» и отдает метрику
 gman_instance_last_oom_timestamp_seconds для алерта GManInstanceOOMKilled.
 
 Для Kubernetes нужен kubectl с отдельным read-only kubeconfig:
@@ -455,7 +466,9 @@ python3 agent/collect.py --runtime kubernetes --source-id cluster-01 --send
 ```
 
 Минимальный пример прав — deploy/kubernetes-rbac.yaml (pods и nodes: get/list; pods и events:
-list/watch); применяется администратором кластера после выбора namespace. Агент собирает
+list/watch); применяется администратором кластера после выбора namespace. Права на events
+выдаются ClusterRole с ClusterRoleBinding: события узлов kubelet и node-problem-detector пишут
+в namespace default, Role в namespace агента их не покажет. Агент собирает
 pods всего кластера, включая init containers. Он не читает Secrets, не выполняет exec,
 но доступ к Pod spec сам по себе может открывать plain-text env в API Kubernetes;
 агент не передает эти значения в GMan.
@@ -466,8 +479,9 @@ pods всего кластера, включая init containers. Он не чи
 python3 agent/collect.py --runtime kubernetes --source-id cluster-01 --send --watch
 ```
 
-Агент делает list pods и pod Events (`kubectl get --raw`, без kubectl — API с service
-account) и затем watch от resourceVersion списка (allowWatchBookmarks, --watch-timeout
+Агент делает list pods, pod Events и Events узлов (`kubectl get --raw`, без kubectl — API с
+service account; field selector не умеет «Pod или Node», поэтому у Events два потока) и затем
+watch от resourceVersion списка (allowWatchBookmarks, --watch-timeout
 300 с — после него watch продолжается с последней версии). Снимок строится из кэша pod-ов
 по тем же правилам debounce (--debounce, --max-delay, --interval), узлы по-прежнему
 читаются при каждом снимке. Pod, созданный и удаленный между снимками, отправляется
@@ -487,9 +501,27 @@ registry и ошибки команд. Вместо него — `detail` из �
 container»/«pulling image» при BackOff. API принимает только причины из того же списка и
 записывает событие в историю один раз на новое повторение: по паре (источник, uid) хранится
 последний count и время (таблица runtime_event_marks). Без прав на events снимок все равно
-отправляется, а в его ошибках пишется «kubernetes events unavailable». Kubernetes хранит
-Events около часа: при опросе раз в минуту без --watch пропадают только события, которые
-появились и исчезли за время простоя агента дольше этого срока.
+отправляется, а в его ошибках пишется «kubernetes pod events unavailable» (или «node events»).
+Kubernetes хранит Events около часа: при опросе раз в минуту без --watch пропадают только
+события, которые появились и исчезли за время простоя агента дольше этого срока.
+
+Events узлов. involvedObject.kind = Node, отдельный allowlist причин: OOMKilling
+(node-problem-detector, kernel monitor), SystemOOM (kubelet: OOM всего узла), NodeNotReady,
+NodeHasDiskPressure, NodeHasInsufficientMemory и NodeHasInsufficientPID (так kubelet называет
+нехватку памяти и PID), EvictionThresholdMet, Rebooted, KernelOops, TaskHung,
+FilesystemIsReadOnly, ImageGCFailed. Передаются те же поля, что у событий pod-ов, плюс kind=Node
+и имя узла; message не передается, `detail` — фиксированные фразы: «memory cgroup limit» /
+«node out of memory» для OOM, «reclaiming <ресурс>» для EvictionThresholdMet, «task blocked for
+more than N seconds» для TaskHung, вид ошибки для KernelOops. Сопоставление OOM с pod-ом:
+в сообщениях kubelet и node-problem-detector есть имя процесса и pid, а иногда — путь cgroup
+жертвы (task_memcg=/kubepods/…/pod<uid>/<id контейнера>, строка oom-kill ядер 4.19+).
+Агент ищет в сообщении только идентификаторы — UID pod-а в виде pod<uuid> и 64-символьный
+hex ID контейнера — и сверяет их с pod-ами кластера на этом же узле. Совпало — событие
+получает pod, контейнер (экземпляр `<pod uid>:<контейнер>`) и сервис pod-а и попадает в
+историю сервиса; нет — относится только к узлу. Имя процесса и pid не передаются никогда.
+Стандартное правило OOMKilling node-problem-detector берет строку «Killed process … (имя)»
+без cgroup, поэтому обычно событие остается событием узла; OOM в пределах лимита
+контейнера все равно виден по самому pod-у (OOMKilled в termination state).
 
 ### Процессы GPU в Kubernetes
 
@@ -798,6 +830,11 @@ Prometheus rules + Alertmanager, а не Grafana alerting: правила леж
 | GManSourceSilent | источник не присылал снимок дольше 5 минут | warning |
 | GManHostTelemetryAbsent | хост известен inventory или слал метрики за 6 часов, а метрик хоста нет 5 минут | warning |
 | GManK8sNodeNotReady | узел Kubernetes NotReady 2 минуты (по inventory) | critical |
+| GManK8sNodeOOM | событие узла OOMKilling или SystemOOM за последние 30 минут (метка reason) | warning |
+| GManK8sNodePressure | условие узла MemoryPressure, DiskPressure или PIDPressure 2 минуты (по inventory) | warning |
+| GManK8sNodeEviction | событие EvictionThresholdMet за 15 минут | warning |
+| GManK8sNodeKernelProblem | KernelOops, TaskHung или FilesystemIsReadOnly от node-problem-detector за час | warning |
+| GManK8sNodeRebooted | событие Rebooted за 15 минут | warning |
 | GManTelemetryGatewayDown / GManApiMetricsDown | Prometheus не читает gateway / /metrics API | critical |
 | GManGpuTelemetryAbsent | DCGM-метрики GPU пропали, а Collector работает | warning |
 | GManGpuXidError | XID ≠ 0; аппаратные коды (48, 64, 74, 79, 92, 94, 95, 119, 120) — critical | warning / critical |
@@ -834,7 +871,11 @@ workload и, если у pod-ов есть gman.*, service_id/environment. API �
 gman_source_last_snapshot_timestamp_seconds,
 gman_k8s_node_ready, gman_instance_restarts_total, gman_instance_state_reason,
 gman_instance_last_termination_reason (reason только из фиксированного списка),
-gman_instance_last_oom_timestamp_seconds, gman_gpu_*, gman_release_*. Путь /metrics без токена, но nginx его не проксирует: Prometheus читает
+gman_instance_last_oom_timestamp_seconds, gman_gpu_*, gman_release_*,
+gman_k8s_node_pressure{source_id,host_id,condition} (истинные условия узла кроме Ready) и
+gman_k8s_node_event_last_timestamp_seconds{source_id,host_id,node,reason} — время последнего
+события узла с этой причиной (host_id = node, для подавления по узлу; ряд держится, пока
+отметка события не удалена по GMAN_RETENTION_DAYS). Путь /metrics без токена, но nginx его не проксирует: Prometheus читает
 api:8000 внутри сети Compose, снаружи endpoint недоступен. Сроки TLS — тоже с /metrics:
 для каждого файла из GMAN_TLS_WATCH_FILES gman_tls_cert_not_after_timestamp_seconds{file,subject}
 (по ряду на сертификат PEM-цепочки), gman_tls_crl_next_update_timestamp_seconds{file,issuer}
@@ -849,7 +890,10 @@ Pending-pod-ы или застрявший rollout workload — его warning �
 (critical «нет ни одной реплики» не скрывается); NotReady узла кластера — недоступные
 реплики DaemonSet-ов этого кластера (по pod-у каждого DaemonSet на узле); просроченный CRL
 (GManTlsCrlExpired) — алерты об отсутствии метрик хостов, GPU и kube-state-metrics: их
-причина одна. Deployment и
+причина одна; GManInstanceOOMKilled — GManK8sNodeOOM{reason="OOMKilling"} того же узла
+(один и тот же OOM kill в пределах лимита контейнера; SystemOOM не скрывается). Алерты событий
+узла (группа gman-node-events, scope node) скрываются NotReady того же узла и
+GManSourceSilent кластера. Deployment и
 StatefulSet при падении узла не подавляются: их реплики должны переехать. При
 недоступном gateway алерты об отсутствии метрик хостов и GPU не создаются вовсе
 (иначе они подавили бы алерты по inventory всех узлов). Группировка по объекту
@@ -886,8 +930,11 @@ TEMPERATURE` и должны быть сверены на картах пило�
 не ловит (проверяется только generation). Пока kube-state-metrics молчит, алерты
 workloads разрешаются (рядов нет) — об этом GManKubeStateMetricsAbsent.
 Docker сбрасывает признак OOMKilled при автоматическом перезапуске контейнера: OOM с
-restart policy ловится по событию `oom` только агентом в режиме `--watch`, без него он
-виден лишь как RestartLoop. Состояние контейнеров обновляется со снимками inventory
+restart policy ловится по событию `oom`: агентом в режиме `--watch` сразу, по таймеру — при
+следующем запуске из буфера событий daemon. Алерты событий узлов держатся фиксированное окно
+после события (30 минут OOM, 15 минут вытеснение и перезагрузка, час проблемы ядра) и без
+node-problem-detector срабатывают только по событиям kubelet (SystemOOM, EvictionThresholdMet,
+Rebooted, нехватка ресурса). Состояние контейнеров обновляется со снимками inventory
 (раз в минуту или по событиям `--watch`).
 
 Проверка:
@@ -919,7 +966,7 @@ npm run build
 данных с API на SQLite; bamboo_event.py против локального API. Тест test_deploy.py сверяет
 имена DCGM с deploy/dcgm-counters.csv, allowlist kube-state-metrics с правилами и дашбордами,
 runbook каждого алерта и переменные дашбордов в ссылках портала. Тесты проходят на SQLite
-(203 passed, 1 skipped); последний прогон на PostgreSQL 17 — до этих проверок (180 passed). Docker end-to-end, Kubernetes, NVIDIA/DCGM
+(226 passed, 1 skipped) и на PostgreSQL 17 (227 passed). Docker end-to-end, Kubernetes, NVIDIA/DCGM
 и настоящий Bamboo еще не проверены.
 
 ## Хранилище
@@ -931,7 +978,8 @@ services, sources (последний снимок), instances (текущее �
 основа для версий и diff; возврат к прежней конфигурации — новая версия), events (с release_id),
 deployments, releases (релизы Bamboo со статусом сверки), sessions (SSO-сессии, только хеш
 cookie), runtime_event_marks (последний count и время каждого Kubernetes Event для записи
-повторов один раз). Новые поля снимков и каталога (например, owners, logs) хранятся в JSON
+повторов один раз; у событий узлов — еще узел и причина, миграция 0006: из них метрика
+событий узла и сводка в карточке узла). Новые поля снимков и каталога (например, owners, logs) хранятся в JSON
 и не требуют миграций.
 GMAN_RETENTION_DAYS (по умолчанию 180, 0 — отключить) удаляет события, неиспользуемые
 снимки конфигурации, завершенные релизы и отметки Kubernetes Events старше срока; запросы

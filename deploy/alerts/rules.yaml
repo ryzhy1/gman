@@ -577,3 +577,70 @@ groups:
             Файл из GMAN_TLS_WATCH_FILES отсутствует, не читается пользователем API (65534), не разбирается как
             сертификат/CRL или похож на ключ. Сроки действия этого файла не контролируются.
           runbook_url: '{{ $externalLabels.gman_portal }}/#alerts/GManTlsFileError'
+
+  # Kubernetes node Events (kubelet, node lifecycle controller, node-problem-detector) collected by the inventory
+  # agent: gman_k8s_node_event_last_timestamp_seconds is the time of the latest Event per node and reason, so an
+  # alert lasts a fixed window after the Event. Pressure comes from the node condition in the snapshot instead
+  # (resolves when the condition clears). scope=node: GManK8sNodeNotReady of the same host_id inhibits these alerts,
+  # GManSourceSilent of the cluster inhibits them too (deploy/alerts/alertmanager.yaml).
+  - name: gman-node-events
+    rules:
+      - alert: GManK8sNodeOOM
+        expr: |
+          max by (source_id, host_id, reason) (
+            time() - gman_k8s_node_event_last_timestamp_seconds{reason=~"OOMKilling|SystemOOM"}
+          ) < 1800
+        labels: {severity: warning, scope: node}
+        annotations:
+          summary: 'OOM на узле {{ $labels.host_id }} ({{ $labels.reason }})'
+          description: >-
+            {{ $value | humanizeDuration }} назад ядро узла {{ $labels.host_id }} (кластер {{ $labels.source_id }})
+            завершило процесс по нехватке памяти. SystemOOM — закончилась память всего узла (kubelet);
+            OOMKilling — сообщение node-problem-detector. Затронутый pod, если агент его определил, — в «Аудите».
+          runbook_url: '{{ $externalLabels.gman_portal }}/#alerts/GManK8sNodeOOM'
+      - alert: GManK8sNodePressure
+        expr: max by (source_id, host_id, condition) (gman_k8s_node_pressure{condition=~"MemoryPressure|DiskPressure|PIDPressure"}) == 1
+        for: 2m
+        labels: {severity: warning, scope: node}
+        annotations:
+          summary: 'Узел {{ $labels.host_id }}: {{ $labels.condition }}'
+          description: >-
+            Условие {{ $labels.condition }} узла {{ $labels.host_id }} (кластер {{ $labels.source_id }}) истинно:
+            kubelet вытесняет pod-ы и не принимает новые с этим ресурсом.
+          runbook_url: '{{ $externalLabels.gman_portal }}/#alerts/GManK8sNodePressure'
+      - alert: GManK8sNodeEviction
+        expr: |
+          max by (source_id, host_id) (
+            time() - gman_k8s_node_event_last_timestamp_seconds{reason="EvictionThresholdMet"}
+          ) < 900
+        labels: {severity: warning, scope: node}
+        annotations:
+          summary: 'Узел {{ $labels.host_id }} освобождает ресурсы (EvictionThresholdMet)'
+          description: >-
+            {{ $value | humanizeDuration }} назад kubelet узла {{ $labels.host_id }} (кластер {{ $labels.source_id }})
+            достиг порога вытеснения: pod-ы узла могут быть вытеснены (Evicted).
+          runbook_url: '{{ $externalLabels.gman_portal }}/#alerts/GManK8sNodeEviction'
+      - alert: GManK8sNodeKernelProblem
+        expr: |
+          max by (source_id, host_id, reason) (
+            time() - gman_k8s_node_event_last_timestamp_seconds{reason=~"KernelOops|TaskHung|FilesystemIsReadOnly"}
+          ) < 3600
+        labels: {severity: warning, scope: node}
+        annotations:
+          summary: 'Проблема ядра на узле {{ $labels.host_id }}: {{ $labels.reason }}'
+          description: >-
+            node-problem-detector сообщил {{ $labels.reason }} {{ $value | humanizeDuration }} назад
+            (кластер {{ $labels.source_id }}).
+          runbook_url: '{{ $externalLabels.gman_portal }}/#alerts/GManK8sNodeKernelProblem'
+      - alert: GManK8sNodeRebooted
+        expr: |
+          max by (source_id, host_id) (
+            time() - gman_k8s_node_event_last_timestamp_seconds{reason="Rebooted"}
+          ) < 900
+        labels: {severity: warning, scope: node}
+        annotations:
+          summary: 'Узел {{ $labels.host_id }} перезагрузился'
+          description: >-
+            kubelet сообщил о перезагрузке узла {{ $labels.host_id }} (кластер {{ $labels.source_id }})
+            {{ $value | humanizeDuration }} назад; pod-ы узла перезапущены.
+          runbook_url: '{{ $externalLabels.gman_portal }}/#alerts/GManK8sNodeRebooted'

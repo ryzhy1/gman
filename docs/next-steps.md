@@ -78,13 +78,31 @@
     GManTlsCrlExpired (подавляет алерты отсутствия телеметрии), GManTlsCertExpiring (30/7 дней),
     GManTlsCertExpired, GManTlsFileError; runbook в портале, unit-тесты promtool.
 
+16. Events узлов Kubernetes: агент читает и наблюдает (третий watch-поток) Events с
+    involvedObject.kind = Node по отдельному allowlist (OOMKilling от node-problem-detector,
+    SystemOOM, NodeNotReady, NodeHasDiskPressure / NodeHasInsufficientMemory / NodeHasInsufficientPID,
+    EvictionThresholdMet, Rebooted, KernelOops, TaskHung, FilesystemIsReadOnly, ImageGCFailed),
+    без message — только фиксированные фразы. OOM узла сопоставляется с pod-ом только по UID
+    pod-а или ID контейнера из message, сверенным с pod-ами этого узла; иначе событие узла.
+    API: RuntimeEvent.kind/node, allowlist по kind, отметки runtime_event_marks с node и reason
+    (миграция 0006), метрики gman_k8s_node_event_last_timestamp_seconds и gman_k8s_node_pressure,
+    сводка за 24 часа в карточке узла («Серверы и GPU»), сопоставленные события — в истории
+    сервиса. Группа gman-node-events: GManK8sNodeOOM, GManK8sNodePressure, GManK8sNodeEviction,
+    GManK8sNodeKernelProblem, GManK8sNodeRebooted (scope node: подавляются NotReady узла и
+    молчанием источника; OOMKilling узла подавляется OOMKilled экземпляра того же узла).
+    Docker без `--watch`: OOM kill с restart policy — из `docker events --since <прошлый запуск>
+    --until <сейчас> --filter event=oom` (отметка в каталоге состояния агента).
+
 Проверено:
-- Тесты: 195 passed на PostgreSQL 17 (включая запросы истории конфигураций и тест
-  конкурентности; прогон до п. 15), 203 passed и 1 skipped на SQLite; миграции upgrade → downgrade base →
+- Тесты: 227 passed на PostgreSQL 17 (включая запросы истории конфигураций и тест
+  конкурентности; прогон после п. 16), 226 passed и 1 skipped на SQLite; миграции upgrade → downgrade base →
   upgrade и `alembic check` на PostgreSQL 17. Frontend: `npm run build`.
 - Kubernetes watch и Events — на fixtures потоков (ADDED/MODIFIED/DELETED, BOOKMARK, ERROR 410,
   сбой kubectl, HTTP 410 in-cluster), Docker `oom` — на fixtures событий; правило OOM —
-  `promtool test rules` (Prometheus 3.5.0).
+  `promtool test rules` (Prometheus 3.5.0). Events узлов — на fixtures в форматах kubelet
+  (SystemOOM, статусы узла, Rebooted) и node-problem-detector (OOMKilling «Killed process»,
+  строка oom-kill с task_memcg, TaskHung, KernelOops); группа gman-node-events — `promtool test
+  rules`, alertmanager.yaml — `amtool check-config`; `docker events --since/--until` — на fixtures.
 - Метрики: otelcol-contrib 0.162.0, Prometheus 3.5.0, Grafana 12.1.1 (бинарные релизы) с
   эмуляцией Docker Engine API, kubelet и вывода DCGM: имена метрик, метки, запросы API
   и дашбордов, provisioning Grafana.
@@ -163,7 +181,8 @@ deploy/alerts/alertmanager.sh --render /tmp/am.yml && amtool check-config /tmp/a
   /grafana/api/health при serve_from_sub_path), entrypoint alertmanager.sh под busybox sh
   и права тома /alertmanager, сервис backup в контейнере (busybox sh/find), права uid 10001
   на ключ gateway; агент и `--watch` против настоящего Docker daemon (включая событие `oom`
-  при restart policy и OOM kill дочернего процесса).
+  при restart policy и OOM kill дочернего процесса); `docker events --since/--until` по таймеру
+  (формат времени, размер буфера событий daemon).
 - nginx: `nginx -t` и запуск с TLS, Grafana за /grafana/ (включая Live/websocket),
   limit_req на реальной нагрузке.
 - systemd: `systemd-analyze verify`, sandboxing с docker/nvidia-smi/kubectl, timer на Linux.
@@ -178,7 +197,9 @@ deploy/alerts/alertmanager.sh --render /tmp/am.yml && amtool check-config /tmp/a
   `nvidia-smi -q -d TEMPERATURE`, nvidia-smi на реальных драйверах, сверка показателей.
 - Kubernetes/CRI-O: k8s_attributes, обнаружение DCGM и kube-state-metrics, RBAC,
   kubelet_stats, настоящие контроллеры (статусы rollout, Pending) в реальном кластере; `--watch` кластера (потоковый вывод `kubectl get --raw` для watch, частота
-  BOOKMARK, 410 после compaction, нагрузка на API server), формат и series реальных Events; для kubernetes-node — nvidia-smi через NVIDIA runtime без запроса GPU, список
+  BOOKMARK, 410 после compaction, нагрузка на API server), формат и series реальных Events;
+  Events узлов от настоящих kubelet и node-problem-detector (тексты message по версиям, есть ли
+  в OOMKilling путь cgroup с настроенным правилом), миграция 0006 на PostgreSQL; для kubernetes-node — nvidia-smi через NVIDIA runtime без запроса GPU, список
   процессов от non-root, PSA privileged для hostPID, формат cgroup на CRI-O/containerd.
 - SSO с настоящим IdP (Keycloak, AD FS, Okta): claim групп, end_session, cookie `__Host-`.
 - Интеграции: настоящий Bamboo (переменные `bamboo_*`), Splunk (индексы и поля),
@@ -215,9 +236,11 @@ Inventory и аудит:
 - ~~Корреляция событий Bamboo с runtime (digest, время) и сущность релиза со статусами.~~ Сделано (п. 11).
 - Нормализованные controllers/workloads и nodes; ~~явная отметка пробела в истории~~ (сделано, п. 12).
 - ~~OOM в Docker с restart policy ловить по событию `oom` из `--watch`.~~ Сделано (п. 12).
-- Kubernetes Events узлов (OOMKilling от node-problem-detector, NodeNotReady) — сейчас только
-  события pod-ов; сопоставление OOM узла с pod-ом требует разбора message.
-- OOM в Docker без `--watch` (timer) виден, только пока контейнер остановлен.
+- ~~Kubernetes Events узлов (OOMKilling от node-problem-detector, NodeNotReady).~~ Сделано (п. 16).
+  Сопоставление OOM с pod-ом работает, только если в message есть путь cgroup; надежнее —
+  агент kubernetes-node на узле читает /dev/kmsg (pid → cgroup), но это права на журнал ядра.
+- ~~OOM в Docker без `--watch` (timer) виден, только пока контейнер остановлен.~~ Сделано (п. 16,
+  `docker events --since/--until`); OOM удаленного (`--rm`) контейнера по таймеру не виден.
 
 Метрики и алерты:
 - ~~kube-state-metrics (desired/available replicas, Pending, rollout).~~ Сделано (п. 14).

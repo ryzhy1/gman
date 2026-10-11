@@ -11,7 +11,7 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 from sqlalchemy import (JSON, BigInteger, DateTime, ForeignKey, Identity, Index, Integer, String, TypeDecorator,
-                        create_engine, delete, select, text, tuple_, update)
+                        create_engine, delete, func, select, text, tuple_, update)
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, relationship
 
@@ -38,6 +38,13 @@ class UTC(TypeDecorator):
 
 def utcnow():
     return datetime.now(timezone.utc)
+
+
+def as_utc(value):
+    """Aggregates (max) of UTC columns: aware UTC whatever the driver returns."""
+    if isinstance(value, str):
+        value = datetime.fromisoformat(value)
+    return value.replace(tzinfo=timezone.utc) if value.tzinfo is None else value.astimezone(timezone.utc)
 
 
 class Base(DeclarativeBase):
@@ -135,15 +142,22 @@ class Event(Base):
 
 
 class RuntimeEventMark(Base):
-    """The latest recorded count and time of each Kubernetes Event, to record repeats once (migration 0004)."""
+    """The latest recorded count and time of each Kubernetes Event, to record repeats once (migration 0005).
+
+    Node Events also keep their node and reason (migration 0006): the latest time per node and reason is
+    exported on /metrics and summarized on the node card. Empty node: a pod Event.
+    """
     __tablename__ = "runtime_event_marks"
     source_id: Mapped[str] = mapped_column(String, primary_key=True)
     uid: Mapped[str] = mapped_column(String, primary_key=True)
     count: Mapped[int] = mapped_column(Integer)
     last_at: Mapped[datetime] = mapped_column(UTC)
     received_at: Mapped[datetime] = mapped_column(UTC)
+    node: Mapped[str] = mapped_column(String, default="", server_default="")
+    reason: Mapped[str] = mapped_column(String, default="", server_default="")
 
-    __table_args__ = (Index("ix_runtime_event_marks_received", "received_at"),)
+    __table_args__ = (Index("ix_runtime_event_marks_received", "received_at"),
+                      Index("ix_runtime_event_marks_node", "source_id", "node", "reason"))
 
 
 class Deployment(Base):
@@ -344,6 +358,29 @@ def events(session, limit, service_id=None, before=None):
     rows = session.scalars(query.order_by(Event.received_at.desc(), Event.id.desc()).limit(limit + 1)).all()
     page = rows[:limit]
     return {"events": [ordered(r.data) for r in page], "next": cursor(page[-1]) if len(rows) > limit else None}
+
+
+def node_event_times(session):
+    """[(source_id, node, reason, latest time)] of node Events still within retention."""
+    mark = RuntimeEventMark
+    return session.execute(select(mark.source_id, mark.node, mark.reason, func.max(mark.last_at))
+                           .where(mark.node != "").group_by(mark.source_id, mark.node, mark.reason)
+                           .order_by(mark.source_id, mark.node, mark.reason)).all()
+
+
+def node_events(session, since):
+    """Node Events last seen after `since`, per source: [{node, reason, count, events, last_at}], newest first.
+
+    `count` adds up the Kubernetes counts of the Events (each is one object, repeated `count` times)."""
+    mark = RuntimeEventMark
+    rows = session.execute(select(mark.source_id, mark.node, mark.reason, func.max(mark.last_at), func.sum(mark.count),
+                                  func.count()).where(mark.node != "", mark.last_at >= since)
+                           .group_by(mark.source_id, mark.node, mark.reason)).all()
+    result = {}
+    for source_id, node, reason, last_at, count, events in sorted(rows, key=lambda r: as_utc(r[3]), reverse=True):
+        result.setdefault(source_id, []).append({"node": node, "reason": reason, "count": int(count),
+                                                 "events": events, "last_at": as_utc(last_at).isoformat()})
+    return result
 
 
 def config_version(row, current):

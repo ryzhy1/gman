@@ -6,7 +6,7 @@ import logging
 import os
 import re
 from contextlib import asynccontextmanager
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Annotated, Literal
 from urllib.parse import urlsplit
 
@@ -322,14 +322,22 @@ class Node(Strict):
     created_at: datetime | None = None
 
 
-# Same allowlist as agent/collect.py KUBE_EVENT_REASONS; anything else is rejected rather than stored.
+# Same allowlists as agent/collect.py KUBE_EVENT_REASONS and NODE_EVENT_REASONS; anything else is rejected
+# rather than stored.
 KUBE_EVENT_REASONS = {"OOMKilling", "BackOff", "FailedScheduling", "Unhealthy", "Killing", "Failed", "Evicted",
                       "FailedMount", "FailedCreatePodSandBox", "Preempting"}
+NODE_EVENT_REASONS = {"OOMKilling", "SystemOOM", "NodeNotReady", "NodeHasDiskPressure", "NodeHasInsufficientMemory",
+                      "NodeHasInsufficientPID", "EvictionThresholdMet", "Rebooted", "KernelOops", "TaskHung",
+                      "FilesystemIsReadOnly", "ImageGCFailed"}
 
 
 class RuntimeEvent(Strict):
-    """A Kubernetes Event of a pod, without its free-text message (see agent/collect.py kube_event)."""
+    """A Kubernetes Event of a pod or a node, without its free-text message (agent/collect.py kube_event,
+    kube_node_event). A node Event carries a pod and service only when the agent mapped an OOM kill to a pod."""
     uid: str = Field(pattern=r"^[a-zA-Z0-9_.:-]{1,100}$")
+    kind: Literal["Pod", "Node"] = "Pod"
+    # Kubernetes node name (DNS subdomain); required for node Events. It becomes a metric label.
+    node: str = Field(default="", pattern=r"^([a-z0-9]([-a-z0-9.]{0,251}[a-z0-9])?)?$")
     reason: str = Field(max_length=100)
     type: Literal["Normal", "Warning"] = "Warning"
     count: int = Field(default=1, ge=1)
@@ -347,12 +355,13 @@ class RuntimeEvent(Strict):
 
     _time = field_validator("last_at")(not_future)
 
-    @field_validator("reason")
-    @classmethod
-    def allowlisted(cls, value):
-        if value not in KUBE_EVENT_REASONS:
+    @model_validator(mode="after")
+    def allowlisted(self):
+        if self.reason not in (NODE_EVENT_REASONS if self.kind == "Node" else KUBE_EVENT_REASONS):
             raise ValueError("Event reason is not allowlisted")
-        return value
+        if self.kind == "Node" and not self.node:
+            raise ValueError("Node Events name their node")
+        return self
 
 
 class Snapshot(Strict):
@@ -375,7 +384,7 @@ class Snapshot(Strict):
     nodes: list[Node] = Field(default_factory=list, max_length=1000)
     instances: list[Instance] = Field(default_factory=list, max_length=10000)
     errors: list[str] = Field(default_factory=list, max_length=50)
-    # kubernetes-cluster: pod Events since the agent's previous report; the API dedupes repeats.
+    # kubernetes-cluster: pod and node Events since the agent's previous report; the API dedupes repeats.
     events: list[RuntimeEvent] = Field(default_factory=list, max_length=1000)
 
     _time = field_validator("observed_at")(not_future)
@@ -605,9 +614,18 @@ def put_service(service_id: str, value: Service, user: auth.Principal = Depends(
     return after
 
 
+# Node Events summarized on the node card of «Серверы и GPU»; the full list is in the audit.
+NODE_EVENTS_WINDOW = timedelta(hours=24)
+
+
 @app.get("/api/overview", dependencies=[Depends(reader)])
 def overview(session: Session = Depends(db)):
-    return {"services": store.services(session), "sources": store.sources(session), "server_time": now(),
+    sources = store.sources(session)
+    recent = store.node_events(session, datetime.now(timezone.utc) - NODE_EVENTS_WINDOW)
+    for source in sources:
+        if source.get("source_type") == "kubernetes-cluster":
+            source["node_events"] = recent.get(source["source_id"], [])
+    return {"services": store.services(session), "sources": sources, "server_time": now(),
             # Browser-facing base URL of the bundled Grafana, for default dashboard links.
             "grafana_url": os.getenv("GMAN_GRAFANA_URL", "").rstrip("/"),
             "events": store.events(session, 200)["events"]}
@@ -770,7 +788,9 @@ def runtime_events(session, base, events, received):
         occurrences = item["count"] - mark.count if mark is not None and item["count"] > mark.count else (
             1 if mark is not None else item["count"])
         if mark is None:
-            mark = store.RuntimeEventMark(source_id=base["source_id"], uid=item["uid"], count=0, last_at=last_at)
+            # node and reason of node Events feed gman_k8s_node_event_last_timestamp_seconds and the node card.
+            mark = store.RuntimeEventMark(source_id=base["source_id"], uid=item["uid"], count=0, last_at=last_at,
+                                          node=item["node"] if item["kind"] == "Node" else "", reason=item["reason"])
             session.add(mark)
         mark.count, mark.last_at, mark.received_at = max(mark.count, item["count"]), max(mark.last_at, last_at), received
         fields = {key: value for key, value in item.items() if key != "type"}

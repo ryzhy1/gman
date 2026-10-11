@@ -70,6 +70,9 @@ export type Node = {
   gpu_product: string; gpu_memory_mib: number | null; created_at: string | null;
 };
 
+/** Node Events of the last 24 hours per node and reason (kubelet, node-problem-detector); see the audit for each one. */
+export type NodeEvent = { node: string; reason: string; count: number; events: number; last_at: string };
+
 export type Source = {
   source_id: string; hostname: string; source_type: string; agent_version: string;
   /** kubernetes-node: GPU snapshot of node `hostname` of cluster source `cluster`, without instances. */
@@ -77,6 +80,8 @@ export type Source = {
   observed_at: string; received_at: string; cpu_count: number | null; memory_total_bytes: number | null;
   os?: string; kernel?: string; cpu_model?: string; runtime_version?: string; uptime_seconds?: number | null;
   instances: Instance[]; gpus: GPU[]; nodes?: Node[]; errors: string[];
+  /** kubernetes-cluster only. */
+  node_events?: NodeEvent[];
 };
 
 export type Audit = {
@@ -87,7 +92,9 @@ export type Audit = {
   before?: Instance; after?: Instance; changes?: Record<string, [unknown, unknown]>;
   /** Release this event was correlated with (Bamboo deployment ↔ runtime). */
   release_id?: number; deployment_id?: string; version?: string; image?: string;
-  /** runtime-event: a Kubernetes Event of a pod, without its message (only fixed phrases in `detail`). */
+  /** runtime-event: a Kubernetes Event of a pod or a node, without its message (only fixed phrases in `detail`).
+   * A node Event names a pod only when the agent mapped an OOM kill to it. */
+  kind?: 'Pod' | 'Node'; node?: string;
   uid?: string; reason?: string; event_type?: 'Normal' | 'Warning'; count?: number; occurrences?: number;
   first_at?: string | null; last_at?: string; namespace?: string; pod?: string; container?: string;
   component?: string; detail?: string;
