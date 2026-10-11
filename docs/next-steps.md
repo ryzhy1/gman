@@ -42,8 +42,17 @@
 10. SSO (OIDC) и роли: вход Authorization Code + PKCE через API, серверные сессии
     (миграция 0003), CSRF, роли из групп IdP, владельцы сервиса в поле `owners`,
     редактор записи каталога в карточке, автор изменений каталога в журнале.
+11. Алерты (README «Алерты»): Prometheus rules + Alertmanager в compose (loopback, в
+    production — те же порты и GMAN_PORTAL_URL из GMAN_PUBLIC_HOST), /metrics API с
+    состоянием inventory (backend/app/exposition.py), 18 алертов: узел/источник/телеметрия
+    молчат, GPU XID/ECC/перегрев/троттлинг, OOMKilled, CrashLoopBackOff, перезапуски, образ
+    не скачивается. Inhibition: упавший узел скрывает свои GPU и контейнеры. Получатели —
+    webhook/email из GMAN_ALERT_*. Страница «Алерты» в портале (GET /api/alerts) с runbook.
+    Проверено: `promtool check rules`/`test rules` (Prometheus 3.5.0), `amtool check-config`
+    (Alertmanager 0.28.1) с получателями и без, локальный прогон бинарных релизов
+    Prometheus + Alertmanager + API на SQLite: алерты, подавление и доставка webhook.
 
-Тесты: 127 passed, 1 skipped (тест конкурентности только для PostgreSQL).
+Тесты: 133 passed, 1 skipped на SQLite; 134 passed на PostgreSQL 17 (на PostgreSQL 17 проходит и тест конкурентности).
 Frontend: `npm run build` проходит. Подробности — в README.
 
 ## Подготовка на новой машине
@@ -81,6 +90,10 @@ Production-развертывание проверено частично, бе�
 - urllib агента доверяет пилотному CA через SSL_CERT_FILE (Python с OpenSSL);
 - nginx-конфиги разобраны crossplane (контексты и число аргументов), не `nginx -t`.
 
+Алерты не проверены в контейнерах (entrypoint alertmanager.sh под busybox sh образа
+prom/alertmanager, права тома /alertmanager), на настоящих DCGM/kubelet и с реальным
+SMTP/webhook.
+
 Не проверено: `nginx -t` и запуск nginx с TLS, подъем стека с override (healthcheck
 внутри образов: wget в grafana/prometheus, путь /grafana/api/health при
 serve_from_sub_path), Grafana за /grafana/ (вкл. Live/websocket), права uid 10001 на
@@ -113,8 +126,10 @@ kubectl), сервис backup в контейнере (busybox sh/find).
 - ~~Атрибуция процессов GPU в Kubernetes (PID → pod)~~ — сделано (п. 9 выше). Не проверено
   в реальном кластере: nvidia-smi через NVIDIA runtime без запроса GPU, список процессов
   от non-root, PSA privileged для hostPID, метки DCGM pod/namespace/container.
-- Алерты (Grafana alerting или Alertmanager): узел/источник молчит, GPU XID/ECC,
-  перегрев, троттлинг, OOMKilled, CrashLoopBackOff.
+- ~~Алерты~~ — сделано (см. «Что сделано», п. 11). Остается: проверить имена и поведение
+  полей DCGM (XID, ECC, CLOCKS_EVENT_REASONS) на настоящем NVIDIA-хосте, подобрать пороги
+  температуры по моделям GPU, подключить реальный канал уведомлений; OOM в Docker с
+  restart policy ловить по событию `oom` из `--watch`.
 - ~~Splunk: поиск по service/environment по ссылке из карточки~~ — сделано (п. 8 выше);
   осталось согласовать индексы и имена полей и задать их в GMAN_SPLUNK_*.
 - Обновить docs/architecture.md по фактической реализации.

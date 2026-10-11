@@ -173,7 +173,7 @@ def unsign(value):
 
 def local_path(value):
     """Only same-origin paths are accepted as the post-login target (no open redirect)."""
-    if not value or not value.startswith("/") or value.startswith("//") or "\\" in value or "\n" in value:
+    if not value or not value.startswith("/") or value.startswith("//") or "\\" in value or "\n" in value or "\r" in value:
         return "/"
     return value
 

@@ -1,7 +1,8 @@
 # Production override for a single GMan server:
 #   docker compose --env-file .env -f deploy/compose.yaml -f deploy/compose.prod.yaml up --build -d
 # Published: 80/443 (nginx: portal, API, Grafana under /grafana/) and 4317 (OTLP gRPC, mTLS).
-# Prometheus stays on 127.0.0.1:9090; PostgreSQL and Grafana are not published.
+# Prometheus and Alertmanager stay on 127.0.0.1:9090/9093; PostgreSQL and Grafana are not published.
+# Alert receivers: GMAN_ALERT_* in .env (see deploy/alerts/alertmanager.sh).
 # Requires in .env: GMAN_PUBLIC_HOST (DNS name in the portal certificate).
 # Certificates (deploy/pki/issue.sh) are read from GMAN_TLS_DIR (default deploy/pki/out):
 #   portal.pem, portal-key.pem, gateway.pem, gateway-key.pem, ca.pem. Never put ca-key.pem there
@@ -41,6 +42,10 @@ services:
       - "${GMAN_OTLP_BIND_ADDRESS:-0.0.0.0}:4317:4317"
     logging: *logging
   prometheus:
+    environment:
+      GMAN_PORTAL_URL: https://${GMAN_PUBLIC_HOST:?Set GMAN_PUBLIC_HOST}
+    logging: *logging
+  alertmanager:
     logging: *logging
   grafana:
     environment:

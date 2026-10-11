@@ -1,0 +1,38 @@
+# Alertmanager routing and inhibition for deploy/alerts/rules.yaml.
+# Receivers are appended at container start by alertmanager.sh from environment variables
+# (Alertmanager itself does not expand variables in its config).
+route:
+  receiver: gman
+  # One notification per object: a node, a GPU or an instance.
+  group_by: [alertname, source_id, host_id, UUID, instance_id]
+  # Prometheus re-sends firing alerts once a minute per rule group. After an Alertmanager restart, waiting
+  # longer than that lets inhibiting alerts (node down) arrive before their children are notified.
+  group_wait: 90s
+  group_interval: 5m
+  repeat_interval: 4h
+  routes:
+    - matchers: ['severity="critical"']
+      receiver: gman
+      repeat_interval: 1h
+
+inhibit_rules:
+  # The node is down: its GPU, container and channel alerts are consequences, not separate incidents.
+  - source_matchers: ['alertname=~"GManNodeDown|GManK8sNodeNotReady"']
+    target_matchers: ['scope=~"gpu|instance|node"', 'alertname!~"GManNodeDown|GManK8sNodeNotReady"']
+    equal: [host_id]
+  # Inventory is silent: alerts computed from its last snapshot are stale.
+  - source_matchers: ['alertname="GManSourceSilent"']
+    target_matchers: ['alertname=~"GManK8sNodeNotReady|GManInstance.*"']
+    equal: [source_id]
+  # The node's Collector is silent: DCGM metrics go through it too.
+  - source_matchers: ['alertname="GManHostTelemetryAbsent"']
+    target_matchers: ['alertname="GManGpuTelemetryAbsent"']
+    equal: [host_id]
+  # The critical variant of the same alert replaces the warning one (XID, overheating).
+  - source_matchers: ['severity="critical"']
+    target_matchers: ['severity="warning"']
+    equal: [alertname, host_id, UUID]
+  # CrashLoopBackOff already explains the restarts.
+  - source_matchers: ['alertname="GManInstanceCrashLoopBackOff"']
+    target_matchers: ['alertname="GManInstanceRestartLoop"']
+    equal: [source_id, instance_id]
