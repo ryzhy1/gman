@@ -1,4 +1,4 @@
-# Local pilot only. Remote production ingress requires authenticated TLS.
+# Local pilot only (plain OTLP on loopback). Remote hosts: otel-gateway.prod.yaml (mTLS).
 receivers:
   otlp:
     protocols:

@@ -1,0 +1,32 @@
+# Node Collector (otelcol-contrib) for a Docker host, config deploy/otel-agent.example.yaml.
+# Install: binary /usr/bin/otelcol-contrib (the release .deb/.rpm; disable its own
+# otelcol-contrib.service), config /etc/gman/otel-agent.yaml, environment /etc/gman/otelcol.env,
+# client certificate /etc/gman/{ca.pem,client.pem,client-key.pem} readable by group gman-otel.
+[Unit]
+Description=GMan node OpenTelemetry Collector
+Wants=network-online.target
+After=network-online.target docker.service
+
+[Service]
+EnvironmentFile=/etc/gman/otelcol.env
+ExecStart=/usr/bin/otelcol-contrib --config=/etc/gman/otel-agent.yaml
+Restart=on-failure
+RestartSec=5s
+User=gman-otel
+Group=gman-otel
+# docker_stats reads the Docker socket (root-equivalent).
+SupplementaryGroups=docker
+NoNewPrivileges=yes
+ProtectSystem=strict
+# Read-only rather than hidden so the filesystem scraper can stat /home mounts.
+ProtectHome=read-only
+PrivateTmp=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectControlGroups=yes
+RestrictSUIDSGID=yes
+LockPersonality=yes
+MemoryMax=512M
+
+[Install]
+WantedBy=multi-user.target

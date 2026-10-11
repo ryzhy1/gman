@@ -1,7 +1,9 @@
-# Архитектурный проект GMan
+# Архитектура GMan
 
-Статус: целевая архитектура первой версии, 10 октября 2026 года. Часть реализована
-в локальном каркасе; фактические возможности и ограничения перечислены в README.
+Статус: описание фактической реализации первой версии на 11 октября 2026 года.
+Пилот не подключен к производственным серверам: что проверено только на эмуляторах
+и тестах — в [next-steps.md](next-steps.md) («Не проверено»); инструкции по запуску — в README.
+Там, где реализация отличается от исходного проекта, отклонение отмечено «Отличие от проекта».
 
 ## Подтвержденные требования
 
@@ -14,95 +16,274 @@
 - Интерфейс объединяет сведения о сервисе и ссылки на специализированные приложения.
 - OpenTelemetry принимает и маршрутизирует телеметрию.
 
-Согласованный прикладной стек: FastAPI, PostgreSQL, React/TypeScript.
-Не выяснены: состав узлов Kubernetes, число workloads, модели GPU, действующие
-Grafana/хранилище метрик/Splunk/SSO, сроки хранения и требования доступности.
+Прикладной стек: FastAPI, PostgreSQL, React/TypeScript. Не выяснены: состав узлов
+Kubernetes, число workloads, модели GPU, действующие Grafana/хранилище метрик, индексы
+и поля Splunk, IdP для SSO, канал уведомлений, сроки хранения и требования доступности.
 
-## Два потока данных
+## Компоненты
 
-Телеметрия:
+```mermaid
+flowchart LR
+  subgraph dhost[Docker-хост]
+    agent[agent/collect.py<br/>timer или --watch]
+    otelN[otelcol-contrib<br/>host_metrics, docker_stats, DCGM]
+    dcgm[DCGM Exporter]
+  end
+  subgraph k8s[Kubernetes]
+    kagent[collect.py --runtime kubernetes<br/>kubectl, вне узлов]
+    gpuds[DaemonSet kubernetes-node<br/>GPU-узлы, hostPID]
+    otelK[DaemonSet otel-k8s<br/>kubelet_stats, DCGM]
+  end
+  bamboo[Bamboo<br/>bamboo_event.py]
+  subgraph srv[Сервер GMan, Docker Compose]
+    nginx[portal: nginx + React]
+    api[api: FastAPI]
+    db[(PostgreSQL)]
+    gw[otel gateway]
+    prom[(Prometheus)]
+    am[Alertmanager]
+    graf[Grafana]
+    bk[backup]
+  end
+  idp[IdP OIDC]
+  splunk[Splunk]
+  agent -->|"HTTPS inventory"| nginx
+  kagent -->|"HTTPS"| nginx
+  gpuds -->|"HTTPS"| nginx
+  bamboo -->|"HTTPS deployment"| nginx
+  dcgm --> otelN
+  otelN -->|"OTLP mTLS :4317"| gw
+  otelK -->|"OTLP mTLS"| gw
+  nginx --> api --> db
+  gw --> prom
+  prom -->|"/metrics"| api
+  prom --> am
+  api -->|"PromQL шаблоны"| prom
+  api -->|"/api/v2/alerts"| am
+  graf --> prom
+  nginx -->|"/grafana/"| graf
+  api <-->|OIDC| idp
+  bk --> db
+  nginx -.->|"ссылки в браузере"| splunk
+```
 
-1. На Docker-хостах OTel Collector принимает метрики хоста и контейнеров.
-2. В Kubernetes Collector работает на узлах; kube-state-metrics сообщает состояние
-   Kubernetes-объектов, kubelet — использование ресурсов. Метрики кластера собирает
-   выделенный экземпляр, чтобы не дублировать их на каждом узле.
-3. DCGM Exporter отдает метрики NVIDIA в формате Prometheus; Collector их собирает.
-4. Узловые Collector передают OTLP в центральный OTel Gateway.
-5. Gateway отправляет метрики в существующее или новое хранилище временных рядов.
-   Grafana и backend GMan читают его API. Grafana сама не является хранилищем.
-6. Логи направляются в согласованный Splunk endpoint. При отсутствии готового
-   логового pipeline первая версия предоставляет ссылки в Splunk; сбор логов
-   включается отдельно после определения источников и политики обработки данных.
-7. Трейсы возможны через OTLP, но требуют инструментирования приложений и backend
-   для хранения трассировок; один Collector не создает прикладные трейсы автоматически.
+| Компонент | Реализация | Назначение |
+| --- | --- | --- |
+| Inventory agent | agent/collect.py, Python stdlib | Снимок Docker-хоста, кластера или GPU-узла; spool, retry, flock, `--watch` |
+| Bamboo hook | agent/bamboo_event.py | Событие деплоя из deployment job |
+| API | backend/app (FastAPI, SQLAlchemy, Alembic) | Прием inventory и деплоев, каталог, история, конфигурации, вход, чтение метрик и алертов |
+| Портал | frontend (React/TypeScript, Vite), nginx | Каталог, карточки, серверы и GPU, алерты, аудит |
+| Хранилище каталога | PostgreSQL 17 | Каталог, текущее состояние, история, сессии |
+| Телеметрия | otelcol-contrib 0.162.0 на узлах и gateway | Метрики хостов, контейнеров, kubelet, DCGM |
+| Метрики | Prometheus 3.5.0, хранение 30 дней | Временные ряды, правила алертов |
+| Алерты | Alertmanager 0.28.1 | Группировка, подавление, webhook/email |
+| Визуализация | Grafana 12.1.1 | Дашборды «Хост», «Сервис», «Kubernetes» |
+| Логи | существующий Splunk | Только ссылки на поиск; GMan логи не читает |
 
-Каталог и аудит:
+## Потоки данных
 
-1. Агент Docker получает разрешенные поля inspect и наблюдает события Docker.
-2. Kubernetes watcher получает метаданные workloads, pods, nodes и события API.
-3. Для деплоев через Bamboo CI передает сведения о релизе через deployment job.
-   Ручные запуски обнаруживаются агентами без события CI и без подключения Bamboo.
-4. Inventory API принимает снимки/события в PostgreSQL; браузер обращается к API.
-5. Периодическая полная сверка восстанавливает актуальное состояние после разрыва
-   соединения. Она не восстанавливает пропущенные исторические события.
+Каталог/inventory и телеметрия — независимые каналы. Конфигурации и релизы не кодируются
+как метрики, временные ряды не хранятся в таблицах каталога. Связь — общие идентификаторы
+(source_id = host_id, ID контейнера, UID pod-а, UUID GPU; см. «Идентификация»).
 
-Конфигурации и релизы не кодируются как метрики. Временные ряды не хранятся
-в таблицах каталога. Общие идентификаторы связывают два потока.
+### Inventory
 
-Обнаружение сервисов основано на фактическом состоянии Docker/Kubernetes.
-Bamboo — дополнительный источник сведений о деплое, а не условие включения
-сервиса в мониторинг. Отсутствие события Bamboo не доказывает ручной запуск:
-способ запуска остается неизвестным, пока нет подтверждающего источника.
-Контейнер без меток и записи в каталоге все равно виден как непривязанный экземпляр.
+1. Агент на Docker-хосте читает `docker ps -aq` и `docker inspect` (allowlist полей),
+   nvidia-smi или AMD sysfs, сведения о хосте. Агент кластера читает pods и nodes через
+   kubectl (или API с service account). Агент GPU-узла (`kubernetes-node`) читает nvidia-smi,
+   `/proc/<pid>/cgroup` и pods своего узла.
+2. Снимок пишется в spool на диске и отправляется `POST /api/inventory` с Bearer-токеном
+   источника. Повторы с backoff; неотправленное остается в spool.
+3. API сопоставляет токен с source_id до разбора тела, проверяет схему (extra=forbid),
+   берет advisory lock источника и отвергает дубликат или снимок не новее принятого
+   (`accepted=false`).
+4. Снимок заменяет текущее состояние источника (sources, instances); новая конфигурация
+   экземпляра создает строку config_snapshots. Разница с прошлым снимком записывается
+   событиями (см. «Кем и когда запущено»).
+5. Портал получает `GET /api/overview` (каталог, источники с экземплярами, последние 200
+   событий) раз в 30 секунд.
 
-## Модель данных и идентификация
+Сбор — периодический опрос (systemd timer раз в минуту) либо `docker events` в режиме
+`--watch`: снимок через 2 с тишины, не позже 10 с от первого события и не реже 60 с;
+контейнер, исчезнувший до снимка, отправляется промежуточным снимком. После разрыва потока
+событий — полная сверка. Пропущенные во время разрыва короткие события не восстанавливаются.
 
-| Сущность | Идентификатор и содержание |
+Отличие от проекта: Kubernetes опрашивается целиком раз в минуту, watch API и Kubernetes
+Events не используются; доступ к Docker — через Docker CLI с группой docker, а не через
+ограничивающий proxy.
+
+### Телеметрия
+
+1. Docker-хост: otelcol-contrib как host process (systemd) — host_metrics, docker_stats
+   (метки gman.service/gman.environment переносятся в метрики), scrape DCGM Exporter
+   127.0.0.1:9400. Атрибут host.id = GMAN_HOST_ID.
+2. Kubernetes: DaemonSet deploy/otel-k8s.yaml — host_metrics узла, kubelet_stats,
+   k8s_attributes, DCGM на узле; host.id = имя узла, k8s.cluster.name = source_id кластера.
+3. Узловые Collector отправляют OTLP gRPC в gateway (в production — mTLS, порт 4317).
+4. Gateway (memory_limiter, batch) отдает метрики через prometheus exporter
+   (resource_to_telemetry_conversion; ряды молчащих источников удаляются через 90 с).
+   Prometheus читает его каждые 30 с.
+5. API читает Prometheus фиксированными шаблонами PromQL (`/api/metrics/current`,
+   `/api/metrics/range`); произвольный PromQL от клиента не принимается. Grafana читает
+   тот же Prometheus.
+
+Логи приложений не собираются: портал строит ссылки на поиск в Splunk
+(`GET /api/logs/splunk`, шаблон SPL с экранированием значений). Трейсы не включены.
+
+Отличие от проекта: kube-state-metrics и отдельный экземпляр Collector для метрик кластера
+не развернуты; состояние Kubernetes-объектов (ready, причины, рестарты) берется из inventory.
+
+### Алерты
+
+```
+OTel gateway ──┐
+               ├─► Prometheus (rules.yaml, recording rules) ─► Alertmanager ─► webhook / email
+API /metrics ──┘                                                   │
+ (inventory: источники, узлы,                                      └─► GET /api/alerts ─► портал «Алерты»
+  экземпляры, GPU из nvidia-smi)
+```
+
+API отдает на `/metrics` состояние inventory (backend/app/exposition.py): время последнего
+снимка источника, число ошибок сбора, Ready узлов, рестарты и причины состояния экземпляров
+(только из фиксированного списка), температуру/ECC/причины троттлинга GPU из nvidia-smi
+(не старше 5 минут). Путь не проксируется nginx и читается Prometheus внутри сети Compose.
+Recording rules объединяют DCGM и nvidia-smi (DCGM важнее). 18 алертов: узел, источник,
+телеметрия и gateway молчат, узел Kubernetes NotReady, GPU XID/ECC/перегрев/троттлинг,
+OOMKilled, CrashLoopBackOff, частые перезапуски, образ не скачивается. Inhibition: упавший
+узел скрывает алерты своих GPU и контейнеров, молчащий источник — алерты своих экземпляров.
+Runbook — страница портала `#alerts/<имя>`. Silence — в UI Alertmanager.
+
+### Вход и доступ
+
+1. Портал запрашивает `GET /api/auth/info`. При настроенном OIDC браузер уходит на
+   `/api/auth/login`: API создает state, nonce и PKCE verifier в подписанной cookie (10 минут)
+   и перенаправляет в IdP.
+2. `/api/auth/callback`: обмен кода (конфиденциальный клиент), проверка ID token по JWKS
+   (только асимметричные алгоритмы, issuer, audience/azp, nonce, срок), группы из claim или
+   userinfo, роль по GMAN_OIDC_*_GROUPS. Без подходящей группы вход отклоняется.
+3. Сессия хранится в таблице sessions (хеш значения cookie, роль, CSRF-токен, срок, по
+   умолчанию 8 часов). Браузер держит только HttpOnly cookie (`__Host-` и Secure при HTTPS,
+   SameSite=Lax). Изменяющие запросы требуют X-CSRF-Token.
+4. Явный заголовок Authorization имеет приоритет над cookie: Bearer GMAN_READ_TOKEN (чтение)
+   и GMAN_ADMIN_TOKEN (администратор) — для автоматизации и режима без SSO.
+
+Машинные учетные данные отдельны: токен на каждый source_id (GMAN_AGENT_TOKENS),
+GMAN_CI_TOKEN для Bamboo. OTLP — клиентские сертификаты пилотного CA.
+
+### Bamboo
+
+Script task `agent/bamboo_event.py` в deployment job отправляет `POST /api/deployments`
+(started/succeeded/failed): build, release, environment, commit, image digest, инициатор,
+build URL, а также deployment_id (deploymentResultId), version и image для сверки.
+Значения по умолчанию берутся из документированных переменных `bamboo_*` (см. README).
+event_id детерминирован, повтор с тем же payload не создает второе событие, с другим — 409.
+Сбой отправки не валит деплой (кроме GMAN_REQUIRED=true).
+
+Событие создает или обновляет релиз, статус которого выводится из runtime-сверки
+(раздел «Релизы: сверка Bamboo и runtime»).
+
+Обнаружение сервисов основано на фактическом состоянии Docker/Kubernetes. Bamboo —
+дополнительный источник сведений о деплое, а не условие включения сервиса в мониторинг.
+Отсутствие события Bamboo не доказывает ручной запуск. Контейнер без меток и записи
+в каталоге виден как непривязанный экземпляр.
+
+## Модель данных
+
+PostgreSQL, схема из Alembic-миграций (0001 — нормализованная схема, 0002 — имя и окружение
+экземпляра в config_snapshots, 0003 — sessions, 0004 — releases и events.release_id). Миграции применяются при старте API под
+advisory lock. Снимки, экземпляры и конфигурации хранятся как проверенный JSON (JSONB);
+колонками вынесено только то, по чему фильтруют и сортируют, поэтому новые поля схемы API
+не требуют миграций. Время хранится в UTC (timestamptz).
+
+| Таблица | Ключ | Содержание |
+| --- | --- | --- |
+| services | id | Каталог: name, description, owner, team, repository, ссылки grafana/splunk/bamboo; extra (JSON): owners, logs.splunk и будущие поля |
+| sources | source_id | Последний принятый снимок источника без экземпляров: тип, hostname, observed_at, received_at, сведения о хосте, GPU, узлы Kubernetes, ошибки сбора |
+| instances | source_id + instance_id | Текущие экземпляры источника: service_id, environment, runtime, status, хеш и ссылка на текущую конфигурацию, полный JSON экземпляра |
+| config_snapshots | id | Различающиеся конфигурации экземпляра по хешу: service_id, instance_name, environment, config, first_seen_at/last_seen_at |
+| events | id | Журнал: тип, service/source/instance, received_at, occurred_at, release_id, JSON события с actor и changes |
+| deployments | event_id | Исходный запрос CI для идемпотентности |
+| releases | id | Прогон деплоя Bamboo для сервиса/окружения: версия, image/digest, commit, инициатор, статус и причина, окно, прогресс экземпляров |
+| sessions | sha256 cookie | SSO-сессии: subject, роль, email/имя/группы на момент входа, CSRF-токен, срок |
+
+Соответствие сущностям исходного проекта:
+
+| Сущность проекта | Реализация |
 | --- | --- |
-| Service | Постоянный service_id, имя, описание, команда, владелец, репозиторий, ссылки |
-| Environment | prod/stage/dev, ограничения доступа |
-| Workload | Service + environment + тип размещения; Docker Compose service либо Kubernetes controller UID |
-| Instance | Docker container ID либо Kubernetes pod UID + container name; ссылка на host/node |
-| Host | Зарегистрированный host_id, hostname, CPU/RAM/диски/NIC, ОС, kernel, runtime, last_seen |
-| GPU | Host + GPU UUID; PCI address, модель, драйвер, память; MIG instances — дочерние сущности |
-| ConfigSnapshot | Нормализованная конфигурация, hash, captured_at, источник, связь с Instance/Workload |
-| Deployment | release_id, service_id, environment, image digest, commit при наличии, способ запуска и источник подтверждения, необязательный CI build/deployment ID, статус |
-| AuditEvent | event_id, тип, actor, actor_kind, source, occurred_at, received_at, evidence/correlation ID |
+| Service | services |
+| Environment | Строка gman.environment у экземпляра; отдельной сущности и ограничений доступа по окружению нет |
+| Workload | Не нормализован: поле controller (Compose project/service или Kind/имя контроллера Kubernetes) |
+| Instance | instances; история — events и config_snapshots |
+| Host | sources (docker-host) с ОС, ядром, CPU, Docker, uptime; узлы Kubernetes — список nodes в снимке кластера |
+| GPU | Список gpus в снимке источника (UUID, PCI, модель, драйвер, показатели, процессы); MIG — только режим |
+| ConfigSnapshot | config_snapshots |
+| Deployment | releases (статус из сверки с runtime) + deployments + событие deployment |
+| AuditEvent | events |
 
-Один сервис может иметь несколько реплик на нескольких узлах и одновременно
-несколько версий при rollout. Имя контейнера не является постоянным ID сервиса.
-Пересоздание pod/container не создает новый сервис.
+Один сервис может иметь несколько реплик на нескольких узлах и разные версии при rollout:
+экземпляры хранятся отдельно, имя контейнера не является ID сервиса, пересоздание
+контейнера/pod-а не создает новый сервис.
 
-Метаданные сервиса задаются декларативно: service_id, owner/team, repository,
-environment, dashboard/log links. Docker labels и Kubernetes labels/annotations
-используются для привязки к каталогу. Неизвестные workloads отображаются в разделе
-«Не привязаны к сервису»; произвольные имена не объединяются автоматически.
+## Идентификация
 
-В метриках: service.name, deployment.environment.name, host.id, k8s.cluster.name,
-k8s.namespace.name и идентификаторы runtime там, где нужны. Список атрибутов
-ограничивается: command, env, пользователь, commit и build URL не превращаются
-в labels каждого временного ряда.
+| Объект | Идентификатор |
+| --- | --- |
+| Сервис | services.id; привязка экземпляра — label gman.service (Docker) или label Pod (spec.template.metadata.labels) |
+| Окружение | label gman.environment, иначе `unknown` |
+| Источник Docker | source_id = `--source-id` агента = GMAN_HOST_ID Collector = host_id в метриках |
+| Источник кластера | source_id = `--source-id` агента = k8s.cluster.name в метриках |
+| Источник GPU-узла | `<кластер>.<узел>` (API требует source_id = cluster + "." + hostname), source_type kubernetes-node, поле cluster; экземпляров не содержит; host_id в /metrics = имя узла |
+| Экземпляр Docker | полный ID контейнера; в метриках container_id |
+| Экземпляр Kubernetes | `<pod uid>:<имя контейнера>`; в метриках k8s_pod_uid + k8s_container_name, init containers включены |
+| Узел Kubernetes | имя узла = host_id в метриках узла |
+| GPU | UUID NVIDIA (метка UUID в DCGM); у AMD — путь устройства |
+| Процесс GPU | PID узла → cgroup → ID контейнера → экземпляр; в Kubernetes дополнительно namespace, pod, instance_id |
+
+Источник GPU-узла нужен потому, что агент кластера работает через kubectl и не видит PID узлов.
+Pod-ы по-прежнему сообщает источник кластера, поэтому история не дублируется; портал показывает
+GPU узла в карточке кластера. Загрузку GPU по pod-ам дают метки namespace/pod/container DCGM
+Exporter в режиме Kubernetes (значения всей карты; при time-slicing/MPS — общие).
+
+Неизвестные workloads показываются в разделе «Не привязаны к каталогу»; произвольные имена
+автоматически не объединяются. В метрики попадают host.id, ID контейнера/pod-а, UUID GPU,
+gman_service/gman_environment, k8s.namespace/pod; command, env, пользователь, commit и build URL
+в метки не попадают.
 
 ## Кем и когда запущено
 
-Раздельно отображаются:
+Раздельно хранятся и показываются:
 
-- Владелец сервиса — ответственность за продукт, не доказательство запуска.
-- Инициатор деплоя — пользователь, запустивший сервис вручную или через Bamboo,
-  расписание либо service account; при отсутствии подтверждения — неизвестен.
-- Исполнитель — учетная запись на сервере, Bamboo agent или Kubernetes service account.
-- Пользователь процесса — UID/GID внутри контейнера.
-- Время создания, начала деплоя, фактического старта, окончания и обнаружения.
+- Владелец сервиса (`owner`, «Ответственный») — описание, не доказательство запуска.
+- Владельцы записи (`owners`) — кто может менять запись каталога (роль owner).
+- Инициатор деплоя — actor и actor_kind (human/service-account/schedule/unknown) из события
+  Bamboo с пометкой источника «Bamboo integration assertion»; не подтверждается запросом к Bamboo.
+- Пользователь процесса — user из конфигурации контейнера (UID/имя), не автор.
+- Время: created_at, started_at, finished_at из runtime; observed_at снимка (occurred_at
+  события) и received_at сервера. Время обнаружения не подменяет время запуска.
 
-Bamboo отправляет идентификаторы проекта/плана/сборки/deployment, environment,
-инициатора (если доступен), причину запуска, commit, image digest, время и результат.
-Дедупликация по источнику и event_id; повторная доставка не создает второй релиз.
-Событие CI подтверждает выполнение pipeline, а runtime-сверка — фактическое состояние.
-Если сборку инициировал один человек, а deployment другой, хранятся оба.
+Типы событий журнала:
+
+| Тип | Источник | actor |
+| --- | --- | --- |
+| source-connected | первый снимок источника, одно событие с числом экземпляров | unknown, runtime observation |
+| instance-appeared / instance-removed | разница снимков | unknown |
+| config-changed / instance-restarted / state-changed | разница снимков, changes «было/стало» | unknown |
+| deployment | Bamboo | из CI, actor_source = Bamboo integration assertion; release_id |
+| instance-appeared / config-changed, связанные с релизом | разница снимков + сверка с релизом | инициатор релиза, actor_source = Bamboo, correlated by digest/version |
+| service-created / service-updated | изменение каталога через API | email/логин SSO (human) или GMAN_ADMIN_TOKEN (unknown), с ролью и subject |
+
+Первый снимок не считается деплоем. Происхождение (compose project/service/working dir,
+OCI source/revision/version, app.kubernetes.io/*, helm chart, Kubernetes field managers)
+сохраняется как подсказка о способе запуска, а не как автор.
+
+Docker events не дают надежного человека-инициатора; для Kubernetes нужен audit log control
+plane, а не Events. Ни то, ни другое не реализовано: автор runtime-изменения — «неизвестно»,
+кроме изменений, сопоставленных с релизом Bamboo (см. ниже); в портале несопоставленные
+появления и изменения конфигурации показываются как «ручной запуск / инициатор неизвестен».
 
 ### Релизы: сверка Bamboo и runtime
 
-Реализовано в backend/app/releases.py, таблица `releases` (миграция 0002_releases),
+Реализовано в backend/app/releases.py, таблица `releases` (миграция 0004_releases),
 ссылка `events.release_id`. Релиз — один прогон deployment Bamboo для пары
 сервис/окружение: версия и релиз Bamboo, image ref и digest, commit, сборка,
 инициатор из Bamboo, время начала, статус и причина, прогресс экземпляров.
@@ -150,170 +331,203 @@ advisory lock `release:<service>|<env>` на PostgreSQL; тайм-ауты — �
 источника. Повторы снимков и событий отбрасываются раньше, повторный пересчет
 неизменных данных ничего не меняет. Завершенные релизы старше retention удаляются.
 
-Docker events не предоставляют надежного человека-инициатора. Для уже работающих
-контейнеров без внешнего аудита показывается «неизвестно». Дальнейшая атрибуция
-ручных запусков потребует отдельного audit/control пути. Shell history и Config.User
-не используются как доказательство авторства.
-
-В Kubernetes Events не заменяют Kubernetes audit log. Для установления API caller
-нужен аудит control plane; действие controller связывается с deployment отдельно.
-История до включения аудита доступна только в пределах сохраненных внешних журналов.
-Для каждого actor указывается источник; декларативная label не выдается за
-аутентифицированное событие Bamboo.
-
 ### Ручные запуски
 
-Базовый сценарий первой версии: человек запускает контейнер привычным способом;
-агент обнаруживает его, получает конфигурацию и доступное время старта.
-Мониторинг не требует перевода сервиса в Bamboo. В текущем каркасе обнаружение
-происходит при следующем успешном опросе; история содержит изменения между снимками.
-Время обнаружения не подменяет время запуска, а первый снимок не считается деплоем.
+Человек запускает контейнер привычным способом; агент обнаруживает его при следующем опросе
+или сразу по `docker events` в режиме `--watch`, получает конфигурацию и время старта.
+Перевод в Bamboo, CI build ID и ссылка Bamboo не требуются; репозиторий, команда и ссылки
+задаются в каталоге независимо от способа запуска.
 
-Для будущей атрибуции ручных запусков нужно выбрать отдельный механизм:
+Для атрибуции ручных запусков нужен отдельный механизм (не реализован):
 
 - Аутентифицированный CLI/посредник запуска, фиксирующий пользователя и результат
-  Docker/Kubernetes API. Имя из переменной окружения или переданное --actor
-  само по себе не подтверждает личность. Прямой запуск в обход посредника остается
-  видимым в inventory, но может не иметь установленного автора.
+  Docker/Kubernetes API. Имя из переменной окружения или `--actor` само по себе личность не
+  подтверждает. Прямой запуск в обход посредника остается видимым без автора.
 - Аудит действий на сервере с персональными учетными записями и корреляцией с
-  runtime-событиями; для Kubernetes — аудит API. Наличие SSH-сессии само по себе
-  не доказывает авторство конкретного контейнера. Общий root-аккаунт также не
-  позволяет автоматически установить человека.
+  runtime-событиями; для Kubernetes — аудит API. SSH-сессия или общий root-аккаунт не
+  доказывают авторство конкретного контейнера.
 
-Эти механизмы пока не реализованы. Для существующих запусков без сохраненных
-доказательств автор остается неизвестным; владелец сервиса указывается отдельно.
-Ссылка Bamboo и CI build ID для ручного запуска не обязательны. Репозиторий,
-команда и ссылки на мониторинг задаются в каталоге независимо от способа запуска.
+## Портал
 
-## Состав карточки сервиса
+Экраны: «Сервисы» (каталог с поиском, непривязанные экземпляры), «Серверы и GPU»
+(карточки Docker-хостов и кластеров с узлами, GPU и процессами), «Алерты» (активные алерты
+и runbook), «Аудит» (постраничный журнал). Над экранами — сводка: сервисы, источники
+(устаревшие и с ошибками сбора), видеокарты, непривязанные экземпляры; фильтр окружения.
+Обновление раз в 30 секунд; источник, последний снимок которого принят сервером (received_at)
+более 3 минут назад по часам сервера, помечается «Данные устарели».
 
-Верхняя строка: название, environment, состояние runtime, свежесть данных,
-владелец, команда; кнопки Repository, Grafana, Splunk, Bamboo. Нет адреса —
-кнопка недоступна с пояснением; подставные ссылки не используются.
+Карточка сервиса: название, описание, кнопки Репозиторий, Grafana (по умолчанию дашборд
+«GMan · Сервис» с service_id), «Логи в Splunk», Bamboo. Незаданная ссылка показывается как
+«не настроен», подставные адреса не используются. Вкладки:
 
-Вкладки:
+1. Обзор: команда, ответственный, владельцы записи, ID, репозиторий; редактор записи каталога
+   для owner/admin; текущее размещение.
+2. Ресурсы: CPU в ядрах и память против лимитов, GPU по pod-ам, графики за 1 час / 24 часа /
+   7 дней; ссылки в Grafana и Splunk за тот же период.
+3. Экземпляры: размещение, состояние отдельно от health/ready, причина и прошлое завершение,
+   CPU/память, VRAM процессов, рестарты, время создания и старта, ссылка на логи экземпляра.
+4. Конфигурация: текущая конфигурация каждого экземпляра, процессы GPU, происхождение;
+   история версий с фильтром по экземпляру и diff «Было/Стало».
+5. Релизы: деплои Bamboo со статусом из runtime-сверки, инициатор, версия, прогресс,
+   длительность; карточка релиза с экземплярами и связанными событиями.
+6. История: события сервиса; у связанных с релизом — ссылка «Релиз #N».
 
-1. Обзор: описание, репозиторий/commit, версия/digest, размещение, экземпляры,
-   последние deployment, краткие ресурсы и открытые проблемы.
-2. Ресурсы: CPU/RAM/GPU/VRAM/сеть/I/O, usage против requests/limits,
-   графики за 1 час / 24 часа / 7 дней; переход в Grafana с теми же фильтрами.
-3. Конфигурация: безопасный runtime snapshot, лимиты, порты, mounts, сети,
-   restart policy, health probes, device requests, security settings и diff версий.
-4. Экземпляры: узел, контейнер/pod, возраст, restart count, ready/health, причины
-   завершения. Running не означает исправность прикладного сервиса.
-5. Релизы: деплои Bamboo со статусом из runtime-сверки, инициатор, версия,
-   длительность; карточка релиза с прогрессом экземпляров и связанными событиями.
-6. История: деплои, изменения конфигурации, runtime-события; источник и автор,
-   ссылка на релиз у связанных событий.
+CPU контейнера — в ядрах (1.0 = одно ядро), процент — от лимита контейнера. VRAM — память
+процессов контейнера, не доля загрузки GPU. Нет метрик — «—» и предупреждение, а не ноль.
 
-Отдельные экраны: каталог сервисов с поиском и фильтрами; серверы; GPU;
-аудит; состояние интеграций. Главная сводка: доступность узлов, количество
-сервисов/непривязанных workloads, проблемы, использование и запас ресурсов.
-
-На узле показываются физическая емкость, текущая нагрузка и назначенные
-requests/limits. CPU контейнера измеряется в cores; процент явно определяется
-от одного ядра, всей машины или назначенного лимита. Не смешивать эти знаменатели.
+Отличие от проекта: отдельных экранов «состояние интеграций» и списка «последние деплои»
+нет (деплои — во вкладке «Релизы» и в истории); открытые проблемы сервиса на карточке не показываются (только
+на странице «Алерты»); ссылка в Grafana передает service_id, но не окружение и период.
 
 ## Метрики
 
-| Область | Что собирать |
+| Область | Источник | Что собирается |
+| --- | --- | --- |
+| CPU хоста | host_metrics | utilization по состояниям (в т. ч. iowait, steal), load, частоты |
+| RAM хоста | host_metrics | usage/utilization по состояниям, swap (paging) |
+| Диски и ФС | host_metrics | емкость и utilization ФС, bytes/operations диска |
+| Сеть хоста | host_metrics | bytes/packets, errors/drops по интерфейсам |
+| Контейнеры Docker | docker_stats | CPU, throttling, память, сеть, block I/O, pids, uptime, рестарты |
+| Контейнеры Kubernetes | kubelet_stats | CPU, working set, сеть pod-а, доля от limits/requests |
+| Состояние экземпляров | inventory | status, health, ready, причина, exit code, рестарты, прошлое завершение |
+| Узлы Kubernetes | inventory | Ready, pressure, cordon, taints, capacity/allocatable, сумма requests CPU/RAM/GPU |
+| GPU NVIDIA | DCGM Exporter | загрузка, copy util, VRAM, температуры, мощность, частоты, XID; ECC и throttle reasons при включении в CSV |
+| GPU NVIDIA | nvidia-smi (inventory) | модель, PCI, драйвер, pstate, загрузка, VRAM, температуры, мощность/лимит, частоты, вентилятор, throttle reasons, ECC, PCIe, MIG, persistence, процессы с VRAM |
+| GPU AMD | sysfs (inventory) | busy, VRAM, датчики edge/junction/mem, частоты, вентилятор (локальная проверка) |
+| Pipeline | Prometheus, /metrics | up gateway и API, время последнего снимка и ошибки сбора источников |
+
+Неподдерживаемый показатель передается как отсутствующий, а не ноль; температуры датчиков
+не объединяются. GPU host-метрики не приписываются целиком контейнеру: связь процесса с
+контейнером/pod-ом дает VRAM процесса, загрузка по pod-ам — только для карт, выделенных
+через device plugin.
+
+Не собираются: PSI, OOM-события как метрика, SMART/NVMe, hwmon хоста, BMC/IPMI/Redfish,
+PCIe/NVLink-счетчики, retired pages, SM/tensor profiling, метрики MIG-инстансов,
+kube-state-metrics (desired/available replicas, Pending, rollout).
+
+## Сбор, хранение и надежность
+
+| Параметр | Значение |
 | --- | --- |
-| CPU | utilization по состояниям, load, cores, частоты при поддержке, iowait, steal, container throttling |
-| RAM | total/available/used, cache, swap, PSI при поддержке, working set/RSS, OOM, requests/limits |
-| Диски | емкость/inodes, bytes и operations/sec, latency, queue, utilization; SMART/NVMe health отдельным exporter |
-| Сеть | bytes/packets/sec, errors/drops, скорость линка; интерфейс и направление |
-| Docker | CPU, память, block I/O, сеть, health, restart count, состояние и причины завершения |
-| Kubernetes | desired/available replicas, ready, restarts, Pending/unschedulable, OOMKilled, requests/limits, rollout |
-| GPU | UUID/model, driver, GPU/memory utilization, VRAM used/total, temperatures, power/limit, clocks, throttling |
-| GPU расширенные | ECC/Xid, PCIe/NVLink, retired pages/remapping, fan при доступности, SM/tensor profiling, MIG |
-| Железо | hwmon температуры/вентиляторы; BMC/IPMI/Redfish для PSU, шасси и других датчиков при доступности |
+| Метрики узлов | раз в 15 с (Collector), Prometheus читает gateway раз в 30 с |
+| Inventory | раз в минуту (timer, случайная задержка до 15 с) или по событиям `--watch` |
+| Устаревание | от received_at (часы сервера): портал — 3 минуты; алерт GManSourceSilent — 5 минут |
+| Метрики | Prometheus, 30 дней; ряды молчащих источников удаляются из gateway через 90 с |
+| События и конфигурации | GMAN_RETENTION_DAYS (180, 0 — отключить); текущие конфигурации не удаляются; деплои хранятся без срока |
+| SSO-сессии | истекшие удаляются ежечасной очисткой и при входе, независимо от GMAN_RETENTION_DAYS |
+| Бэкап | pg_dump раз в сутки, проверка `pg_restore --list`, ротация 14 файлов |
 
-Не все устройства поддерживают все поля. Вместо нуля для неподдерживаемого
-показателя передается отсутствие значения и причина. Температура разных датчиков
-(edge/hotspot/memory) не объединяется в одно неименованное значение.
+Агент: spool на диске (100 файлов / 50 MiB, при переполнении удаляются старые с отметкой
+в errors нового снимка), повторы с экспоненциальным backoff и jitter на сеть/таймаут/5xx/429,
+401/403 — без повторов с сохранением снимков, 422 — снимок удаляется. Неблокирующий flock на
+источник. При ошибке полного сбора снимок не отправляется, чтобы не пометить все экземпляры
+удаленными; частичные ошибки (например, nvidia-smi) передаются в errors и видны в портале.
+Сервер принимает снимки идемпотентно и не затирает новый старым; события получают время
+observed_at, а не время доставки.
 
-GPU host-метрики не равны потреблению конкретного сервиса. Назначение GPU
-получается из device requests/runtime/Kubernetes allocation; реальная атрибуция
-процессов требует PID/cgroup/container mapping. При совместном GPU, MPS и MIG
-нужно учитывать режим разделения. Пока нет надежной атрибуции, UI показывает
-«GPU используется совместно» и не приписывает всю нагрузку каждому контейнеру.
+Collector: memory_limiter, batch, in-memory sending_queue и retry_on_failure.
+Отличие от проекта: постоянная очередь Collector на диске (file_storage) не настроена,
+явная отметка пробела в истории после переподключения не создается (видна только по
+ошибкам spool и времени снимков). Самонаблюдение pipeline ограничено up{job} gateway и API
+и метриками источников; lag, dropped и размер очередей Collector не собираются.
+Внешнего мониторинга самого сервера GMan нет.
 
-## Сбор, хранение и отказоустойчивость
+Предварительный бюджет для измерений, не гарантия: узловой Collector 0.25–0.5 CPU и
+256–512 MiB RAM (systemd MemoryMax=512M); центральный стенд — 4 vCPU и 8–16 GiB RAM.
+Емкость Prometheus: samples/day = active_series × 86400 / interval_seconds. После 24–72 часов
+пилота измерить накладные расходы, cardinality, прирост диска и задержку.
 
-Начальные значения для пилота: метрики каждые 15–30 секунд, inventory раз в
-60 секунд плюс поток событий. Порог устаревания — несколько пропущенных интервалов;
-отсутствие данных отличается от нулевой нагрузки и stopped-состояния.
+## Доступ и безопасность
 
-Collector использует batch, memory limiter, bounded sending queue, retry и
-постоянную очередь на диске там, где она поддерживается выбранным exporter.
-Inventory agent хранит ограниченный spool, повторяет доставку с backoff;
-сервер идемпотентно принимает события и не затирает новый snapshot старым.
-После переподключения — полная сверка и явная отметка пробела в истории.
+| Кто | Как | Права |
+| --- | --- | --- |
+| Человек, SSO | OIDC Authorization Code + PKCE, серверная сессия | viewer — чтение; owner — правка записей каталога, где он в `owners` (кроме самого `owners`); admin — все, включая новые сервисы |
+| Автоматизация | Bearer GMAN_READ_TOKEN / GMAN_ADMIN_TOKEN | чтение / администратор; автор в журнале — имя токена |
+| Агент inventory | Bearer-токен на source_id | только `POST /api/inventory` своего source_id |
+| Bamboo | Bearer GMAN_CI_TOKEN | только `POST /api/deployments` |
+| Collector узла | клиентский сертификат пилотного CA (mTLS) | OTLP в gateway |
 
-Наблюдать сам pipeline: last_success, lag, failed exports, dropped events,
-queue size, disk usage и scrape errors. Сбой центрального сервера отображается
-внешним мониторингом, а не только самим GMan.
+Владение (`owners`) сопоставляется с subject, email, логином или `group:<группа>` без учета
+регистра. Роль фиксируется при входе и действует до конца сессии. Изменения каталога
+пишутся в журнал с автором и ролью.
 
-Предложение по retention, не согласованная политика: метрики 30 дней для пилота,
-снимки конфигурации и аудит 180 дней. Емкость зависит от числа активных series:
-samples/day = active_series × 86400 / interval_seconds. Дисковый объем измеряется
-на пилоте с учетом компрессии, WAL, индексов и запаса, а не только числа серверов.
+Сеть (production): снаружи только 443 (портал, /api, Grafana на /grafana/), 80 (редирект)
+и 4317 (OTLP gRPC с mTLS); Prometheus и Alertmanager — на 127.0.0.1, PostgreSQL и Grafana не
+публикуются. nginx: TLS 1.2/1.3, HSTS, CSP, limit_req по IP, лимиты тела запроса.
 
-Предварительный стартовый бюджет для измерений, не гарантия: узловой Collector
-0.25–0.5 CPU и 256–512 MiB RAM; центральный стенд каталога, БД, gateway и
-небольшого metrics backend — 4 vCPU и 8–16 GiB RAM. Exporters и логи оцениваются
-отдельно. После 24–72 часов пилота измерить накладные расходы, cardinality,
-прирост диска и задержку, затем назначить реальные requests/limits.
+Данные: агент отправляет allowlist полей inspect/Pod spec. Значения env (кроме
+NVIDIA_VISIBLE_DEVICES/CUDA_VISIBLE_DEVICES), команды, args и команды проверок здоровья не
+собираются и отвергаются схемой API; labels — только allowlist происхождения. Поэтому
+конфигурации показываются без маскирования. Ссылки каталога — только HTTP(S) без учетных
+данных; токены не помещаются в URL. Ошибки API не раскрывают параметры SQL и inventory.
 
-## Доступ
+Привилегии на узлах: агент и Collector Docker-хоста получают Docker socket через группу
+docker (эквивалент root); systemd sandboxing ограничивает остальное. Kubernetes RBAC агента
+кластера — get/list pods и nodes; DaemonSet GPU-узлов — list pods, hostPID, без capabilities.
+Secrets и exec не используются, но доступ к Pod spec открывает env в API Kubernetes.
 
-Web/API через корпоративный SSO; роли viewer, service owner, platform admin.
-Агенты аутентифицируются отдельными учетными данными с привязкой к host/cluster;
-учетная запись узла не может отправлять inventory за другой узел.
-OTLP между серверами защищается TLS и аутентификацией.
+Отличие от проекта: клиентский сертификат OTLP не привязан к host.id (любой сертификат
+пилотного CA принимается за любой узел), CRL нет; токены всех GPU-узлов смонтированы в
+каждый pod DaemonSet; ограничивающий proxy для Docker socket не используется.
 
-Docker socket дает высокие привилегии; mount :ro не ограничивает Docker API.
-Агент остается на узле и получает только нужный доступ через ограничивающий proxy
-либо минимальный проверенный адаптер. Центральный портал не получает raw socket.
-Kubernetes RBAC: только необходимые get/list/watch; без Secrets и exec.
+## Развертывание
 
-Сохраняется allowlist полей inspect, а не весь JSON. Значения env по умолчанию
-не собираются; args/commands/labels/annotations/logs тоже могут содержать секреты.
-Видимые конфигурации проходят редактирование чувствительных значений до отправки.
-Secret refs сохраняются как ссылки/имена при необходимости, без содержимого.
-Ссылки UI допускают только согласованные HTTP(S) адреса; токены не помещаются в URL.
+Один сервер GMan, Docker Compose: deploy/compose.yaml (стенд, все порты на 127.0.0.1) и
+override deploy/compose.prod.yaml (Compose ≥ 2.24.4).
+
+```
+                 443/80                       4317 mTLS
+ пользователи ─────────► portal (nginx) ─► api ─► db        ◄──── узловые Collector
+ агенты, Bamboo ───────►   │ /grafana/        ▲   ▲               │
+                           ▼                  │   │ backup        ▼
+                        grafana ──► prometheus ◄──┴────────── otel gateway
+                                     │   ▲ /metrics (api)
+                                     ▼
+                                alertmanager ─► webhook / SMTP
+```
+
+| Сервис Compose | Production |
+| --- | --- |
+| db (postgres:17-alpine) | не публикуется |
+| api | за nginx; миграции при старте |
+| portal (nginx) | 443/80, TLS из deploy/pki или корпоративного CA |
+| otel (gateway) | 4317 gRPC с mTLS, перечитывает сертификаты раз в час |
+| prometheus, alertmanager | 127.0.0.1:9090/9093 |
+| grafana | только через /grafana/ |
+| backup | pg_dump в GMAN_BACKUP_DIR |
+
+Узлы: systemd-юниты gman-collect.service/.timer (агент) и gman-otelcol.service (Collector)
+из deploy/systemd; Kubernetes — deploy/otel-k8s.yaml, deploy/gpu-attribution-k8s.yaml,
+deploy/kubernetes-rbac.yaml. Сертификаты — deploy/pki/issue.sh (ключ CA на сервер не копируется).
+Prometheus и Grafana не бэкапятся: дашборды и datasource описаны в репозитории.
 
 ## Этапы и приемка
 
-1. Уточнить инфраструктуру и выбрать стек. Описать контракты inventory/deployment
-   events, каталог и идентификаторы. Подготовить локальный стенд с отдельно
-   помеченными тестовыми данными.
-2. Подключить один Docker-host и один Kubernetes namespace. Проверить реальное
-   обнаружение экземпляров, привязку сервисов, конфигурации и diff.
-3. Подключить NVIDIA-узел и метрики через OTel. Сверить показатели с источником;
-   явно обозначить неподдерживаемые поля и ограничения атрибуции.
-4. Интегрировать Bamboo: успешный и неудачный deployment, инициатор, commit,
-   digest, корреляция runtime. Отдельно проверить обнаружение ручного запуска
-   без Bamboo и без service labels: экземпляр виден, конфигурация получена,
-   автор и способ запуска не выдуманы, CI build ID не требуется.
-5. Реализовать каталог и карточки, исторические графики и рабочие внешние ссылки.
-6. Подключить остальные серверы, SSO и роли; проверить разрыв связи, повторную
-   доставку, устаревшие данные, рестарт агента, backup/restore каталога.
+| Этап | Состояние |
+| --- | --- |
+| 1. Стек, контракты inventory/deployment, каталог, идентификаторы, локальный стенд | Сделано |
+| 2. Один Docker-host и один Kubernetes namespace: обнаружение, привязка, конфигурации, diff | Реализовано; на реальных Docker и Kubernetes не проверено |
+| 3. NVIDIA-узел и метрики через OTel, сверка с источником | Реализовано; проверено на эмуляции DCGM/Docker API/kubelet, не на NVIDIA |
+| 4. Bamboo: успешный/неудачный деплой, инициатор, commit, digest; ручной запуск без Bamboo и меток | Endpoint, скрипт и релизы со сверкой с runtime сделаны, проверены тестами и против локального API; настоящий Bamboo — нет |
+| 5. Каталог, карточки, исторические графики, внешние ссылки | Сделано (Grafana, Splunk); браузерная проверка новых страниц не завершена |
+| 6. Остальные серверы, SSO и роли, разрыв связи, повторная доставка, устаревание, рестарт агента, backup/restore | SSO и роли — против mock IdP; надежность агента — тестами; backup/restore — на PostgreSQL 17 вне контейнера; на реальной инфраструктуре не проверено |
+| Алерты (вне исходного плана) | Правила проверены promtool, доставка — локальными бинарными релизами; на реальных DCGM/SMTP нет |
 
-Приемка первой версии: все согласованные workloads шести серверов видимы;
-реплики и версии не смешиваются; временные метки имеют UTC в хранении;
-UI отображает часовой пояс; каждый actor имеет источник; секреты не попадают
-в каталог; сервисная учетная запись и человек различаются; отсутствие данных
-не показывается как нулевое потребление; CPU/RAM/GPU цифры сверены с источниками;
-ссылки открывают нужный service/environment/time range; накладные расходы измерены.
+Приемка первой версии (ни один пункт пока не подтвержден на шести серверах): все
+согласованные workloads видимы; реплики и версии не смешиваются; время хранится в UTC,
+UI показывает часовой пояс; у каждого actor есть источник; секреты не попадают в каталог;
+сервисная учетная запись и человек различаются; отсутствие данных не показывается как нулевое
+потребление; CPU/RAM/GPU сверены с источниками; ссылки открывают нужный
+service/environment/time range; накладные расходы измерены.
 
 ## Дальнейший PaaS
 
 После наблюдения: декларативная желаемая конфигурация, асинхронные операции
-deployment/rollback, policy/RBAC/approvals, quotas, reconciliation, registry,
-секреты через существующий secret manager. Inventory отражает observed state,
-а будущий control plane хранит desired state отдельно. Read-only API первой
-версии не расширяется произвольным исполнением shell-команд.
+deployment/rollback, policy/approvals, quotas, reconciliation, registry, секреты через
+существующий secret manager. Inventory отражает observed state, будущий control plane хранит
+desired state отдельно. Роли SSO и журнал изменений каталога — основа для approvals.
+Read-only API первой версии не расширяется произвольным исполнением shell-команд.
+Ближайшие задачи — в [next-steps.md](next-steps.md) («Дальше по плану»).
 
 ## Локальная аппаратная проверка
 
@@ -328,9 +542,14 @@ edge/junction/memory sensors, power average и fan input. Это разовый 
 - OTel agent → gateway: https://opentelemetry.io/docs/collector/deploy/other/agent-to-gateway/
 - Docker stats receiver: https://github.com/open-telemetry/opentelemetry-collector-contrib/tree/main/receiver/dockerstatsreceiver
 - Host metrics receiver: https://github.com/open-telemetry/opentelemetry-collector-contrib/tree/main/receiver/hostmetricsreceiver
+- Kubelet stats receiver: https://github.com/open-telemetry/opentelemetry-collector-contrib/tree/main/receiver/kubeletstatsreceiver
 - NVIDIA DCGM Exporter: https://docs.nvidia.com/datacenter/cloud-native/gpu-telemetry/latest/dcgm-exporter.html
 - NVIDIA profiling, ограничения оборудования: https://docs.nvidia.com/datacenter/dcgm/latest/learn/modules/profiling.html
 - AMD metrics: https://instinct.docs.amd.com/projects/device-metrics-exporter/en/main/configuration/metricslist.html
+- Prometheus alerting rules: https://prometheus.io/docs/prometheus/latest/configuration/alerting_rules/
+- Alertmanager: https://prometheus.io/docs/alerting/latest/configuration/
+- OpenID Connect Core: https://openid.net/specs/openid-connect-core-1_0.html
 
-Перед реализацией конфигураций фиксируются версии компонентов и проверяется
-поддержка receiver/exporter/метрик для выбранных версий и конкретных устройств.
+Версии компонентов зафиксированы в deploy (otelcol-contrib 0.162.0, Prometheus 3.5.0,
+Alertmanager 0.28.1, Grafana 12.1.1, PostgreSQL 17). При обновлении проверяется поддержка
+receiver/exporter/метрик для выбранных версий и конкретных устройств.

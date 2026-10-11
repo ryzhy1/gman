@@ -67,11 +67,20 @@ K8S_POD = {
     "network_tx_bytes_per_second": lambda s: 'sum by (k8s_pod_uid) (max by (k8s_pod_uid, interface) '
                                              f'(rate(k8s_pod_network_io_bytes_total{s(direction="transmit")}[2m])))',
 }
+# GPUs allocated to a Kubernetes container: DCGM Exporter in Kubernetes mode (GPU Operator default) labels the
+# series of a device-plugin GPU with namespace/pod/container. Values are of the whole GPU (shared under
+# time-slicing/MPS), so utilization is the max over the container's GPUs and VRAM is the sum over them.
+K8S_G = "namespace, pod, container"
+K8S_GPU = {
+    "gpu_utilization_percent": lambda s: f'max by ({K8S_G}) (DCGM_FI_DEV_GPU_UTIL{s(pod__ne="")})',
+    "gpu_memory_used_bytes": lambda s: f'sum by ({K8S_G}) (max by ({K8S_G}, UUID) (DCGM_FI_DEV_FB_USED{s(pod__ne="")})) * 1048576',
+}
 # scope: (templates, object key labels, separator of the key in current()).
 SCOPES = {"host": (HOST, ("host_id",), "/"), "container": (CONTAINER, ("host_id", "container_id"), "/"),
           "gpu": (GPU, ("host_id", "UUID"), "/"),
           "k8s_container": (K8S_CONTAINER, ("k8s_pod_uid", "k8s_container_name"), ":"),
-          "k8s_pod": (K8S_POD, ("k8s_pod_uid",), "/")}
+          "k8s_pod": (K8S_POD, ("k8s_pod_uid",), "/"),
+          "k8s_gpu": (K8S_GPU, ("namespace", "pod", "container"), "/")}
 
 # Tests replace this with a client on a mock transport.
 client = httpx.Client(timeout=10)
@@ -116,7 +125,8 @@ def number(value):
 
 def current():
     """Latest value of every template, keyed by scope and then by object: "host_id/object_id" for
-    Docker hosts, "pod_uid:container_name" (the inventory instance id) and "pod_uid" for Kubernetes."""
+    Docker hosts, "pod_uid:container_name" (the inventory instance id) and "pod_uid" for Kubernetes,
+    "namespace/pod/container" for GPUs allocated to Kubernetes containers."""
     jobs = [(scope, name, template(selector({})), keys, sep)
             for scope, (templates, keys, sep) in SCOPES.items() for name, template in templates.items()]
     with ThreadPoolExecutor(max_workers=8) as pool:

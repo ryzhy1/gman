@@ -1,0 +1,48 @@
+# Production gateway: OTLP only over mutual TLS. Node Collectors must present a client
+# certificate signed by the pilot CA (deploy/pki/issue.sh client <host>).
+# Certificates are mounted by deploy/compose.prod.yaml into /etc/otelcol/tls.
+# The key must be readable by the container user (uid 10001), see README.
+receivers:
+  otlp:
+    protocols:
+      grpc:
+        endpoint: '0.0.0.0:4317'
+        max_recv_msg_size_mib: 16
+        tls:
+          cert_file: /etc/otelcol/tls/gateway.pem
+          key_file: /etc/otelcol/tls/gateway-key.pem
+          client_ca_file: /etc/otelcol/tls/ca.pem
+          min_version: '1.2'
+          # Picks up reissued certificates without a restart.
+          reload_interval: 1h
+      http:
+        endpoint: '0.0.0.0:4318'
+        tls:
+          cert_file: /etc/otelcol/tls/gateway.pem
+          key_file: /etc/otelcol/tls/gateway-key.pem
+          client_ca_file: /etc/otelcol/tls/ca.pem
+          min_version: '1.2'
+          reload_interval: 1h
+extensions:
+  # Liveness endpoint on the internal network only (not published).
+  health_check:
+    endpoint: '0.0.0.0:13133'
+processors:
+  memory_limiter:
+    check_interval: 1s
+    limit_mib: 384
+    spike_limit_mib: 96
+  batch: {}
+exporters:
+  prometheus:
+    endpoint: '0.0.0.0:8889'
+    resource_to_telemetry_conversion: {enabled: true}
+    # Drop series of silent hosts/containers quickly, so absence is not shown as zero load.
+    metric_expiration: 90s
+service:
+  extensions: [health_check]
+  pipelines:
+    metrics:
+      receivers: [otlp]
+      processors: [memory_limiter, batch]
+      exporters: [prometheus]

@@ -27,7 +27,7 @@ def rows(model, *order):
 
 def test_service_update_round_trips(client):
     value = {"id": "api", "name": "API", "description": "d", "owner": "o", "team": "t", "repository": "",
-             "grafana": "", "splunk": "", "bamboo": ""}
+             "grafana": "", "splunk": "", "bamboo": "", "owners": []}
     assert client.put("/api/services/api", headers=auth("admin"), json=value).status_code == 200
     value["name"] = "API v2"
     assert client.put("/api/services/api", headers=auth("admin"), json=value).json() == value
@@ -94,6 +94,21 @@ def test_retention_deletes_old_history_at_most_hourly(client, monkeypatch):
     # The next purge waits for the interval to pass.
     assert not main.retention.run(main.engine)
     assert main.retention.run(main.engine, datetime.now(timezone.utc) + timedelta(hours=1, seconds=1))
+
+
+def test_retention_purges_expired_sessions(client, monkeypatch):
+    # Without new SSO sign-ins nothing else removes expired sessions; they go even with retention disabled.
+    main = main_module()
+    monkeypatch.setenv("GMAN_RETENTION_DAYS", "0")
+    now = datetime.now(timezone.utc)
+    with Session(main.engine) as session:
+        for name, expires in (("expired", now - timedelta(minutes=1)), ("live", now + timedelta(hours=1))):
+            session.add(store.UserSession(id=name, subject=name, role="viewer", data={}, csrf_token="x",
+                                          created_at=now - timedelta(hours=8), expires_at=expires))
+        session.commit()
+    main.retention.last = None
+    main.retention.run(main.engine, now)
+    assert [s.id for s in rows(store.UserSession, store.UserSession.id)] == ["live"]
 
 
 def test_concurrent_writes_are_serialized(client):

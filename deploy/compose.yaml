@@ -17,32 +17,101 @@ services:
     build: ../backend
     environment:
       DATABASE_URL: postgresql+psycopg://gman:${POSTGRES_PASSWORD}@db/gman
-      GMAN_READ_TOKEN: ${GMAN_READ_TOKEN:?Set GMAN_READ_TOKEN}
-      GMAN_ADMIN_TOKEN: ${GMAN_ADMIN_TOKEN:?Set GMAN_ADMIN_TOKEN}
+      # Shared Bearer tokens for automation and token-only mode; an empty value disables the token.
+      GMAN_READ_TOKEN: ${GMAN_READ_TOKEN:-}
+      GMAN_ADMIN_TOKEN: ${GMAN_ADMIN_TOKEN:-}
       GMAN_CI_TOKEN: ${GMAN_CI_TOKEN:?Set GMAN_CI_TOKEN}
       GMAN_AGENT_TOKENS: ${GMAN_AGENT_TOKENS:?Set GMAN_AGENT_TOKENS}
       PROMETHEUS_URL: http://prometheus:9090
       # Address of Grafana as the browser sees it; used for default dashboard links.
       GMAN_GRAFANA_URL: ${GMAN_GRAFANA_URL:-http://127.0.0.1:3000}
+      # Splunk search links on the service card; empty URL hides them (README, «Splunk»).
+      GMAN_SPLUNK_URL: ${GMAN_SPLUNK_URL:-}
+      GMAN_SPLUNK_SEARCH: ${GMAN_SPLUNK_SEARCH:-}
+      GMAN_SPLUNK_INDEXES: ${GMAN_SPLUNK_INDEXES:-}
+      # SSO (OIDC). Empty GMAN_OIDC_ISSUER keeps token-only mode; see README, «Вход и роли».
+      GMAN_OIDC_ISSUER: ${GMAN_OIDC_ISSUER:-}
+      GMAN_OIDC_CLIENT_ID: ${GMAN_OIDC_CLIENT_ID:-}
+      GMAN_OIDC_CLIENT_SECRET: ${GMAN_OIDC_CLIENT_SECRET:-}
+      GMAN_OIDC_REDIRECT_URI: ${GMAN_OIDC_REDIRECT_URI:-}
+      GMAN_OIDC_POST_LOGOUT_URI: ${GMAN_OIDC_POST_LOGOUT_URI:-}
+      GMAN_OIDC_SCOPES: ${GMAN_OIDC_SCOPES:-openid profile email}
+      GMAN_OIDC_GROUPS_CLAIM: ${GMAN_OIDC_GROUPS_CLAIM:-groups}
+      GMAN_OIDC_ADMIN_GROUPS: ${GMAN_OIDC_ADMIN_GROUPS:-}
+      GMAN_OIDC_OWNER_GROUPS: ${GMAN_OIDC_OWNER_GROUPS:-}
+      GMAN_OIDC_VIEWER_GROUPS: ${GMAN_OIDC_VIEWER_GROUPS:-}
+      GMAN_SESSION_HOURS: ${GMAN_SESSION_HOURS:-8}
+      # Active alerts for the portal's alerts page.
+      ALERTMANAGER_URL: http://alertmanager:9093
     depends_on:
       db: {condition: service_healthy}
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/healthz', timeout=3)"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 30s
     restart: unless-stopped
   portal:
     build: ../frontend
     ports: ["127.0.0.1:8080:80"]
-    depends_on: [api]
+    depends_on:
+      api: {condition: service_healthy}
+    healthcheck:
+      test: ["CMD", "wget", "-q", "-O", "/dev/null", "http://127.0.0.1/healthz"]
+      interval: 15s
+      timeout: 5s
+      retries: 3
     restart: unless-stopped
   otel:
     image: otel/opentelemetry-collector-contrib:0.162.0
     command: ["--config=/etc/otelcol/config.yaml"]
     volumes: ["./otel-gateway.yaml:/etc/otelcol/config.yaml:ro"]
     ports: ["127.0.0.1:4317:4317", "127.0.0.1:4318:4318"]
+    # The collector image is distroless (no shell/wget): no in-container healthcheck.
+    # Liveness is visible in Prometheus as up{job="otel"}.
     restart: unless-stopped
   prometheus:
     image: prom/prometheus:v3.5.0
-    volumes: ["./prometheus.yaml:/etc/prometheus/prometheus.yml:ro", "prometheus:/prometheus"]
-    command: ["--config.file=/etc/prometheus/prometheus.yml", "--storage.tsdb.retention.time=30d"]
+    environment:
+      # Browser-facing portal address for runbook links in alert annotations.
+      GMAN_PORTAL_URL: ${GMAN_PORTAL_URL:-http://127.0.0.1:8080}
+    volumes:
+      - ./prometheus.yaml:/etc/prometheus/prometheus.yml:ro
+      - ./alerts/rules.yaml:/etc/prometheus/rules/gman.yaml:ro
+      - prometheus:/prometheus
+    command: ["--config.file=/etc/prometheus/prometheus.yml", "--storage.tsdb.retention.time=30d",
+              "--enable-feature=expand-external-labels"]
     ports: ["127.0.0.1:9090:9090"]
+    healthcheck:
+      test: ["CMD", "wget", "-q", "-O", "/dev/null", "http://127.0.0.1:9090/-/healthy"]
+      interval: 15s
+      timeout: 5s
+      retries: 3
+    restart: unless-stopped
+  alertmanager:
+    image: prom/alertmanager:v0.28.1
+    # Renders receivers from the variables below, then starts Alertmanager (see the script header).
+    entrypoint: ["/bin/sh", "/etc/gman-alerts/alertmanager.sh"]
+    environment:
+      GMAN_ALERT_WEBHOOK_URL: ${GMAN_ALERT_WEBHOOK_URL:-}
+      GMAN_ALERT_EMAIL_TO: ${GMAN_ALERT_EMAIL_TO:-}
+      GMAN_ALERT_EMAIL_FROM: ${GMAN_ALERT_EMAIL_FROM:-}
+      GMAN_ALERT_SMTP_SMARTHOST: ${GMAN_ALERT_SMTP_SMARTHOST:-}
+      GMAN_ALERT_SMTP_USERNAME: ${GMAN_ALERT_SMTP_USERNAME:-}
+      GMAN_ALERT_SMTP_PASSWORD: ${GMAN_ALERT_SMTP_PASSWORD:-}
+      GMAN_ALERT_SMTP_REQUIRE_TLS: ${GMAN_ALERT_SMTP_REQUIRE_TLS:-true}
+      GMAN_ALERTMANAGER_URL: ${GMAN_ALERTMANAGER_URL:-http://127.0.0.1:9093}
+    volumes:
+      - ./alerts/alertmanager.yaml:/etc/gman-alerts/alertmanager.yaml:ro
+      - ./alerts/alertmanager.sh:/etc/gman-alerts/alertmanager.sh:ro
+      - alertmanager:/alertmanager
+    ports: ["127.0.0.1:9093:9093"]
+    healthcheck:
+      test: ["CMD", "wget", "-q", "-O", "/dev/null", "http://127.0.0.1:9093/-/healthy"]
+      interval: 15s
+      timeout: 5s
+      retries: 3
     restart: unless-stopped
   grafana:
     image: grafana/grafana:12.1.1
@@ -56,9 +125,16 @@ services:
       - ./grafana/dashboards:/etc/grafana/dashboards:ro
       - grafana:/var/lib/grafana
     ports: ["127.0.0.1:3000:3000"]
+    healthcheck:
+      test: ["CMD", "wget", "-q", "-O", "/dev/null", "http://127.0.0.1:3000/api/health"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 30s
     depends_on: [prometheus]
     restart: unless-stopped
 volumes:
   postgres:
   prometheus:
+  alertmanager:
   grafana:

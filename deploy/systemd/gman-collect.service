@@ -1,0 +1,31 @@
+# GMan inventory agent: one collection + submission per activation (started by gman-collect.timer).
+# Install: agent/collect.py -> /opt/gman/agent/collect.py, deploy/systemd/agent.env.example ->
+# /etc/gman/agent.env (mode 0600, root). See README «Production-развертывание».
+[Unit]
+Description=GMan inventory snapshot
+Wants=network-online.target
+After=network-online.target docker.service
+
+[Service]
+Type=oneshot
+EnvironmentFile=/etc/gman/agent.env
+ExecStart=/usr/bin/python3 /opt/gman/agent/collect.py --runtime ${GMAN_RUNTIME} --source-id ${GMAN_SOURCE_ID} --send
+# A oneshot unit is not started again while it is still running, so runs never overlap;
+# a hung docker/kubectl call is killed before the next tick.
+TimeoutStartSec=55s
+User=gman-agent
+# Writable HOME for docker/kubectl caches; ProtectSystem=strict makes the rest read-only.
+StateDirectory=gman-agent
+Environment=HOME=/var/lib/gman-agent
+# Docker socket access (root-equivalent). For kubernetes and kubernetes-node remove it and set KUBECONFIG.
+SupplementaryGroups=docker
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectControlGroups=yes
+RestrictSUIDSGID=yes
+LockPersonality=yes
+# nvidia-smi needs /dev/nvidia*; do not set PrivateDevices.

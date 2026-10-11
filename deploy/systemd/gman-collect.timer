@@ -1,0 +1,12 @@
+[Unit]
+Description=GMan inventory snapshot once a minute
+
+[Timer]
+OnCalendar=minutely
+AccuracySec=1s
+# Spread hosts within the minute so they do not hit the API at the same second.
+RandomizedDelaySec=15s
+Persistent=false
+
+[Install]
+WantedBy=timers.target

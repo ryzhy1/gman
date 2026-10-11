@@ -1,7 +1,7 @@
 """Releases: Bamboo deployments correlated with runtime observations.
 
-Revision ID: 0002_releases
-Revises: 0001
+Revision ID: 0004
+Revises: 0003
 Create Date: 2026-10-11
 
 Existing events keep release_id NULL: history before this migration is not re-correlated.
@@ -10,8 +10,8 @@ from alembic import op
 import sqlalchemy as sa
 from sqlalchemy.dialects.postgresql import JSONB
 
-revision = "0002_releases"
-down_revision = "0001"
+revision = "0004"
+down_revision = "0003"
 branch_labels = None
 depends_on = None
 

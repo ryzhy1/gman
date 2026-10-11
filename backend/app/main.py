@@ -1,23 +1,29 @@
-"""Inventory API. Credentials are scoped independently for readers, agents and CI."""
+"""Inventory API. Humans sign in via OIDC (auth.py) or shared Bearer tokens; agents and CI have their own tokens."""
 import hashlib
 import hmac
 import json
 import logging
 import os
+import re
 from contextlib import asynccontextmanager
 from datetime import datetime, timezone
-from typing import Literal
+from typing import Annotated, Literal
 from urllib.parse import urlsplit
 
-from fastapi import Depends, FastAPI, Header, HTTPException, Query
-from fastapi.responses import JSONResponse
-from pydantic import BaseModel, ConfigDict, Field, field_validator
+from fastapi import Depends, FastAPI, Header, HTTPException, Path, Query, Request
+from fastapi.responses import JSONResponse, PlainTextResponse, RedirectResponse
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 from sqlalchemy import text
 from sqlalchemy.orm import Session
 
+from . import alerts
+from . import auth
+from . import configs
 from . import db as store
+from . import exposition
 from . import metrics
 from . import releases
+from . import splunk
 
 logger = logging.getLogger("gman")
 
@@ -45,12 +51,42 @@ def authenticate(authorization, expected):
         raise HTTPException(401, "Invalid credential")
 
 
-def reader(authorization: str = Header(default="")):
-    authenticate(authorization, os.getenv("GMAN_READ_TOKEN"))
+def token_principal(authorization):
+    """Shared Bearer tokens for API automation (and for people while SSO is not configured)."""
+    if matches(authorization, os.getenv("GMAN_ADMIN_TOKEN")):
+        return auth.Principal(kind="token", role="admin", subject="GMAN_ADMIN_TOKEN")
+    if matches(authorization, os.getenv("GMAN_READ_TOKEN")):
+        return auth.Principal(kind="token", role="viewer", subject="GMAN_READ_TOKEN")
+    return None
 
 
-def admin(authorization: str = Header(default="")):
-    authenticate(authorization, os.getenv("GMAN_ADMIN_TOKEN"))
+def principal(request: Request, authorization: str = Header(default=""), session: Session = Depends(db)):
+    """An explicit Authorization header is authoritative; otherwise the SSO session cookie is used."""
+    if authorization:
+        found = token_principal(authorization)
+    else:
+        found = auth.from_session(session, request.cookies.get(auth.session_cookie())) if auth.enabled() else None
+    if found is None:
+        raise HTTPException(401, "Invalid credential")
+    return found
+
+
+def reader(user: auth.Principal = Depends(principal)):
+    return user
+
+
+def editor(user: auth.Principal = Depends(principal), x_csrf_token: str = Header(default="")):
+    """Mutating requests: CSRF token for cookie sessions, then at least the service owner role.
+    A read token stays a 401 for writes: tokens are scoped credentials, not identities."""
+    if user.kind == "token":
+        if user.role != "admin":
+            raise HTTPException(401, "Invalid credential")
+        return user
+    if not auth.csrf_ok(user, x_csrf_token):
+        raise HTTPException(403, "CSRF token missing or invalid")
+    if not user.at_least("owner"):
+        raise HTTPException(403, "Read-only role")
+    return user
 
 
 def ci(authorization: str = Header(default="")):
@@ -93,6 +129,29 @@ class Strict(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
 
+class SplunkLogs(Strict):
+    """Per-service override of the configured index mapping and search template (see app/splunk.py)."""
+    index: str | dict[str, str] = ""
+    query: str = Field(default="", max_length=2000)
+
+    @field_validator("index")
+    @classmethod
+    def index_names(cls, value):
+        names = [value] if isinstance(value, str) else list(value.values())
+        if any(name and not re.match(splunk.INDEX_NAME, name) for name in names):
+            raise ValueError("Invalid index name")
+        return value
+
+    @field_validator("query")
+    @classmethod
+    def template(cls, value):
+        return splunk.check_template(value) if value else value
+
+
+class Logs(Strict):
+    splunk: SplunkLogs | None = None
+
+
 class Service(Strict):
     id: str = Field(pattern=r"^[a-zA-Z0-9_.-]{1,100}$")
     name: str = Field(max_length=200)
@@ -103,6 +162,10 @@ class Service(Strict):
     grafana: str = Field(default="", max_length=2000)
     splunk: str = Field(default="", max_length=2000)
     bamboo: str = Field(default="", max_length=2000)
+    logs: Logs | None = None
+    # Who may edit this entry with the service owner role: IdP subject, email, username or "group:<name>".
+    # Kept in services.extra (no migration); only platform admins change it.
+    owners: list[Annotated[str, Field(min_length=1, max_length=300)]] = Field(default_factory=list, max_length=50)
 
     _urls = field_validator("repository", "grafana", "splunk", "bamboo")(http_url)
 
@@ -178,9 +241,16 @@ class Instance(Strict):
 
 
 class GPUProcess(Strict):
+    """A GPU process and its owner: Docker by container_id; Kubernetes pods also by pod and instance_id."""
     pid: int = Field(ge=0)
     container_id: str = Field(default="", max_length=100)
     used_memory_bytes: int | None = Field(default=None, ge=0)
+    pod_uid: str = Field(default="", max_length=100)
+    namespace: str = Field(default="", max_length=300)
+    pod: str = Field(default="", max_length=300)
+    container: str = Field(default="", max_length=300)
+    # Kubernetes inventory instance ID "<pod uid>:<container name>"; empty when not attributed to a container.
+    instance_id: str = Field(default="", max_length=700)
 
 
 def percent():
@@ -247,7 +317,10 @@ class Node(Strict):
 class Snapshot(Strict):
     source_id: str = Field(pattern=r"^[a-zA-Z0-9_.-]{1,100}$")
     observed_at: datetime
-    source_type: Literal["docker-host", "kubernetes-cluster"]
+    # kubernetes-node: node-local GPU snapshot of one cluster node; pods stay with the cluster source.
+    source_type: Literal["docker-host", "kubernetes-cluster", "kubernetes-node"]
+    # kubernetes-node only: source_id of the cluster source the node belongs to.
+    cluster: str = Field(default="", pattern=r"^[a-zA-Z0-9_.-]{0,100}$")
     agent_version: str = Field(default="", max_length=50)
     hostname: str = Field(max_length=300)
     os: str = Field(default="", max_length=300)
@@ -268,6 +341,17 @@ class Snapshot(Strict):
     @classmethod
     def short_errors(cls, value):
         return [e[:500] for e in value]
+
+    @model_validator(mode="after")
+    def node_snapshot(self):
+        # Instances of a node are reported by the cluster source; reporting them twice would duplicate history.
+        if self.source_type == "kubernetes-node" and (self.instances or not self.cluster):
+            raise ValueError("kubernetes-node snapshots carry a cluster and no instances")
+        # The portal places node GPUs by (cluster, hostname) and alerts label them by hostname: a node token
+        # may only describe the node its source ID names, never another node or cluster.
+        if self.source_type == "kubernetes-node" and self.source_id != f"{self.cluster}.{self.hostname}":
+            raise ValueError("kubernetes-node source_id must be <cluster>.<node>, the node being the hostname")
+        return self
 
 
 class Deployment(Strict):
@@ -330,6 +414,8 @@ def classify(fields):
 async def lifespan(app):
     # Migrating here rather than in the container command keeps one code path for Docker,
     # local runs and tests; concurrent replicas are serialized by a PostgreSQL advisory lock.
+    auth.check_config()
+    auth.reset()
     store.migrate(engine)
     yield
 
@@ -348,14 +434,121 @@ def health():
     return {"status": "ok"}
 
 
-@app.put("/api/services/{service_id}", dependencies=[Depends(admin)])
-def put_service(service_id: str, value: Service, session: Session = Depends(db)):
+@app.get("/metrics", include_in_schema=False)
+def prometheus_metrics(session: Session = Depends(db)):
+    """Inventory-derived metrics for alert rules. Internal: nginx does not proxy this path."""
+    return PlainTextResponse(exposition.render(session), media_type="text/plain; version=0.0.4")
+
+
+def set_cookie(response, name, value, max_age, path="/"):
+    response.set_cookie(name, value, max_age=max_age, path=path, httponly=True, secure=auth.secure(), samesite="lax")
+
+
+def drop_cookie(response, name, path="/"):
+    response.delete_cookie(name, path=path, secure=auth.secure(), httponly=True, samesite="lax")
+
+
+@app.get("/api/auth/info")
+def auth_info():
+    """Public: tells the portal whether to redirect to SSO or to ask for a token."""
+    return {"oidc": auth.enabled()}
+
+
+@app.get("/api/auth/login")
+def login(next: str = Query("/", max_length=2000)):
+    if not auth.enabled():
+        raise HTTPException(404, "SSO is not configured")
+    try:
+        url, state = auth.start_login(next)
+    except auth.Failure as error:
+        logger.warning("SSO login unavailable: %s", error)
+        raise HTTPException(503, "Identity provider unavailable")
+    response = RedirectResponse(url, status_code=302)
+    set_cookie(response, auth.LOGIN_COOKIE, state, auth.LOGIN_TTL, path="/api/auth")
+    return response
+
+
+@app.get("/api/auth/callback")
+def callback(request: Request, code: str = Query("", max_length=4000), state: str = Query("", max_length=500),
+             error: str = Query("", max_length=200), session: Session = Depends(db)):
+    if not auth.enabled():
+        raise HTTPException(404, "SSO is not configured")
+    cookie = request.cookies.get(auth.LOGIN_COOKIE)
+    try:
+        if error:
+            # Without a matching state the error may come from a forged link; treat it as a bad state.
+            pending = auth.unsign(cookie or "") or {}
+            if not state or pending.get("state") != state:
+                raise auth.Failure("state", "IdP error without valid state")
+            raise auth.Failure("idp_error", "IdP returned error " + error)
+        value, target = auth.complete_login(session, code, state, cookie)
+    except auth.Failure as failure:
+        logger.warning("SSO sign-in failed: %s", failure)
+        if failure.code == "state":
+            raise HTTPException(400, "Login state missing, expired or mismatched; start the sign-in again")
+        response = RedirectResponse("/?auth_error=" + failure.code, status_code=302)
+        drop_cookie(response, auth.LOGIN_COOKIE, path="/api/auth")
+        return response
+    response = RedirectResponse(target, status_code=302)
+    drop_cookie(response, auth.LOGIN_COOKIE, path="/api/auth")
+    set_cookie(response, auth.session_cookie(), value, int(auth.session_hours() * 3600))
+    return response
+
+
+@app.post("/api/auth/logout")
+def logout(user: auth.Principal = Depends(principal), x_csrf_token: str = Header(default=""),
+           session: Session = Depends(db)):
+    if user.kind != "session":
+        raise HTTPException(400, "Bearer tokens have no session to end")
+    if not auth.csrf_ok(user, x_csrf_token):
+        raise HTTPException(403, "CSRF token missing or invalid")
+    auth.end_session(session, user)
+    response = JSONResponse({"redirect": auth.logout_url()})
+    drop_cookie(response, auth.session_cookie())
+    return response
+
+
+@app.get("/api/me")
+def me(user: auth.Principal = Depends(reader)):
+    """Who is signed in and what the portal may offer them; identities are matched against service owners."""
+    return {"auth": "oidc" if user.kind == "session" else "token", "role": user.role, "subject": user.subject,
+            "email": user.email, "name": user.name or user.username or user.email or user.subject,
+            "identities": user.identities() if user.kind == "session" else [],
+            "csrf_token": user.csrf_token or None}
+
+
+@app.put("/api/services/{service_id}")
+def put_service(service_id: str, value: Service, user: auth.Principal = Depends(editor),
+                session: Session = Depends(db)):
+    """Platform admins create and edit any entry; service owners edit entries listing them, except `owners`."""
     if service_id != value.id:
         raise HTTPException(422, "ID mismatch")
     lock(session, "service:" + value.id)
-    store.put_service(session, value.model_dump())
+    before = store.service(session, value.id)
+    # Optional nested sections (logs) are omitted when unset rather than stored as null.
+    after = value.model_dump(exclude_none=True)
+    if user.role != "admin":
+        if before is None:
+            raise HTTPException(403, "Only platform admins register new services")
+        if not user.can_edit(before):
+            raise HTTPException(403, "You are not an owner of this service")
+        if sorted(before.get("owners") or []) != sorted(value.owners):
+            raise HTTPException(403, "Only platform admins change service owners")
+    store.put_service(session, after)
+    diff = changes(before or {}, after)
+    if before is None or diff:
+        received = datetime.now(timezone.utc)
+        human = user.kind == "session"
+        # A shared admin token may be used by a person or a script: its actor is not a known human.
+        session.add(store.event({
+            "type": "service-created" if before is None else "service-updated", "service_id": value.id,
+            "actor": user.actor, "actor_kind": "human" if human else "unknown",
+            "actor_source": "OIDC session" if human else "shared admin token",
+            "actor_subject": user.subject, "actor_role": user.role,
+            "occurred_at": received.isoformat(), "received_at": received.isoformat(), "changes": diff},
+            received, received))
     session.commit()
-    return value
+    return after
 
 
 @app.get("/api/overview", dependencies=[Depends(reader)])
@@ -366,6 +559,20 @@ def overview(session: Session = Depends(db)):
             "events": store.events(session, 200)["events"]}
 
 
+@app.get("/api/logs/splunk", dependencies=[Depends(reader)])
+def splunk_links(service_id: str = Query(max_length=100), environment: str = Query("", max_length=200),
+                 range_: Literal["1h", "24h", "7d"] = Query("1h", alias="range"), session: Session = Depends(db)):
+    """Splunk search links for a service and its instances; built here so values are SPL-escaped."""
+    service = next((s for s in store.services(session) if s["id"] == service_id), None)
+    if service is None:
+        raise HTTPException(404, "Unknown service")
+    try:
+        return {"error": None, **splunk.links(service, store.sources(session), environment, range_)}
+    except splunk.ConfigError as error:
+        logger.warning("Splunk links disabled: %s", error)
+        return {"enabled": False, "error": "Splunk links are misconfigured", "service": None, "instances": {}}
+
+
 @app.get("/api/events", dependencies=[Depends(reader)])
 def list_events(limit: int = Query(200, ge=1, le=1000), before: str = Query("", max_length=200),
                 service_id: str | None = Query(None, max_length=100), session: Session = Depends(db)):
@@ -374,6 +581,56 @@ def list_events(limit: int = Query(200, ge=1, le=1000), before: str = Query("", 
         return store.events(session, limit, service_id, before)
     except ValueError:
         raise HTTPException(422, "Invalid cursor")
+
+
+MAX_ID = 2 ** 63 - 1  # BIGINT on PostgreSQL
+
+
+def config_page(session, limit, before, **scope):
+    try:
+        return store.config_versions(session, limit, before=before, **scope)
+    except ValueError:
+        raise HTTPException(422, "Invalid cursor")
+
+
+@app.get("/api/services/{service_id}/configs", dependencies=[Depends(reader)])
+def service_configs(service_id: str, limit: int = Query(100, ge=1, le=1000), before: str = Query("", max_length=200),
+                    session: Session = Depends(db)):
+    """Config versions of all instances of a service, newest first; without the config bodies."""
+    if not store.service_known(session, service_id):
+        raise HTTPException(404, "Service not found")
+    return config_page(session, limit, before, service_id=service_id)
+
+
+@app.get("/api/instances/{source_id}/{instance_id}/configs", dependencies=[Depends(reader)])
+def instance_configs(source_id: str, instance_id: str, limit: int = Query(100, ge=1, le=1000),
+                     before: str = Query("", max_length=200), session: Session = Depends(db)):
+    if not store.instance_known(session, source_id, instance_id):
+        raise HTTPException(404, "Instance not found")
+    return config_page(session, limit, before, instance=(source_id, instance_id))
+
+
+def config_or_404(session, version_id):
+    found = store.config_snapshot(session, version_id)
+    if found is None:
+        raise HTTPException(404, f"Config version {version_id} not found")
+    return found
+
+
+# Declared before /api/configs/{version_id} so that "diff" is not taken for an ID.
+@app.get("/api/configs/diff", dependencies=[Depends(reader)])
+def config_diff(from_: int = Query(alias="from", ge=1, le=MAX_ID), to: int = Query(ge=1, le=MAX_ID),
+                session: Session = Depends(db)):
+    """Changes from version `from` to version `to`; any two versions may be compared."""
+    old, new = config_or_404(session, from_), config_or_404(session, to)
+    diff = configs.diff(old.pop("config"), new.pop("config"))
+    return {"from": old, "to": new, "identical": old["config_hash"] == new["config_hash"],
+            "summary": configs.summary(diff), "changes": diff}
+
+
+@app.get("/api/configs/{version_id}", dependencies=[Depends(reader)])
+def config_version(version_id: int = Path(ge=1, le=MAX_ID), session: Session = Depends(db)):
+    return config_or_404(session, version_id)
 
 
 @app.get("/api/metrics/current", dependencies=[Depends(reader)])
@@ -387,19 +644,34 @@ def metrics_current():
         return {"enabled": True, "error": "Metrics store unavailable: " + str(error)}
 
 
+@app.get("/api/alerts", dependencies=[Depends(reader)])
+def active_alerts():
+    """Firing alerts from Alertmanager, without silenced and inhibited ones."""
+    if not alerts.base_url():
+        return {"enabled": False, "error": "ALERTMANAGER_URL is not configured", "alerts": []}
+    try:
+        return {"enabled": True, "error": None, "alerts": alerts.active()}
+    except alerts.Unavailable as error:
+        return {"enabled": True, "error": "Alertmanager unavailable: " + str(error), "alerts": []}
+
+
 @app.get("/api/metrics/range", dependencies=[Depends(reader)])
-def metrics_range(scope: Literal["host", "container", "gpu", "k8s_container", "k8s_pod"],
+def metrics_range(scope: Literal["host", "container", "gpu", "k8s_container", "k8s_pod", "k8s_gpu"],
                   metric: str = Query(max_length=100), range_: str = Query("1h", alias="range", max_length=10),
                   host_id: str | None = Query(None, max_length=300),
                   container_id: str | None = Query(None, max_length=300), uuid: str | None = Query(None, max_length=300),
                   pod_uid: str | None = Query(None, max_length=300),
-                  container_name: str | None = Query(None, max_length=300)):
+                  container_name: str | None = Query(None, max_length=300),
+                  namespace: str | None = Query(None, max_length=300), pod_name: str | None = Query(None, max_length=300)):
     """Object parameters by scope: host: host_id; container: host_id, container_id; gpu: host_id, uuid;
-    k8s_container: pod_uid, container_name; k8s_pod: pod_uid. Any other combination is a 422."""
+    k8s_container: pod_uid, container_name; k8s_pod: pod_uid; k8s_gpu: namespace, pod_name, container_name.
+    Any other combination is a 422."""
     if not metrics.base_url():
         raise HTTPException(503, "PROMETHEUS_URL is not configured")
-    matchers = {"host_id": host_id, "container_id": container_id, "UUID": uuid,
-                "k8s_pod_uid": pod_uid, "k8s_container_name": container_name}
+    # DCGM labels pods by name, kubelet_stats by UID: the same container_name parameter maps to either label.
+    container_label = "container" if scope == "k8s_gpu" else "k8s_container_name"
+    matchers = {"host_id": host_id, "container_id": container_id, "UUID": uuid, "k8s_pod_uid": pod_uid,
+                container_label: container_name, "namespace": namespace, "pod": pod_name}
     try:
         return metrics.series(scope, metric, {k: v for k, v in matchers.items() if v is not None}, range_)
     except KeyError:

@@ -1,0 +1,122 @@
+# Node-local GPU agent for Kubernetes: which pod holds which GPU process (PID -> cgroup -> container -> pod).
+# The cluster inventory agent (--runtime kubernetes) may run anywhere via kubectl and cannot see node PIDs;
+# this DaemonSet runs agent/collect.py --runtime kubernetes-node on every GPU node in the host PID namespace.
+# Each node is its own GMan source "<cluster>.<node>" without instances: pods stay with the cluster source.
+#
+# Before applying (namespace gman-gpu):
+#   kubectl create namespace gman-gpu
+#   kubectl -n gman-gpu create configmap gman-agent --from-file=collect.py=agent/collect.py
+#   kubectl -n gman-gpu create secret generic gman-gpu-agent-tokens \
+#     --from-literal=gpu-1=<token of cluster-01.gpu-1> --from-literal=gpu-2=<token of cluster-01.gpu-2>
+# Secret keys are node names; GMAN_AGENT_TOKENS on the API maps "cluster-01.<node>" to the same tokens.
+# Set GMAN_URL and GMAN_CLUSTER (the cluster agent's --source-id) below.
+# Residual risk: a DaemonSet cannot mount a different Secret per node, so every agent pod sees all node tokens.
+# Whoever controls one GPU node (root, or exec into this pod) can send GPU snapshots as another GPU node of the
+# same list. The API limits the damage: a token is bound to its source "<cluster>.<node>", which must equal
+# cluster + "." + hostname of the snapshot, and node sources carry only GPU readings (no instances, no history),
+# so cluster and Docker sources cannot be touched. Where that is not acceptable, run the agent on each GPU node
+# from systemd with its own token (deploy/systemd, GMAN_RUNTIME=kubernetes-node) instead of this DaemonSet.
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: gman-gpu-agent
+  namespace: gman-gpu
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: gman-gpu-agent
+rules:
+  # Pods of its own node (field selector spec.nodeName) to map container IDs to pods. No Secrets, no exec.
+  - apiGroups: ['']
+    resources: ['pods']
+    verbs: ['list']
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: gman-gpu-agent
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: gman-gpu-agent
+subjects:
+  - kind: ServiceAccount
+    name: gman-gpu-agent
+    namespace: gman-gpu
+---
+apiVersion: apps/v1
+kind: DaemonSet
+metadata:
+  name: gman-gpu-agent
+  namespace: gman-gpu
+spec:
+  selector:
+    matchLabels: {app: gman-gpu-agent}
+  template:
+    metadata:
+      labels: {app: gman-gpu-agent}
+    spec:
+      serviceAccountName: gman-gpu-agent
+      # nvidia-smi reports PIDs of the caller's PID namespace, and /proc/<pid>/cgroup is read for those PIDs:
+      # both need the node's PID namespace. Requires the "privileged" Pod Security level for this namespace.
+      hostPID: true
+      # Label set by NVIDIA GPU feature discovery (GPU Operator); replace with your GPU node selector.
+      nodeSelector: {nvidia.com/gpu.present: 'true'}
+      tolerations: [{operator: Exists}]
+      # The NVIDIA container runtime injects nvidia-smi and the driver libraries (RuntimeClass created by the
+      # GPU Operator). Remove the line if nvidia is the default containerd runtime on GPU nodes.
+      runtimeClassName: nvidia
+      containers:
+        - name: agent
+          image: python:3.12-slim
+          command: ['sh', '-c']
+          # One snapshot a minute; a failed run is not sent and the loop continues.
+          args:
+            - >-
+              while true; do
+              python3 -I /agent/collect.py --runtime kubernetes-node --cluster "$GMAN_CLUSTER" --node "$NODE_NAME"
+              --source-id "$GMAN_CLUSTER.$NODE_NAME" --send;
+              sleep 60; done
+          env:
+            - name: NODE_NAME
+              valueFrom: {fieldRef: {fieldPath: spec.nodeName}}
+            - name: GMAN_CLUSTER
+              value: cluster-01  # Same as the cluster inventory agent's --source-id.
+            - name: GMAN_URL
+              value: https://gman.example  # Replace with the portal/API address (HTTPS).
+            - name: GMAN_AGENT_TOKEN_FILE
+              value: /etc/gman/tokens/$(NODE_NAME)
+            # Spool of unsent snapshots and the run lock; the root filesystem is read-only. emptyDir on purpose:
+            # the API keeps only the latest snapshot of a node source (no instances, so no history), so snapshots
+            # lost with a pod restart carry nothing the next snapshot a minute later does not.
+            - name: GMAN_AGENT_STATE_DIR
+              value: /var/lib/gman-agent
+            # Expose the node's GPUs for nvidia-smi (utility only) without requesting nvidia.com/gpu,
+            # as DCGM Exporter does: the agent does not take a GPU away from workloads.
+            - name: NVIDIA_VISIBLE_DEVICES
+              value: all
+            - name: NVIDIA_DRIVER_CAPABILITIES
+              value: utility
+          resources:
+            requests: {cpu: 10m, memory: 32Mi}
+            limits: {cpu: 200m, memory: 128Mi}
+          securityContext:
+            # /proc/<pid>/cgroup is world-readable: no capabilities are needed. If nvidia-smi lists no
+            # processes on your driver as non-root, run as root but keep capabilities dropped.
+            runAsNonRoot: true
+            runAsUser: 65534
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities: {drop: [ALL]}
+          volumeMounts:
+            - {name: agent, mountPath: /agent, readOnly: true}
+            - {name: tokens, mountPath: /etc/gman/tokens, readOnly: true}
+            - {name: state, mountPath: /var/lib/gman-agent}
+      volumes:
+        - name: state
+          emptyDir: {sizeLimit: 64Mi}
+        - name: agent
+          configMap: {name: gman-agent}
+        - name: tokens
+          secret: {secretName: gman-gpu-agent-tokens, defaultMode: 0444}

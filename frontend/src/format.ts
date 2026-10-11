@@ -2,7 +2,14 @@ import type { Instance, Source } from './api';
 
 export const bytes = (v: number | null | undefined) => v == null ? 'Нет данных' : `${(v / 1024 ** 3).toFixed(1)} GiB`;
 export const date = (s: string | null | undefined) => s ? new Date(s).toLocaleString('ru-RU') : 'Неизвестно';
-export const stale = (s: Source) => Date.now() - Date.parse(s.observed_at) > 180_000;
+// Server clock minus browser clock, from the overview's server_time.
+let serverOffset = 0;
+export const syncServerClock = (serverTime: string) => {
+  const at = Date.parse(serverTime);
+  if (!Number.isNaN(at)) serverOffset = at - Date.now();
+};
+/** Server receive time on the server clock, as GManSourceSilent: agent and browser clocks do not matter. */
+export const stale = (s: Source) => Date.now() + serverOffset - Date.parse(s.received_at ?? s.observed_at) > 180_000;
 export const num = (v: number | null | undefined, digits = 1) => v == null ? '—' : String(Number(v.toFixed(digits)));
 export const isHttp = (s: string | undefined) => !!s && /^https?:\/\//i.test(s);
 

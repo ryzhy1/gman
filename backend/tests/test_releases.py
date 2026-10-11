@@ -5,6 +5,7 @@ from sqlalchemy.orm import Session
 
 from backend.app import db as store
 from backend.tests.test_api import auth, client, post  # noqa: F401  (fixture)
+from backend.tests.test_auth import idp, sign_in, sso  # noqa: F401  (fixtures)
 
 OLD = "sha256:" + "a" * 64
 NEW = "sha256:" + "b" * 64
@@ -260,3 +261,29 @@ def test_retention_keeps_open_releases(client, monkeypatch):
     assert main.retention.run(main.engine)
     with Session(main.engine) as session:
         assert [r.status for r in session.scalars(select(store.Release))] == ["rolling-out"]
+
+
+def test_metrics_expose_latest_release_status(client):
+    deploy(client, image_digest=NEW)
+    deploy(client, "failed", image_digest=NEW)
+    deploy(client, run="bamboo-deploy-2", environment="stage")
+    deploy(client, run="bamboo-deploy-3", environment="stage")
+    text = client.get("/metrics").text
+    status = [line for line in text.splitlines() if line.startswith("gman_release_status{")]
+    assert status == ['gman_release_status{service_id="api",environment="prod",status="failed"} 1.0',
+                      'gman_release_status{service_id="api",environment="stage",status="started"} 1.0']
+    assert text.count("gman_release_started_timestamp_seconds{") == 2
+
+
+def test_sso_viewer_reads_releases_and_ci_token_still_deploys(sso, idp):
+    value = {"event_id": "bamboo:run-9:started", "deployment_id": "run-9", "service_id": "api",
+             "environment": "prod", "status": "started", "build_id": "B-9"}
+    response = sso.post("/api/deployments", headers=auth("ci"), json=value)
+    assert response.status_code == 200 and response.json()["release_id"]
+    assert sso.get("/api/releases").status_code == 401
+    sign_in(sso, idp)  # viewer group, cookie session; reads need no CSRF token
+    [release] = sso.get("/api/releases", params={"service_id": "api"}).json()["releases"]
+    assert release["status"] == "started"
+    assert sso.get(f"/api/releases/{release['id']}").json()["release"]["build_id"] == "B-9"
+    # A viewer session cannot post deployments: that stays CI-only.
+    assert sso.post("/api/deployments", json={**value, "event_id": "x"}).status_code == 401
