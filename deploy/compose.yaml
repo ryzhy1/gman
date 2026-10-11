@@ -24,6 +24,10 @@ services:
       PROMETHEUS_URL: http://prometheus:9090
       # Address of Grafana as the browser sees it; used for default dashboard links.
       GMAN_GRAFANA_URL: ${GMAN_GRAFANA_URL:-http://127.0.0.1:3000}
+      # Splunk search links on the service card; empty URL hides them (README, «Splunk»).
+      GMAN_SPLUNK_URL: ${GMAN_SPLUNK_URL:-}
+      GMAN_SPLUNK_SEARCH: ${GMAN_SPLUNK_SEARCH:-}
+      GMAN_SPLUNK_INDEXES: ${GMAN_SPLUNK_INDEXES:-}
     depends_on:
       db: {condition: service_healthy}
     restart: unless-stopped

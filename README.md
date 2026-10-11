@@ -49,6 +49,9 @@ NVIDIA на серверах, Bitbucket/GitLab для исходного код�
   частоты, XID); вкладка «Ресурсы» с графиками за 1 час / 24 часа / 7 дней.
 - OTel Collector на хосте → OTel Gateway → Prometheus → Grafana с готовыми дашбордами
   «GMan · Хост» и «GMan · Сервис»; кнопки Grafana в портале ведут на них по умолчанию.
+- Ссылки «Логи в Splunk» на карточке сервиса и у каждого экземпляра: поиск по service/
+  environment/хосту/контейнеру за выбранный период; индексы и шаблон поиска задаются
+  конфигурацией (см. «Splunk»).
 
 ## Локальный запуск через Docker
 
@@ -73,6 +76,7 @@ GMAN_AGENT_TOKENS и пересоздайте API. Не используйте �
 ## Регистрация сервиса
 
 Скопируйте deploy/service.example.json, заполните реальные поля. Ссылки необязательны.
+Раздел logs.splunk (index, query) тоже необязателен — см. «Splunk»; пустой можно удалить.
 Загрузите запись через PUT /api/services/{id} с Bearer GMAN_ADMIN_TOKEN.
 Пример для локальной оболочки (токен задается в окружении):
 
@@ -189,6 +193,46 @@ DCGM на узле); портал показывает CPU/RAM контейне�
 включая k8s_attributes и обнаружение DCGM, не проверено.
 Логи приложений и traces не включены; Splunk не разворачивается.
 
+## Splunk
+
+Портал не читает логи, а строит ссылки на поиск в существующем Splunk. Индексы еще не
+согласованы, поэтому все задается окружением API (в compose пробрасываются из .env):
+
+| Переменная | Назначение |
+| --- | --- |
+| GMAN_SPLUNK_URL | Страница поиска для браузера, например `https://splunk.example.com/en-US/app/search/search`. Пусто — ссылки скрыты. |
+| GMAN_SPLUNK_INDEXES | JSON «окружение → индекс», ключ `*` — индекс по умолчанию: `{"prod":"app_prod","*":"app_nonprod"}`. |
+| GMAN_SPLUNK_SEARCH | Шаблон SPL. По умолчанию `search index={index} gman_service={service_id} gman_environment={environment} host={host} container_id={container_id}`. |
+
+Плейсхолдеры: {index}, {service_id}, {environment}, {instance} (имя экземпляра),
+{container_id} (Docker), {host} (хост Docker или узел Kubernetes), {namespace} и {pod}
+(Kubernetes), {earliest}, {latest}. Каждое значение подставляется строкой SPL в кавычках
+с экранированием `\` и `"` (управляющие символы заменяются пробелом), поэтому значение
+из inventory или каталога не может закрыть кавычку и добавить команду. Слово шаблона
+(часть между пробелами), в котором плейсхолдер пуст, удаляется целиком: один шаблон
+работает и для сервиса (без host/container_id), и для экземпляра, и для режима «Все
+окружения» (без environment; индекс — из `*` или условие индекса пропадает). Скобки и OR
+вокруг такого слова лучше не ставить. Неизвестный плейсхолдер — ошибка конфигурации.
+
+Период передается параметрами URL `earliest` (`-1h`, `-24h`, `-7d` — как на вкладке
+«Ресурсы», по умолчанию 1 час) и `latest=now`; параметры, уже заданные в
+GMAN_SPLUNK_URL (кроме q/earliest/latest), сохраняются. Пример ссылки:
+`https://splunk.example.com/en-US/app/search/search?q=search+index%3D%22app_prod%22+gman_service%3D%22api%22+gman_environment%3D%22prod%22&earliest=-1h&latest=now`.
+
+Переопределение для сервиса в каталоге:
+`"logs": {"splunk": {"index": "api_prod", "query": "search index={index} app={service_id}"}}`.
+index — строка или объект «окружение → индекс» (с `*`; ненайденное берется из общей
+настройки), query заменяет GMAN_SPLUNK_SEARCH. Имена индексов проверяются
+(`[A-Za-z0-9_*.:-]`), шаблон — на известные плейсхолдеры; хранится в JSON-поле extra
+таблицы services, миграция не нужна. Явная ссылка `splunk` в каталоге имеет приоритет
+для кнопки на карточке.
+
+Ссылки строит API: GET /api/logs/splunk?service_id=…&environment=…&range=1h|24h|7d
+(токен просмотра) возвращает ссылку сервиса и ссылки экземпляров по ключу
+`<source_id>/<instance_id>`. Ошибка конфигурации пишется в лог API, ссылки скрываются.
+Ссылки открываются в новой вкладке с rel=noopener. Имена полей Splunk (gman_service,
+container_id и т. д.) — предположение: согласуйте их вместе с индексами.
+
 ## Проверка
 
 ```sh
@@ -204,7 +248,7 @@ npm run build
 без DATABASE_URL применяется SQLite только для локальной разработки/тестов.
 Задайте токены, как в Compose. Frontend: npm run dev, /api проксируется на 8000.
 
-Проверено: 20 тестов API/агента/метрик, TypeScript и production build,
+Проверено: тесты API/агента/метрик/ссылок Splunk, TypeScript и production build,
 синтаксис Docker Compose; чтение AMD sysfs; браузерная проверка портала на тестовых
 данных с API на SQLite; bamboo_event.py против локального API. PostgreSQL,
 Docker end-to-end, Kubernetes, NVIDIA/DCGM и настоящий Bamboo еще не проверены.

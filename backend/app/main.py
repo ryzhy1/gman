@@ -4,6 +4,7 @@ import hmac
 import json
 import logging
 import os
+import re
 from contextlib import asynccontextmanager
 from datetime import datetime, timezone
 from typing import Literal
@@ -17,6 +18,7 @@ from sqlalchemy.orm import Session
 
 from . import db as store
 from . import metrics
+from . import splunk
 
 logger = logging.getLogger("gman")
 
@@ -92,6 +94,29 @@ class Strict(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
 
+class SplunkLogs(Strict):
+    """Per-service override of the configured index mapping and search template (see app/splunk.py)."""
+    index: str | dict[str, str] = ""
+    query: str = Field(default="", max_length=2000)
+
+    @field_validator("index")
+    @classmethod
+    def index_names(cls, value):
+        names = [value] if isinstance(value, str) else list(value.values())
+        if any(name and not re.match(splunk.INDEX_NAME, name) for name in names):
+            raise ValueError("Invalid index name")
+        return value
+
+    @field_validator("query")
+    @classmethod
+    def template(cls, value):
+        return splunk.check_template(value) if value else value
+
+
+class Logs(Strict):
+    splunk: SplunkLogs | None = None
+
+
 class Service(Strict):
     id: str = Field(pattern=r"^[a-zA-Z0-9_.-]{1,100}$")
     name: str = Field(max_length=200)
@@ -102,6 +127,7 @@ class Service(Strict):
     grafana: str = Field(default="", max_length=2000)
     splunk: str = Field(default="", max_length=2000)
     bamboo: str = Field(default="", max_length=2000)
+    logs: Logs | None = None
 
     _urls = field_validator("repository", "grafana", "splunk", "bamboo")(http_url)
 
@@ -347,9 +373,11 @@ def put_service(service_id: str, value: Service, session: Session = Depends(db))
     if service_id != value.id:
         raise HTTPException(422, "ID mismatch")
     lock(session, "service:" + value.id)
-    store.put_service(session, value.model_dump())
+    # Optional nested sections (logs) are omitted when unset rather than stored as null.
+    data = value.model_dump(exclude_none=True)
+    store.put_service(session, data)
     session.commit()
-    return value
+    return data
 
 
 @app.get("/api/overview", dependencies=[Depends(reader)])
@@ -358,6 +386,20 @@ def overview(session: Session = Depends(db)):
             # Browser-facing base URL of the bundled Grafana, for default dashboard links.
             "grafana_url": os.getenv("GMAN_GRAFANA_URL", "").rstrip("/"),
             "events": store.events(session, 200)["events"]}
+
+
+@app.get("/api/logs/splunk", dependencies=[Depends(reader)])
+def splunk_links(service_id: str = Query(max_length=100), environment: str = Query("", max_length=200),
+                 range_: Literal["1h", "24h", "7d"] = Query("24h", alias="range"), session: Session = Depends(db)):
+    """Splunk search links for a service and its instances; built here so values are SPL-escaped."""
+    service = next((s for s in store.services(session) if s["id"] == service_id), None)
+    if service is None:
+        raise HTTPException(404, "Unknown service")
+    try:
+        return {"error": None, **splunk.links(service, store.sources(session), environment, range_)}
+    except splunk.ConfigError as error:
+        logger.warning("Splunk links disabled: %s", error)
+        return {"enabled": False, "error": "Splunk links are misconfigured", "service": None, "instances": {}}
 
 
 @app.get("/api/events", dependencies=[Depends(reader)])

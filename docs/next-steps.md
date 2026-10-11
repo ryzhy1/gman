@@ -16,7 +16,11 @@
 4. Хранилище: нормализованная схема PostgreSQL, Alembic, история конфигураций по хешу,
    retention. Проверено на PostgreSQL 17.
 
-Тесты: 31 passed, 1 skipped (тест конкурентности только для PostgreSQL).
+5. Splunk: ссылки «Логи в Splunk» на карточке сервиса и у экземпляров, строятся API
+   по конфигурации (GMAN_SPLUNK_URL, GMAN_SPLUNK_INDEXES, GMAN_SPLUNK_SEARCH) с
+   экранированием SPL и переопределением logs.splunk в каталоге. См. README «Splunk».
+
+Тесты: 44 passed, 1 skipped (тест конкурентности только для PostgreSQL).
 Frontend: `npm run build` проходит. Подробности — в README.
 
 ## Подготовка на новой машине
@@ -73,5 +77,6 @@ Grafana 12.1.1 с эмуляцией Docker API, kubelet и вывода DCGM.
 - Атрибуция процессов GPU в Kubernetes (PID → pod) — сейчас только Docker-хосты.
 - Алерты (Grafana alerting или Alertmanager): узел/источник молчит, GPU XID/ECC,
   перегрев, троттлинг, OOMKilled, CrashLoopBackOff.
-- Splunk: поиск по service/environment по ссылке из карточки после согласования индексов.
+- ~~Splunk: поиск по service/environment по ссылке из карточки~~ — сделано (п. 5 выше);
+  осталось согласовать индексы и имена полей и задать их в GMAN_SPLUNK_*.
 - Обновить docs/architecture.md по фактической реализации.

@@ -7,5 +7,6 @@
   "repository": "",
   "grafana": "",
   "splunk": "",
-  "bamboo": ""
+  "bamboo": "",
+  "logs": {"splunk": {"index": "", "query": ""}}
 }
