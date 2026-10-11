@@ -1,14 +1,15 @@
 """Read-only inventory agent. Run periodically with a systemd timer/cron, or with --watch.
 
 Docker: python3 agent/collect.py --runtime docker --source-id server-01
-K8s: python3 agent/collect.py --runtime kubernetes --source-id cluster-01
+K8s: python3 agent/collect.py --runtime kubernetes --source-id cluster-01 (pods, nodes and pod Events)
 K8s GPU node, run on the node in the host PID namespace (GPU processes attributed to pods):
   python3 agent/collect.py --runtime kubernetes-node --cluster cluster-01 --node gpu-1 --source-id cluster-01.gpu-1
 Default emits sanitized JSON; --send submits it to GMAN_URL using GMAN_AGENT_TOKEN
 (or the file named by GMAN_AGENT_TOKEN_FILE).
 With --send, snapshots go through a bounded on-disk spool (oldest first, retried with backoff),
-and a non-blocking flock keeps runs from overlapping. --watch (Docker) follows `docker events`
-and sends a debounced snapshot after container changes, so short-lived containers are reported.
+and a non-blocking flock keeps runs from overlapping. --watch follows `docker events` (Docker) or the
+Kubernetes watch API for pods and Events (list + watch from resourceVersion, relist on 410 Gone) and sends
+a debounced snapshot after changes, so short-lived containers/pods and Docker OOM kills are reported.
 """
 import argparse
 import copy
@@ -70,6 +71,25 @@ def origin(labels):
     return {key: str(labels[label])[:2000] for label, key in ORIGIN_LABELS.items() if labels.get(label)}
 
 
+def parse_time(value):
+    """RFC 3339 from Docker/Kubernetes (nanoseconds, "Z") as an aware datetime; None if absent or invalid."""
+    match = re.fullmatch(r"(\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d)(?:\.(\d+))?(Z|[+-]\d\d:\d\d)", value or "")
+    if not match:
+        return None
+    try:
+        parsed = datetime.fromisoformat(match[1] + "." + (match[2] or "0")[:6].ljust(6, "0")
+                                        + ("+00:00" if match[3] == "Z" else match[3]))
+    except ValueError:
+        return None
+    return parsed if parsed.year > 1 else None
+
+
+def newest(*values):
+    """The latest of several timestamps, as given (None when there is none)."""
+    known = [(parse_time(v), v) for v in values if parse_time(v)]
+    return max(known, key=lambda pair: pair[0])[1] if known else None  # the first of equal times
+
+
 def duration(nanoseconds):
     return f"{nanoseconds / 1e9:g}s" if nanoseconds else ""
 
@@ -82,6 +102,7 @@ def docker_instance(c):
     status = state.get("Status", "unknown")
     running = status in ("running", "paused", "restarting")
     reason = "OOMKilled" if state.get("OOMKilled") else (state.get("Error") or "")[:500]
+    finished = None if running else timestamp(state.get("FinishedAt"))
     health = cfg.get("Healthcheck") or {}
     env = dict(e.split("=", 1) for e in cfg.get("Env") or [] if "=" in e and e.split("=", 1)[0] in GPU_ENV)
     return {"id": c["Id"], "name": c.get("Name", "").lstrip("/"),
@@ -95,7 +116,9 @@ def docker_instance(c):
             "exit_code": None if running else state.get("ExitCode"),
             "created_at": timestamp(c.get("Created")),
             "started_at": timestamp(state.get("StartedAt")),
-            "finished_at": None if running else timestamp(state.get("FinishedAt")),
+            "finished_at": finished,
+            # Docker clears OOMKilled on restart: --watch adds the time of the `oom` event (Watcher.snapshots).
+            "last_oom_at": finished if state.get("OOMKilled") else None,
             "restarts": c.get("RestartCount", 0),
             "origin": origin(labels),
             "config": {"image": cfg.get("Image", ""), "image_id": c.get("Image", ""),
@@ -222,6 +245,8 @@ def pod_instances(pod):
                        "started_at": current.get("startedAt"),
                        "finished_at": current.get("finishedAt"),
                        "restarts": s.get("restartCount", 0),
+                       "last_oom_at": newest(current.get("finishedAt") if current.get("reason") == "OOMKilled" else None,
+                                             last.get("finishedAt") if last.get("reason") == "OOMKilled" else None),
                        "origin": pod_origin,
                        "config": {"image": c["image"], "image_id": s.get("imageID", ""),
                                   "cpu_limit": quantity(limits.get("cpu", "")),
@@ -501,25 +526,164 @@ def nodes(node_list, pods):
     return result
 
 
-def kube_get(kubectl_args, api_path):
-    """kubectl when installed; otherwise the in-cluster API with the pod's service account (stdlib only)."""
-    try:
-        return json.loads(command(["kubectl", *kubectl_args, "-o", "json"]))
-    except FileNotFoundError:
-        host, port = os.environ.get("KUBERNETES_SERVICE_HOST"), os.environ.get("KUBERNETES_SERVICE_PORT", "443")
-        if not host:
-            raise
+def in_cluster(api_path):
+    """Request and TLS context for the in-cluster API with the pod's service account (stdlib only)."""
+    host, port = os.environ.get("KUBERNETES_SERVICE_HOST"), os.environ.get("KUBERNETES_SERVICE_PORT", "443")
+    if not host:
+        return None
     token = (SERVICE_ACCOUNT / "token").read_text().strip()
     context = ssl.create_default_context(cafile=str(SERVICE_ACCOUNT / "ca.crt"))
     host = f"[{host}]" if ":" in host else host
-    request = Request(f"https://{host}:{port}{api_path}", headers={"Authorization": "Bearer " + token})
-    with urlopen(request, timeout=60, context=context) as response:
+    return Request(f"https://{host}:{port}{api_path}", headers={"Authorization": "Bearer " + token}), context
+
+
+def kube_get(kubectl_args, api_path):
+    """kubectl when installed; otherwise the in-cluster API with the pod's service account."""
+    try:
+        return json.loads(command(["kubectl", *kubectl_args]))
+    except FileNotFoundError:
+        api = in_cluster(api_path)
+        if api is None:
+            raise
+    with urlopen(api[0], timeout=60, context=api[1]) as response:
         return json.loads(response.read())
 
 
+def kube_list(kubectl_args, api_path):
+    return kube_get([*kubectl_args, "-o", "json"], api_path)
+
+
+def kube_raw(api_path):
+    """A raw API GET; unlike `kubectl get -o json` it keeps the list's resourceVersion for a watch."""
+    return kube_get(["get", "--raw", api_path], api_path)
+
+
+class Gone(Exception):
+    """410 Gone: the watch resourceVersion is too old (compacted); only a fresh list recovers."""
+
+
+def kube_stream(api_path, timeout):
+    """Watch events of `api_path` (newline-delimited JSON), through kubectl or the in-cluster API."""
+    try:
+        process = subprocess.Popen(["kubectl", "get", "--raw", api_path], stdout=subprocess.PIPE,
+                                   stderr=subprocess.DEVNULL, text=True)
+    except FileNotFoundError:
+        api = in_cluster(api_path)
+        if api is None:
+            raise
+        try:
+            response = urlopen(api[0], timeout=timeout + 60, context=api[1])
+        except HTTPError as error:
+            if error.code == 410:
+                raise Gone() from None
+            raise
+        with response:
+            for line in response:
+                if line.strip():
+                    yield json.loads(line)
+        return
+    try:
+        for line in process.stdout:
+            if line.strip():
+                yield json.loads(line)
+        # kubectl exits non-zero on HTTP errors (a 410 too); the caller relists in either case.
+        code = process.wait()
+        if code:
+            raise subprocess.CalledProcessError(code, "kubectl get --raw")
+    finally:
+        if process.poll() is None:
+            process.kill()
+            process.wait()
+
+
+# --- Kubernetes Events ----------------------------------------------------------------------------
+
+# Pod Events forwarded to history. Normal noise (Scheduled, Pulling, Pulled, Created, Started) is not.
+KUBE_EVENT_REASONS = {"OOMKilling", "BackOff", "FailedScheduling", "Unhealthy", "Killing", "Failed", "Evicted",
+                      "FailedMount", "FailedCreatePodSandBox", "Preempting"}
+MAX_KUBE_EVENTS = 500
+CONTAINER_PATH = re.compile(r"spec\.(?:initContainers|containers|ephemeralContainers)\{([^}]+)\}")
+# Event messages are not forwarded: probe output, image references with registry details and command
+# errors may carry secrets. Only these fixed phrases are extracted from them.
+SCHEDULING_PHRASES = re.compile(
+    r"\d+/\d+ nodes are available|\d+ Insufficient [A-Za-z0-9./_-]+|\d+ node\(s\) (?:had untolerated taint"
+    r"|didn't match Pod's node affinity/selector|didn't match pod (?:anti-)?affinity rules|were unschedulable"
+    r"|had volume node affinity conflict|didn't have free ports for the requested pod ports)")
+IMAGE_ERRORS = re.compile(r"\b(ErrImagePull|ImagePullBackOff|ErrImageNeverPull|InvalidImageName|"
+                          r"CreateContainerConfigError|CreateContainerError|RunContainerError|PreCreateHookError)\b")
+
+
+def event_detail(reason, message):
+    message = message or ""
+    if reason == "Unhealthy":
+        probe = re.match(r"(Liveness|Readiness|Startup) probe (failed|errored)", message)
+        return f"{probe[1].lower()} probe {probe[2]}" if probe else ""
+    if reason == "FailedScheduling":
+        return ", ".join(SCHEDULING_PHRASES.findall(message))[:300]
+    if reason == "Evicted":
+        resource = re.search(r"low on resource: ([a-z-]+)", message)
+        return f"node low on {resource[1]}" if resource else ""
+    if reason == "BackOff":
+        return next((phrase for phrase in ("restarting failed container", "pulling image") if phrase in message), "")
+    if reason == "Failed":
+        if "Failed to pull image" in message:
+            return "image pull failed"
+        error = IMAGE_ERRORS.search(message)
+        return error[1] if error else ""
+    return ""
+
+
+def pod_ref(pod):
+    """What Event mapping needs from a pod: identity, service and container names."""
+    meta, spec = pod["metadata"], pod.get("spec") or {}
+    labels = meta.get("labels") or {}
+    return {"uid": meta["uid"], "namespace": meta.get("namespace", "default"), "name": meta["name"],
+            "service_id": labels.get("gman.service", ""), "environment": labels.get("gman.environment", "unknown"),
+            "containers": {c["name"] for c in spec.get("containers", []) + spec.get("initContainers", [])}}
+
+
+def kube_event(event, refs):
+    """A Kubernetes Event of a pod of a catalogued service, reduced to allowlisted fields; None otherwise.
+
+    `refs` maps pod UID to pod_ref(). The count and the last time let the API dedupe repeats of one Event.
+    """
+    involved, meta = event.get("involvedObject") or {}, event.get("metadata") or {}
+    reason = event.get("reason") or ""
+    if involved.get("kind") != "Pod" or reason not in KUBE_EVENT_REASONS or not meta.get("uid"):
+        return None
+    pod = refs.get(involved.get("uid") or "")
+    if pod is None or not pod["service_id"]:
+        return None
+    path = CONTAINER_PATH.search(involved.get("fieldPath") or "")
+    container = path[1] if path and path[1] in pod["containers"] else ""
+    series = event.get("series") or {}
+    first = event.get("firstTimestamp") or event.get("eventTime")
+    last = newest(series.get("lastObservedTime"), event.get("lastTimestamp"), event.get("eventTime"), first)
+    if last is None:
+        return None
+    source = event.get("source") or {}
+    return {"uid": meta["uid"][:100], "reason": reason,
+            "type": event.get("type") if event.get("type") in ("Normal", "Warning") else "Warning",
+            "count": max(1, int(series.get("count") or 0), int(event.get("count") or 0)),
+            "first_at": first if parse_time(first) else None, "last_at": last,
+            "service_id": pod["service_id"], "environment": pod["environment"],
+            "namespace": pod["namespace"], "pod": pod["name"], "container": container,
+            "instance_id": pod["uid"] + ":" + container if container else "",
+            "instance_name": pod["name"] + ("/" + container if container else ""),
+            "component": str(source.get("component") or event.get("reportingComponent") or "")[:100],
+            "detail": event_detail(reason, event.get("message"))}
+
+
+def kube_events(events, refs):
+    """Allowlisted Events of known pods (`refs`: pod UID -> pod_ref), newest first and bounded."""
+    mapped = [m for m in (kube_event(e, refs) for e in events) if m]
+    mapped.sort(key=lambda m: parse_time(m["last_at"]), reverse=True)
+    return mapped[:MAX_KUBE_EVENTS]
+
+
 def node_pods(node):
-    return kube_get(["get", "pods", "--all-namespaces", "--field-selector", "spec.nodeName=" + node],
-                    "/api/v1/pods?fieldSelector=" + quote("spec.nodeName=" + node))["items"]
+    return kube_list(["get", "pods", "--all-namespaces", "--field-selector", "spec.nodeName=" + node],
+                     "/api/v1/pods?fieldSelector=" + quote("spec.nodeName=" + node))["items"]
 
 
 def runtime_container_id(value):
@@ -557,7 +721,11 @@ def attribute(gpu_list, pods):
                 process.update(match)
 
 
-def collect(runtime, source_id, node="", cluster=""):
+EVENTS_PATH = "/api/v1/events?fieldSelector=" + quote("involvedObject.kind=Pod")
+
+
+def collect(runtime, source_id, node="", cluster="", pods=None, events=None):
+    """One snapshot. Kubernetes --watch passes `pods` from its cache and `events=[]` (it adds Events itself)."""
     observed = datetime.now(timezone.utc).isoformat()
     errors = []
     data = {"source_id": source_id, "observed_at": observed, "agent_version": AGENT_VERSION, "errors": errors}
@@ -575,10 +743,21 @@ def collect(runtime, source_id, node="", cluster=""):
         data.update(source_type="docker-host", hostname=os.uname().nodename,
                     instances=[docker_instance(c) for c in inspect_containers()], gpus=gpus(errors), **host_info())
     else:
-        pods = kube_get(["get", "pods", "--all-namespaces"], "/api/v1/pods")["items"]
-        node_list = kube_get(["get", "nodes"], "/api/v1/nodes")["items"]
+        if pods is None:
+            pods = kube_list(["get", "pods", "--all-namespaces"], "/api/v1/pods")["items"]
+        node_list = kube_list(["get", "nodes"], "/api/v1/nodes")["items"]
+        if events is None:
+            try:
+                raw = kube_list(["get", "events", "--all-namespaces", "--field-selector", "involvedObject.kind=Pod"],
+                                EVENTS_PATH)["items"]
+                events = kube_events(raw, {ref["uid"]: ref for ref in map(pod_ref, pods)})
+            except (OSError, ValueError, KeyError, subprocess.SubprocessError) as error:
+                # E.g. RBAC without events: the inventory itself is still complete.
+                errors.append("kubernetes events unavailable: " + type(error).__name__)
+                events = []
         data.update(source_type="kubernetes-cluster", hostname=source_id,
-                    instances=[i for pod in pods for i in pod_instances(pod)], gpus=[], nodes=nodes(node_list, pods))
+                    instances=[i for pod in pods for i in pod_instances(pod)], gpus=[], nodes=nodes(node_list, pods),
+                    events=events)
     return data
 
 
@@ -798,6 +977,9 @@ class Watcher:
         self.first = self.last = None
         self.next_poll = now  # full snapshot right after start
         self.seen = {}
+        # Container ID -> time of the latest `oom` event. Docker clears State.OOMKilled when a restart
+        # policy restarts the container, and an OOM kill of a child process does not stop it at all.
+        self.ooms = {}
 
     def handle(self, event, now):
         if event.get("Type", "container") != "container":
@@ -806,11 +988,27 @@ class Watcher:
         if action not in WATCH_TRIGGERS:
             return
         cid = event_id(event)
+        if action == "oom" and cid:
+            self.ooms[cid] = newest(self.ooms.get(cid), event_time(event) or datetime.now(timezone.utc).isoformat())
         if action in WATCH_CAPTURE and cid:
             self.seen[cid] = self.capture(event, self.seen.get(cid))
+        self.trigger(now)
+
+    def trigger(self, now):
         self.last = now
         if self.first is None:
             self.first = now
+
+    def snapshots(self, data, seen):
+        """Snapshots to send for one collection: ephemeral containers and OOM times added."""
+        result = with_ephemeral(data, seen)
+        if self.ooms:
+            for instance in {id(i): i for snapshot in result for i in snapshot["instances"]}.values():
+                if instance["id"] in self.ooms:
+                    instance["last_oom_at"] = newest(instance.get("last_oom_at"), self.ooms[instance["id"]])
+            # Reported while the container exists; the API keeps the latest time once it is recorded.
+            self.ooms = {cid: at for cid, at in self.ooms.items() if cid in {i["id"] for i in data["instances"]}}
+        return result
 
     def resync(self, now):
         self.next_poll = min(self.next_poll, now)
@@ -867,11 +1065,123 @@ def docker_events(lines, reconnect=5.0, popen=subprocess.Popen, sleep=time.sleep
         sleep(reconnect)
 
 
+def watch_path(api_path, version, timeout):
+    separator = "&" if "?" in api_path else "?"
+    return (f"{api_path}{separator}watch=1&allowWatchBookmarks=true&resourceVersion={quote(str(version))}"
+            f"&timeoutSeconds={int(timeout)}")
+
+
+def kube_watch(resource, api_path, items, list_=kube_raw, stream=kube_stream, sleep=time.sleep, timeout=300,
+               rng=random.random, attempts=None):
+    """List `api_path`, then watch it from the list's resourceVersion, feeding dicts into `items`.
+
+    {"resource", "type": "SYNC", "items"} after every (re)list, {"resource", "type", "object"} for
+    ADDED/MODIFIED/DELETED. BOOKMARK only advances the resourceVersion. A watch the server ends after
+    `timeout` resumes from the last resourceVersion; 410 Gone (expired version) relists at once; other
+    failures put None (resync) and relist after an exponential backoff. `attempts` bounds the loop for tests.
+    """
+    version, failures = None, 0
+    while attempts is None or attempts > 0:
+        if attempts is not None:
+            attempts -= 1
+        try:
+            if version is None:
+                listing = list_(api_path)
+                version = (listing.get("metadata") or {})["resourceVersion"]
+                items.put({"resource": resource, "type": "SYNC", "items": listing.get("items") or []})
+            for event in stream(watch_path(api_path, version, timeout), timeout):
+                kind, obj = event.get("type"), event.get("object") or {}
+                if kind == "ERROR":
+                    # The API reports an expired resourceVersion as a Status object inside the stream.
+                    if obj.get("code") == 410:
+                        raise Gone()
+                    raise RuntimeError(f"watch error {obj.get('code')} {obj.get('reason', '')}")
+                version = (obj.get("metadata") or {}).get("resourceVersion") or version
+                failures = 0
+                if kind in ("ADDED", "MODIFIED", "DELETED"):
+                    items.put({"resource": resource, "type": kind, "object": obj})
+        except Gone:
+            log(f"{resource} watch: resourceVersion expired (410 Gone); relisting")
+            version = None
+        except (OSError, ValueError, KeyError, TypeError, RuntimeError, subprocess.SubprocessError) as error:
+            delay = backoff(failures, 1.0, 60.0, rng)
+            failures += 1
+            log(f"{resource} watch failed: {type(error).__name__}; relist in {delay:.1f}s")
+            version = None
+            items.put(None)
+            sleep(delay)
+
+
+class KubeWatcher(Watcher):
+    """Debounce for the Kubernetes watch of pods and pod Events, with a pod cache built from it.
+
+    Snapshots are built from the cache (nodes are still listed per snapshot). Pods seen in the window are
+    kept with their last state, so a pod created and deleted between two snapshots is still reported
+    (with_ephemeral). Deleted pods stay known for `keep_deleted` seconds to map their late Events.
+    """
+
+    def __init__(self, now, debounce=2.0, max_delay=10.0, interval=60.0, keep_deleted=600.0):
+        super().__init__(now, debounce, max_delay, interval, capture=None)
+        self.pods, self.deleted, self.events = {}, {}, {}
+        self.synced, self.keep_deleted, self.now = False, keep_deleted, now
+
+    def handle(self, item, now):
+        resource, kind = item.get("resource"), item.get("type")
+        self.now = now
+        if resource == "pods":
+            if kind == "SYNC":
+                fresh = {p["metadata"]["uid"]: p for p in item.get("items") or []}
+                # Pods deleted while the watch was down: their Events can still arrive.
+                self.deleted.update({uid: (pod_ref(pod), now) for uid, pod in self.pods.items() if uid not in fresh})
+                self.pods, self.synced = fresh, True
+            elif kind in ("ADDED", "MODIFIED", "DELETED"):
+                pod = item["object"]
+                uid = pod["metadata"]["uid"]
+                if kind == "DELETED":
+                    self.pods.pop(uid, None)
+                    self.deleted[uid] = (pod_ref(pod), now)
+                else:
+                    self.pods[uid] = pod
+                for instance in pod_instances(pod):
+                    self.seen[instance["id"]] = instance
+            else:
+                return
+        elif resource == "events" and kind in ("SYNC", "ADDED", "MODIFIED"):
+            fresh = (item.get("items") or []) if kind == "SYNC" else [item["object"]]
+            relevant = [e for e in fresh if e.get("reason") in KUBE_EVENT_REASONS
+                        and (e.get("involvedObject") or {}).get("kind") == "Pod"]
+            for event in relevant:
+                self.events[(event.get("metadata") or {}).get("uid")] = event
+            if not relevant:
+                return
+        else:
+            return
+        self.trigger(now)
+
+    def pod_list(self):
+        """Cached pods, or None before the first list (the snapshot then lists them itself)."""
+        return list(self.pods.values()) if self.synced else None
+
+    def snapshots(self, data, seen):
+        self.deleted = {uid: v for uid, v in self.deleted.items() if self.now - v[1] <= self.keep_deleted}
+        refs = {uid: ref for uid, (ref, _) in self.deleted.items()}
+        refs.update({uid: pod_ref(pod) for uid, pod in self.pods.items()})
+        # Events not mapped to a known pod now are dropped: a relist brings back those still stored.
+        events = kube_events(self.events.values(), refs)
+        self.events = {}
+        result = [dict(snapshot, events=[]) for snapshot in with_ephemeral(data, seen)]
+        result[-1]["events"] = events
+        return result
+
+
 def watch(collect_snapshot, spool, deliver, watcher, lines=None, clock=time.monotonic,
-          retry_delay=10.0, cycles=None):
+          retry_delay=10.0, cycles=None, feeds=(docker_events,)):
+    """Debounced snapshots driven by a stream. Queue items: a JSON line (docker events), a dict (Kubernetes
+    watch, see kube_watch) or None for a broken stream (resync)."""
     if lines is None:
         lines = queue.Queue()
-        threading.Thread(target=docker_events, args=(lines,), daemon=True).start()
+        for feed in feeds:
+            threading.Thread(target=feed, args=(lines,), daemon=True).start()
     done = 0
     while cycles is None or done < cycles:
         try:
@@ -881,6 +1191,8 @@ def watch(collect_snapshot, spool, deliver, watcher, lines=None, clock=time.mono
         now = clock()
         if line is None:
             watcher.resync(now)  # events may have been missed while the stream was down
+        elif isinstance(line, dict):
+            watcher.handle(line, now)
         elif line.strip():
             try:
                 watcher.handle(json.loads(line), now)
@@ -897,7 +1209,7 @@ def watch(collect_snapshot, spool, deliver, watcher, lines=None, clock=time.mono
             log(f"collection failed: {type(error).__name__}; retry in {retry_delay:g}s")
             watcher.retry(seen, now, retry_delay)
             continue
-        for snapshot in with_ephemeral(data, seen):
+        for snapshot in watcher.snapshots(data, seen):
             spool.put(snapshot)
         spool.flush(deliver)
 
@@ -934,7 +1246,8 @@ def main(argv=None):
     parser.add_argument("--cluster", default=os.environ.get("GMAN_CLUSTER", ""),
                         help="kubernetes-node: --source-id of the cluster's inventory agent (default: GMAN_CLUSTER)")
     parser.add_argument("--send", action="store_true")
-    parser.add_argument("--watch", action="store_true", help="follow docker events (requires --send, docker)")
+    parser.add_argument("--watch", action="store_true",
+                        help="follow docker events or the Kubernetes watch API (requires --send; docker, kubernetes)")
     parser.add_argument("--state-dir", help="spool and lock directory (default: GMAN_AGENT_STATE_DIR, "
                                             "/var/lib/gman-agent as root, else ~/.local/state/gman-agent)")
     parser.add_argument("--spool-max-files", type=int, default=100)
@@ -943,13 +1256,15 @@ def main(argv=None):
     parser.add_argument("--debounce", type=float, default=2.0, help="--watch: seconds of quiet before a snapshot")
     parser.add_argument("--max-delay", type=float, default=10.0, help="--watch: max seconds an event waits")
     parser.add_argument("--interval", type=float, default=60.0, help="--watch: full snapshot at least this often")
+    parser.add_argument("--watch-timeout", type=int, default=300,
+                        help="--watch kubernetes: seconds before the API server ends a watch (it is resumed)")
     args = parser.parse_args(argv)
     if not re.fullmatch(r"[A-Za-z0-9_.-]{1,100}", args.source_id) or not args.source_id.strip("."):
         parser.error("invalid --source-id")
     if args.runtime == "kubernetes-node" and not (args.node and args.cluster):
         parser.error("--runtime kubernetes-node needs --node (or NODE_NAME) and --cluster")
-    if args.watch and (args.runtime != "docker" or not args.send):
-        parser.error("--watch requires --runtime docker and --send")
+    if args.watch and (args.runtime not in ("docker", "kubernetes") or not args.send):
+        parser.error("--watch requires --runtime docker or kubernetes and --send")
     if not args.send:
         print(json.dumps(collect(args.runtime, args.source_id, args.node, args.cluster), indent=2))
         return
@@ -967,7 +1282,15 @@ def main(argv=None):
     def snapshot():
         return collect(args.runtime, args.source_id, args.node, args.cluster)
 
-    if args.watch:
+    if args.watch and args.runtime == "kubernetes":
+        watcher = KubeWatcher(time.monotonic(), args.debounce, args.max_delay, args.interval)
+
+        def feed(resource, api_path):
+            return lambda items: kube_watch(resource, api_path, items, timeout=args.watch_timeout)
+
+        watch(lambda: collect(args.runtime, args.source_id, pods=watcher.pod_list(), events=[]), spool, deliver,
+              watcher, feeds=(feed("pods", "/api/v1/pods"), feed("events", EVENTS_PATH)))
+    elif args.watch:
         watch(snapshot, spool, deliver, Watcher(time.monotonic(), args.debounce, args.max_delay, args.interval))
     else:
         run_once(snapshot, spool, deliver)

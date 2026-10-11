@@ -76,6 +76,7 @@ export function InstanceTable({ rows, metrics, logs }: { rows: Placed[]; metrics
             ? <span className="badge warn">Данные устарели</span>
             : <span className={`badge ${statusTone(i)}`}>{describeStatus(i)}</span>}
           {i.last_termination_reason && <small>Прошлое завершение: {i.last_termination_reason}</small>}
+          {i.last_oom_at && <small>Последний OOM: {date(i.last_oom_at)}</small>}
         </td>
         <td><Consumption used={usage?.cpu_cores} limit={i.config.cpu_limit} show={cores} /></td>
         <td><Consumption used={usage?.memory_bytes} limit={i.config.memory_limit_bytes} show={size} /></td>
@@ -158,13 +159,29 @@ const TITLES: Record<string, string> = {
   'instance-removed': 'Экземпляр удален', 'config-changed': 'Изменилась конфигурация',
   'instance-restarted': 'Перезапуск', 'state-changed': 'Изменилось состояние',
   'service-created': 'Сервис добавлен в каталог', 'service-updated': 'Изменена запись каталога',
+  'instance-oom': 'OOM kill', 'runtime-event': 'Событие Kubernetes', 'history-gap': 'Пробел в истории',
+};
+
+const GAP_REASONS: Record<string, string> = {
+  'source-silent': 'источник не присылал снимки',
+  'spool-overflow': 'агент отбросил неотправленные снимки (переполнение spool)',
 };
 
 function title(e: Audit) {
   if (e.type === 'service-created' || e.type === 'service-updated') return `${TITLES[e.type]} · ${e.service_id}`;
   if (e.type === 'deployment') return `Деплой · ${e.status}${e.release ? ` · ${e.release}` : ''}`;
   if (e.type === 'source-connected') return `${TITLES[e.type]} · ${e.source_id} · ${e.instance_count} экз.`;
+  if (e.type === 'history-gap') return `${TITLES[e.type]} · ${e.source_id}`;
+  if (e.type === 'runtime-event') {
+    return `${e.reason}${e.count && e.count > 1 ? ` ×${e.count}` : ''} · ${e.instance_name}`;
+  }
   return `${TITLES[e.type] ?? e.type} · ${e.instance_name ?? e.instance_id}`;
+}
+
+function tone(e: Audit) {
+  if (e.type === 'deployment' && e.status === 'failed' || e.type === 'instance-removed' || e.type === 'instance-oom') return 'bad';
+  if (e.type === 'runtime-event') return e.event_type === 'Warning' ? 'warn' : '';
+  return e.type === 'state-changed' || e.type === 'instance-restarted' || e.type === 'history-gap' ? 'warn' : '';
 }
 
 /** Runtime changes a deployment causes; without a correlated release their initiator is unknown. */
@@ -176,18 +193,30 @@ function actorLabel(e: Audit) {
 }
 
 export function EventItem({ e, onRelease }: { e: Audit; onRelease?: (id: number, serviceId: string) => void }) {
-  const tone = e.type === 'deployment' && e.status === 'failed' || e.type === 'instance-removed' ? 'bad'
-    : e.type === 'state-changed' || e.type === 'instance-restarted' ? 'warn' : '';
   return <details className="event">
     <summary>
-      <span className={`dot ${tone}`} /><b>{title(e)}</b>
-      <span>{actorLabel(e)}</span>
+      <span className={`dot ${tone(e)}`} /><b>{title(e)}</b>
+      {e.type === 'history-gap'
+        ? <span className="badge warn">Данные за период могут быть неполными</span>
+        : <span>{actorLabel(e)}</span>}
       {e.release_id != null && (onRelease
         ? <button className="badge info" onClick={ev => { ev.preventDefault(); onRelease(e.release_id!, e.service_id); }}>Релиз #{e.release_id} →</button>
         : <span className="badge info">Релиз #{e.release_id}</span>)}
       <time>{date(e.occurred_at)}</time>
     </summary>
     <p>{e.actor_source} · получено {date(e.received_at)}</p>
+    {e.type === 'history-gap' && <>
+      <p className="note">С {date(e.gap_from)} по {date(e.gap_to)} изменения экземпляров могли быть не записаны:
+        {' '}{(e.reasons ?? []).map(r => GAP_REASONS[r] ?? r).join('; ')}
+        {e.dropped_snapshots ? ` (${e.dropped_snapshots} шт.)` : ''}. Состояние после пробела актуально.</p>
+    </>}
+    {e.type === 'runtime-event' && <dl>
+      <div><dt>Причина</dt><dd>{e.reason} ({e.event_type}){e.detail ? ` · ${e.detail}` : ''}</dd></div>
+      <div><dt>Pod</dt><dd>{e.namespace}/{e.pod}{e.container ? ` · контейнер ${e.container}` : ''}</dd></div>
+      <div><dt>Повторов</dt><dd>{e.count} всего, новых {e.occurrences}</dd></div>
+      <div><dt>Впервые / последний раз</dt><dd>{date(e.first_at)} / {date(e.last_at)}</dd></div>
+      <div><dt>Компонент</dt><dd>{e.component || '—'}</dd></div>
+    </dl>}
     {e.type === 'deployment' && <dl>
       <div><dt>Окружение</dt><dd>{e.service_id} · {e.environment}</dd></div>
       <div><dt>Сборка</dt><dd>{isHttp(e.build_url) ? <a href={e.build_url} target="_blank" rel="noreferrer">{e.build_id} ↗</a> : e.build_id}</dd></div>
@@ -230,11 +259,18 @@ export function History({ token, serviceId, refreshKey, onRelease }: {
     } catch (e) { setError((e as Error).message); }
   }
 
-  const shown = hideState ? events.filter(e => e.type !== 'state-changed') : events;
+  // The API records a history gap once per affected service; the audit shows each gap once.
+  const gaps = new Set<string>();
+  const shown = events.filter(e => {
+    if (hideState && e.type === 'state-changed') return false;
+    if (e.type !== 'history-gap' || serviceId) return true;
+    const key = `${e.source_id}|${e.gap_from}|${e.gap_to}`;
+    return !gaps.has(key) && !!gaps.add(key);
+  });
   return <div>
     <label className="toggle"><input type="checkbox" checked={hideState} onChange={e => setHideState(e.target.checked)} /> Скрыть изменения health/ready</label>
     {error && <div role="alert" className="alert">{error}</div>}
-    {shown.map(e => <EventItem key={e.received_at + (e.instance_id ?? '') + (e.build_id ?? '') + e.type} e={e} onRelease={onRelease} />)}
+    {shown.map(e => <EventItem key={[e.received_at, e.source_id, e.instance_id, e.build_id, e.uid, e.service_id, e.type].join('|')} e={e} onRelease={onRelease} />)}
     {!shown.length && <div className="empty">Событий пока нет. История появляется после подключения источников.</div>}
     {next && <button className="more" onClick={more}>Показать еще</button>}
   </div>;

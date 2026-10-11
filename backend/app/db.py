@@ -134,6 +134,18 @@ class Event(Base):
                       Index("ix_events_release", "release_id"))
 
 
+class RuntimeEventMark(Base):
+    """The latest recorded count and time of each Kubernetes Event, to record repeats once (migration 0004)."""
+    __tablename__ = "runtime_event_marks"
+    source_id: Mapped[str] = mapped_column(String, primary_key=True)
+    uid: Mapped[str] = mapped_column(String, primary_key=True)
+    count: Mapped[int] = mapped_column(Integer)
+    last_at: Mapped[datetime] = mapped_column(UTC)
+    received_at: Mapped[datetime] = mapped_column(UTC)
+
+    __table_args__ = (Index("ix_runtime_event_marks_received", "received_at"),)
+
+
 class Deployment(Base):
     """CI events by ID, for idempotent retries."""
     __tablename__ = "deployments"
@@ -250,18 +262,28 @@ def config_hash(config):
     return hashlib.sha256(json.dumps(config, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
 
 
+def keep_latest(item, before, field):
+    """A past fact the runtime forgets (Docker clears OOMKilled on restart; an agent restart loses the time of
+    an `oom` event) stays as observed, unless a newer one is reported. Modifies `item` in place."""
+    old, new = before.get(field), item.get(field)
+    if old and (not new or datetime.fromisoformat(new) < datetime.fromisoformat(old)):
+        item[field] = old
+
+
 def save_snapshot(session, data, received_at):
     """Store an accepted snapshot; returns the previously observed instances by ID."""
     source_id = data["source_id"]
     session.merge(Source(source_id=source_id, source_type=data["source_type"], hostname=data["hostname"],
                          observed_at=datetime.fromisoformat(data["observed_at"]), received_at=received_at,
-                         snapshot={k: v for k, v in data.items() if k not in ("instances", "received_at")}))
+                         snapshot={k: v for k, v in data.items() if k not in ("instances", "received_at", "events")}))
     rows = {r.instance_id: r for r in session.scalars(select(Instance).where(Instance.source_id == source_id))}
     old = {key: row.data for key, row in rows.items()}
     unchanged = []
     for position, item in enumerate(data["instances"]):
         digest = config_hash(item["config"])
         row = rows.pop(item["id"], None)
+        if row is not None:
+            keep_latest(item, row.data, "last_oom_at")
         if row is None:
             row = Instance(source_id=source_id, instance_id=item["id"])
             session.add(row)
@@ -405,6 +427,8 @@ class Retention:
         cutoff = now - timedelta(days=days)
         with engine.begin() as connection:
             connection.execute(delete(Event).where(Event.received_at < cutoff))
+            # Kubernetes keeps Events for an hour by default: older marks no longer dedupe anything.
+            connection.execute(delete(RuntimeEventMark).where(RuntimeEventMark.received_at < cutoff))
             # Current configs stay: every accepted snapshot refreshes their last_seen_at.
             connection.execute(delete(ConfigSnapshot).where(ConfigSnapshot.last_seen_at < cutoff))
             connection.execute(delete(Release).where(Release.started_at < cutoff, Release.finished_at.is_not(None)))

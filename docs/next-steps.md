@@ -5,7 +5,7 @@
 
 ## Что сделано
 
-1. Каталог и inventory: нормализованная схема PostgreSQL (Alembic, миграции 0001–0003),
+1. Каталог и inventory: нормализованная схема PostgreSQL (Alembic, миграции 0001–0004),
    прием снимков Docker-хостов и Kubernetes-кластера с токеном на источник, состояние
    отдельно от health, происхождение по allowlist меток, история изменений по снимкам,
    retention. Исправлены баги из ревью (race `docker ps`/`inspect`, нулевое время старта,
@@ -44,10 +44,22 @@
     (повторный деплой того же релиза больше не склеивается с первым), имя пользователя —
     только при ручном триггере, deploy.version и planRepository.1.revision как запасные.
 
+12. Runtime-история: `--watch` для Kubernetes (list + watch pods и pod Events от resourceVersion,
+    BOOKMARK, relist на 410 Gone, backoff, промежуточный снимок для pod-ов, удаленных между
+    снимками); Kubernetes Events сервисов каталога в истории без message (allowlist причин,
+    дедупликация по uid + count/времени, миграция 0005 runtime_event_marks); Docker OOM под
+    restart policy по событию `oom` → last_oom_at экземпляра, событие instance-oom, метрика
+    gman_instance_last_oom_timestamp_seconds и третье условие GManInstanceOOMKilled; явная
+    отметка пробела в истории (history-gap: молчание > GMAN_HISTORY_GAP_SECONDS или
+    переполнение spool агента) с плашкой «Данные за период могут быть неполными» в портале.
+
 Проверено:
-- Тесты: 155 passed на PostgreSQL 17 (включая запросы истории конфигураций и тест
-  конкурентности), 154 passed и 1 skipped на SQLite; миграции upgrade → downgrade base →
+- Тесты: 180 passed на PostgreSQL 17 (включая запросы истории конфигураций и тест
+  конкурентности), 179 passed и 1 skipped на SQLite; миграции upgrade → downgrade base →
   upgrade и `alembic check` на PostgreSQL 17. Frontend: `npm run build`.
+- Kubernetes watch и Events — на fixtures потоков (ADDED/MODIFIED/DELETED, BOOKMARK, ERROR 410,
+  сбой kubectl, HTTP 410 in-cluster), Docker `oom` — на fixtures событий; правило OOM —
+  `promtool test rules` (Prometheus 3.5.0).
 - Метрики: otelcol-contrib 0.162.0, Prometheus 3.5.0, Grafana 12.1.1 (бинарные релизы) с
   эмуляцией Docker Engine API, kubelet и вывода DCGM: имена метрик, метки, запросы API
   и дашбордов, provisioning Grafana.
@@ -102,7 +114,8 @@ deploy/alerts/alertmanager.sh --render /tmp/am.yml && amtool check-config /tmp/a
   Docker daemon), healthcheck внутри образов (wget в grafana/prometheus/alertmanager,
   /grafana/api/health при serve_from_sub_path), entrypoint alertmanager.sh под busybox sh
   и права тома /alertmanager, сервис backup в контейнере (busybox sh/find), права uid 10001
-  на ключ gateway; агент и `--watch` против настоящего Docker daemon.
+  на ключ gateway; агент и `--watch` против настоящего Docker daemon (включая событие `oom`
+  при restart policy и OOM kill дочернего процесса).
 - nginx: `nginx -t` и запуск с TLS, Grafana за /grafana/ (включая Live/websocket),
   limit_req на реальной нагрузке.
 - systemd: `systemd-analyze verify`, sandboxing с docker/nvidia-smi/kubectl, timer на Linux.
@@ -110,7 +123,8 @@ deploy/alerts/alertmanager.sh --render /tmp/am.yml && amtool check-config /tmp/a
 - NVIDIA/DCGM: настоящие поля DCGM (XID, ECC, CLOCKS_EVENT_REASONS, метки
   pod/namespace/container), nvidia-smi на реальных драйверах, сверка показателей с источником.
 - Kubernetes/CRI-O: k8s_attributes, обнаружение DCGM, RBAC, kubelet_stats в реальном
-  кластере; для kubernetes-node — nvidia-smi через NVIDIA runtime без запроса GPU, список
+  кластере; `--watch` кластера (потоковый вывод `kubectl get --raw` для watch, частота
+  BOOKMARK, 410 после compaction, нагрузка на API server), формат и series реальных Events; для kubernetes-node — nvidia-smi через NVIDIA runtime без запроса GPU, список
   процессов от non-root, PSA privileged для hostPID, формат cgroup на CRI-O/containerd.
 - SSO с настоящим IdP (Keycloak, AD FS, Okta): claim групп, end_session, cookie `__Host-`.
 - Интеграции: настоящий Bamboo (переменные `bamboo_*`), Splunk (индексы и поля),
@@ -136,12 +150,15 @@ deploy/alerts/alertmanager.sh --render /tmp/am.yml && amtool check-config /tmp/a
 - Внешний мониторинг самого сервера GMan; постоянная очередь Collector на диске (file_storage).
 
 Inventory и аудит:
-- `--watch` для Kubernetes (watch API вместо опроса раз в минуту), Kubernetes Events.
+- ~~`--watch` для Kubernetes (watch API вместо опроса раз в минуту), Kubernetes Events.~~ Сделано (п. 12).
 - Kubernetes audit log для API caller; аудит или аутентифицированный посредник для
   атрибуции ручных запусков Docker.
 - ~~Корреляция событий Bamboo с runtime (digest, время) и сущность релиза со статусами.~~ Сделано (п. 11).
-- Нормализованные controllers/workloads и nodes; явная отметка пробела в истории.
-- OOM в Docker с restart policy ловить по событию `oom` из `--watch`.
+- Нормализованные controllers/workloads и nodes; ~~явная отметка пробела в истории~~ (сделано, п. 12).
+- ~~OOM в Docker с restart policy ловить по событию `oom` из `--watch`.~~ Сделано (п. 12).
+- Kubernetes Events узлов (OOMKilling от node-problem-detector, NodeNotReady) — сейчас только
+  события pod-ов; сопоставление OOM узла с pod-ом требует разбора message.
+- OOM в Docker без `--watch` (timer) виден, только пока контейнер остановлен.
 
 Метрики и алерты:
 - kube-state-metrics (desired/available replicas, Pending, rollout).

@@ -51,7 +51,8 @@ const RUNBOOKS: [string, string, string[]][] = [
     'Проверить журнал BMC/IPMI и блоки питания сервера.']],
   ['GManInstanceOOMKilled', 'OOMKilled', [
     'Сравнить потребление памяти с лимитом на вкладке «Ресурсы» сервиса.',
-    'Поднять лимит или найти утечку; в Kubernetes — kubectl describe pod, раздел Last State.']],
+    'Поднять лимит или найти утечку; в Kubernetes — kubectl describe pod, раздел Last State.',
+    'Время последнего OOM — в таблице экземпляров и событие «OOM kill» в «Истории». Docker с restart policy: OOM виден только при агенте с --watch.']],
   ['GManInstanceCrashLoopBackOff', 'CrashLoopBackOff', [
     'kubectl logs --previous <pod> -c <контейнер>; kubectl describe pod — exit code и события.',
     'Сверить последнюю версию конфигурации на вкладке «Конфигурация» и недавние деплои в «Истории».']],

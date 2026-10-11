@@ -35,6 +35,8 @@ export type Instance = {
   last_termination_reason: string;
   created_at: string | null; started_at: string | null; finished_at: string | null;
   restarts: number; origin: Origin; config: Record<string, unknown>;
+  /** Latest OOM kill (Docker `oom` event or OOMKilled, Kubernetes termination); kept after restarts. */
+  last_oom_at?: string | null;
 };
 
 /** Docker owner by container_id; Kubernetes (node source) also by pod and instance_id "<pod uid>:<container>". */
@@ -85,6 +87,12 @@ export type Audit = {
   before?: Instance; after?: Instance; changes?: Record<string, [unknown, unknown]>;
   /** Release this event was correlated with (Bamboo deployment ↔ runtime). */
   release_id?: number; deployment_id?: string; version?: string; image?: string;
+  /** runtime-event: a Kubernetes Event of a pod, without its message (only fixed phrases in `detail`). */
+  uid?: string; reason?: string; event_type?: 'Normal' | 'Warning'; count?: number; occurrences?: number;
+  first_at?: string | null; last_at?: string; namespace?: string; pod?: string; container?: string;
+  component?: string; detail?: string;
+  /** history-gap: changes between gap_from and gap_to may be missing. */
+  gap_from?: string; gap_to?: string; gap_seconds?: number; reasons?: string[]; dropped_snapshots?: number;
 };
 
 export type ReleaseStatus = 'started' | 'rolling-out' | 'succeeded' | 'failed' | 'superseded';

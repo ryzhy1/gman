@@ -89,8 +89,8 @@ flowchart LR
 ### Inventory
 
 1. Агент на Docker-хосте читает `docker ps -aq` и `docker inspect` (allowlist полей),
-   nvidia-smi или AMD sysfs, сведения о хосте. Агент кластера читает pods и nodes через
-   kubectl (или API с service account). Агент GPU-узла (`kubernetes-node`) читает nvidia-smi,
+   nvidia-smi или AMD sysfs, сведения о хосте. Агент кластера читает pods, nodes и pod Events
+   через kubectl (или API с service account). Агент GPU-узла (`kubernetes-node`) читает nvidia-smi,
    `/proc/<pid>/cgroup` и pods своего узла.
 2. Снимок пишется в spool на диске и отправляется `POST /api/inventory` с Bearer-токеном
    источника. Повторы с backoff; неотправленное остается в spool.
@@ -99,18 +99,44 @@ flowchart LR
    (`accepted=false`).
 4. Снимок заменяет текущее состояние источника (sources, instances); новая конфигурация
    экземпляра создает строку config_snapshots. Разница с прошлым снимком записывается
-   событиями (см. «Кем и когда запущено»).
+   событиями (см. «Кем и когда запущено»); новые повторения Kubernetes Events — событиями
+   runtime-event; молчание источника дольше GMAN_HISTORY_GAP_SECONDS (300 с) или отброшенные
+   агентом снимки — событием history-gap.
 5. Портал получает `GET /api/overview` (каталог, источники с экземплярами, последние 200
    событий) раз в 30 секунд.
 
-Сбор — периодический опрос (systemd timer раз в минуту) либо `docker events` в режиме
-`--watch`: снимок через 2 с тишины, не позже 10 с от первого события и не реже 60 с;
-контейнер, исчезнувший до снимка, отправляется промежуточным снимком. После разрыва потока
-событий — полная сверка. Пропущенные во время разрыва короткие события не восстанавливаются.
+Сбор — периодический опрос (systemd timer раз в минуту) либо режим `--watch`: `docker events`
+или watch API Kubernetes. Снимок через 2 с тишины, не позже 10 с от первого события и не реже
+60 с; контейнер или pod, исчезнувший до снимка, отправляется промежуточным снимком. После
+разрыва потока событий — полная сверка. Пропущенные во время разрыва короткие события не
+восстанавливаются.
 
-Отличие от проекта: Kubernetes опрашивается целиком раз в минуту, watch API и Kubernetes
-Events не используются; доступ к Docker — через Docker CLI с группой docker, а не через
-ограничивающий proxy.
+Kubernetes `--watch` (KubeWatcher в agent/collect.py): два потока — pods и pod Events. Каждый
+делает list (`kubectl get --raw`, чтобы сохранить resourceVersion списка; без kubectl — API с
+service account) и watch от этой версии с allowWatchBookmarks и timeoutSeconds; по истечении
+watch продолжается с последней версии (BOOKMARK ее сдвигает). 410 Gone — версия удалена
+compaction: немедленный повторный list. Прочие сбои — маркер сверки и повторный list с
+экспоненциальным backoff до 60 с. Снимок строится из кэша pod-ов, узлы читаются при каждом
+снимке. Удаленные pod-ы помнятся 10 минут, чтобы сопоставить их поздние Events.
+
+Kubernetes Events (allowlist): только involvedObject.kind = Pod, pod с меткой gman.service,
+reason из списка OOMKilling, BackOff, FailedScheduling, Unhealthy, Killing, Failed, Evicted,
+FailedMount, FailedCreatePodSandBox, Preempting. Поля: uid, reason, type, count (с учетом
+series), first/last time, namespace/pod/контейнер (из fieldPath) → instance_id, компонент.
+message не передается — в нем бывают вывод проб, адреса registry и ошибки команд; вместо него
+detail из фиксированных фраз (вид пробы, причины FailedScheduling, ресурс Evicted, ошибка
+образа). API проверяет тот же allowlist и записывает событие один раз на новое повторение:
+runtime_event_marks хранит последний count и время по (source_id, uid).
+
+Docker OOM: restart policy сбрасывает State.OOMKilled, а OOM kill дочернего процесса не
+останавливает контейнер. Watcher запоминает время события `oom` и проставляет его в
+last_oom_at экземпляра в каждом снимке, пока контейнер существует. API сохраняет последнее
+известное last_oom_at (поле не сбрасывается пропуском), пишет событие instance-oom и отдает
+gman_instance_last_oom_timestamp_seconds; GManInstanceOOMKilled срабатывает 30 минут после
+OOM kill. В Kubernetes last_oom_at берется из termination state (current и lastState).
+
+Отличие от проекта: доступ к Docker — через Docker CLI с группой docker, а не через
+ограничивающий proxy. Без `--watch` Kubernetes опрашивается целиком раз в минуту.
 
 ### Телеметрия
 
@@ -149,7 +175,8 @@ API отдает на `/metrics` состояние inventory (backend/app/expos
 (не старше 5 минут). Путь не проксируется nginx и читается Prometheus внутри сети Compose.
 Recording rules объединяют DCGM и nvidia-smi (DCGM важнее). 18 алертов: узел, источник,
 телеметрия и gateway молчат, узел Kubernetes NotReady, GPU XID/ECC/перегрев/троттлинг,
-OOMKilled, CrashLoopBackOff, частые перезапуски, образ не скачивается. Inhibition: упавший
+OOMKilled (включая время последнего OOM kill), CrashLoopBackOff, частые перезапуски, образ
+не скачивается. Inhibition: упавший
 узел скрывает алерты своих GPU и контейнеров, молчащий источник — алерты своих экземпляров.
 Runbook — страница портала `#alerts/<имя>`. Silence — в UI Alertmanager.
 
@@ -190,7 +217,7 @@ event_id детерминирован, повтор с тем же payload не 
 ## Модель данных
 
 PostgreSQL, схема из Alembic-миграций (0001 — нормализованная схема, 0002 — имя и окружение
-экземпляра в config_snapshots, 0003 — sessions, 0004 — releases и events.release_id). Миграции применяются при старте API под
+экземпляра в config_snapshots, 0003 — sessions, 0004 — releases и events.release_id, 0005 — runtime_event_marks). Миграции применяются при старте API под
 advisory lock. Снимки, экземпляры и конфигурации хранятся как проверенный JSON (JSONB);
 колонками вынесено только то, по чему фильтруют и сортируют, поэтому новые поля схемы API
 не требуют миграций. Время хранится в UTC (timestamptz).
@@ -205,6 +232,7 @@ advisory lock. Снимки, экземпляры и конфигурации х
 | deployments | event_id | Исходный запрос CI для идемпотентности |
 | releases | id | Прогон деплоя Bamboo для сервиса/окружения: версия, image/digest, commit, инициатор, статус и причина, окно, прогресс экземпляров |
 | sessions | sha256 cookie | SSO-сессии: subject, роль, email/имя/группы на момент входа, CSRF-токен, срок |
+| runtime_event_marks | source_id + uid | Последний записанный count и время Kubernetes Event — дедупликация повторов; удаляется по GMAN_RETENTION_DAYS |
 
 Соответствие сущностям исходного проекта:
 
@@ -268,6 +296,9 @@ gman_service/gman_environment, k8s.namespace/pod; command, env, пользова
 | source-connected | первый снимок источника, одно событие с числом экземпляров | unknown, runtime observation |
 | instance-appeared / instance-removed | разница снимков | unknown |
 | config-changed / instance-restarted / state-changed | разница снимков, changes «было/стало» | unknown |
+| instance-oom | новое last_oom_at экземпляра (Docker `oom` или OOMKilled, Kubernetes termination) | unknown |
+| runtime-event | новое повторение Kubernetes Event pod-а: reason, event_type, count, occurrences, detail | unknown, Kubernetes Event |
+| history-gap | источник молчал дольше GMAN_HISTORY_GAP_SECONDS или агент отбросил снимки (spool overflow): gap_from/gap_to, reasons, dropped_snapshots; по событию на каждый затронутый сервис | unknown |
 | deployment | Bamboo | из CI, actor_source = Bamboo integration assertion; release_id |
 | instance-appeared / config-changed, связанные с релизом | разница снимков + сверка с релизом | инициатор релиза, actor_source = Bamboo, correlated by digest/version |
 | service-created / service-updated | изменение каталога через API | email/логин SSO (human) или GMAN_ADMIN_TOKEN (unknown), с ролью и subject |
@@ -401,7 +432,7 @@ CPU контейнера — в ядрах (1.0 = одно ядро), проце
 контейнером/pod-ом дает VRAM процесса, загрузка по pod-ам — только для карт, выделенных
 через device plugin.
 
-Не собираются: PSI, OOM-события как метрика, SMART/NVMe, hwmon хоста, BMC/IPMI/Redfish,
+Не собираются: PSI, OOM-события хоста (вне контейнеров) как метрика, SMART/NVMe, hwmon хоста, BMC/IPMI/Redfish,
 PCIe/NVLink-счетчики, retired pages, SM/tensor profiling, метрики MIG-инстансов,
 kube-state-metrics (desired/available replicas, Pending, rollout).
 
@@ -426,9 +457,15 @@ kube-state-metrics (desired/available replicas, Pending, rollout).
 observed_at, а не время доставки.
 
 Collector: memory_limiter, batch, in-memory sending_queue и retry_on_failure.
-Отличие от проекта: постоянная очередь Collector на диске (file_storage) не настроена,
-явная отметка пробела в истории после переподключения не создается (видна только по
-ошибкам spool и времени снимков). Самонаблюдение pipeline ограничено up{job} gateway и API
+Пробел в истории отмечается явно: если между принятыми снимками источника прошло больше
+GMAN_HISTORY_GAP_SECONDS (300 с — пять интервалов агента, как GManSourceSilent) или снимок
+сообщает «agent spool overflow», API пишет history-gap для каждого сервиса с экземплярами на
+источнике до и после пробела (и без сервиса — для неразмеченных); портал показывает «Данные
+за период могут быть неполными», в журнале аудита копии одного пробела сворачиваются.
+Снимки, отправленные из spool после восстановления связи, пробела не образуют.
+
+Отличие от проекта: постоянная очередь Collector на диске (file_storage) не настроена.
+Самонаблюдение pipeline ограничено up{job} gateway и API
 и метриками источников; lag, dropped и размер очередей Collector не собираются.
 Внешнего мониторинга самого сервера GMan нет.
 
