@@ -2,6 +2,7 @@
 # Install: binary /usr/bin/otelcol-contrib (the release .deb/.rpm; disable its own
 # otelcol-contrib.service), config /etc/gman/otel-agent.yaml, environment /etc/gman/otelcol.env,
 # client certificate /etc/gman/{ca.pem,client.pem,client-key.pem} readable by group gman-otel.
+# Persistent sending queue (file_storage): /var/lib/gman-otelcol, created by StateDirectory below.
 [Unit]
 Description=GMan node OpenTelemetry Collector
 Wants=network-online.target
@@ -10,6 +11,12 @@ After=network-online.target docker.service
 [Service]
 EnvironmentFile=/etc/gman/otelcol.env
 ExecStart=/usr/bin/otelcol-contrib --config=/etc/gman/otel-agent.yaml
+# Queue directory for file_storage (GMAN_OTEL_STORAGE_DIR default): systemd creates it owned by gman-otel
+# with mode 0700 and keeps it across restarts and upgrades. It is the only writable path under ProtectSystem=strict
+# (StateDirectory implies it; ReadWritePaths states it). Another GMAN_OTEL_STORAGE_DIR needs its own ReadWritePaths.
+StateDirectory=gman-otelcol
+StateDirectoryMode=0700
+ReadWritePaths=/var/lib/gman-otelcol
 Restart=on-failure
 RestartSec=5s
 User=gman-otel

@@ -23,6 +23,10 @@ const RUNBOOKS: [string, string, string[]][] = [
   ['GManTelemetryGatewayDown', 'OTel gateway недоступен', [
     'docker compose ps otel; docker compose logs otel — ошибки конфигурации или нехватка памяти.',
     'Пока gateway лежит, алерты об отсутствии метрик хостов и GPU не создаются; алерты по inventory работают.']],
+  ['GManWatchdog', 'Сигнал жизни конвейера алертов', [
+    'Срабатывает всегда и на портале не показывается: Alertmanager каждые ~5 минут отправляет его только во внешний сервис проверки (GMAN_ALERT_HEARTBEAT_URL).',
+    'Если внешний сервис сообщил, что сигнал пропал: проверить доступность сервера GMan, docker compose ps prometheus alertmanager, исходящую сеть до сервиса проверки.',
+    'Отдельно доступность портала и срок сертификата снаружи проверяет deploy/monitoring/probe.sh (cron на другой машине).']],
   ['GManTlsCrlExpiring', 'Истекает список отзыва (CRL)', [
     'Не дать CRL истечь: после nextUpdate nginx отвергает все клиентские сертификаты OTLP, и метрики перестают приходить со всех серверов.',
     'На машине администратора: deploy/pki/issue.sh crl (новый crl.pem на CRL_DAYS, по умолчанию 365 дней).',

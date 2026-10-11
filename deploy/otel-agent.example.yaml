@@ -6,6 +6,8 @@
 #                  the production gateway drops metrics whose host.id differs from the certificate.
 #   OTEL_GATEWAY   host:port of the central gateway's OTLP gRPC receiver.
 #   DOCKER_SOCKET  optional, defaults to unix:///var/run/docker.sock.
+#   GMAN_OTEL_STORAGE_DIR  optional, defaults to /var/lib/gman-otelcol (StateDirectory of
+#                  deploy/systemd/gman-otelcol.service): the persistent sending queue.
 receivers:
   host_metrics:
     collection_interval: 15s
@@ -52,6 +54,18 @@ receivers:
           scrape_interval: 15s
           static_configs:
             - targets: ['127.0.0.1:9400']
+extensions:
+  # Persistent sending queue: batches the gateway has not accepted survive a restart of this Collector or
+  # of the host and are sent when the gateway is back (README, «Очередь Collector на диске»).
+  file_storage:
+    directory: ${env:GMAN_OTEL_STORAGE_DIR:-/var/lib/gman-otelcol}
+    create_directory: true
+    # The bbolt file does not shrink by itself: compact it after a backlog is drained and at start.
+    compaction:
+      on_start: true
+      on_rebound: true
+      # Defaults to /var/lib/otelcol/file_storage, outside the unit's writable paths.
+      directory: ${env:GMAN_OTEL_STORAGE_DIR:-/var/lib/gman-otelcol}
 processors:
   memory_limiter:
     check_interval: 1s
@@ -70,9 +84,21 @@ exporters:
       ca_file: /etc/gman/ca.pem
       cert_file: /etc/gman/client.pem
       key_file: /etc/gman/client-key.pem
-    sending_queue: {queue_size: 1000}
-    retry_on_failure: {enabled: true}
+    # Queue on disk, capped by size of the serialized data: ~256 MiB holds several hours of a busy host
+    # (README). When full, new batches are dropped (otelcol_exporter_enqueue_failed_metric_points).
+    sending_queue:
+      storage: file_storage
+      sizer: bytes
+      queue_size: 268435456
+    # Retry until the gateway is back (the default gives up after 5 minutes and drops the batch);
+    # the queue limit above bounds what is kept.
+    retry_on_failure:
+      enabled: true
+      initial_interval: 5s
+      max_interval: 60s
+      max_elapsed_time: 0
 service:
+  extensions: [file_storage]
   pipelines:
     metrics:
       receivers: [host_metrics, docker_stats, prometheus/gpu]

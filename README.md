@@ -127,7 +127,8 @@ GMAN_AGENT_TOKENS и пересоздайте API. Не используйте �
 | deploy/otel-gateway.prod.yaml | gateway за nginx: привязка host.id к сертификату клиента |
 | deploy/pki/issue.sh | пилотный CA, серверные и клиентские сертификаты, отзыв и CRL (openssl) |
 | deploy/backup/pg_backup.sh | pg_dump с проверкой архива и ротацией, выгрузка за пределы сервера, проверка восстановления |
-| deploy/systemd/ | юниты агента сбора (timer раз в минуту) и otelcol-contrib на узлах |
+| deploy/systemd/ | юниты агента сбора (timer раз в минуту) и otelcol-contrib на узлах (очередь в /var/lib/gman-otelcol) |
+| deploy/monitoring/probe.sh | внешняя проба сервера для cron на другой машине: healthz, API, сроки сертификатов |
 
 ### Сертификаты
 
@@ -259,7 +260,9 @@ journalctl -u gman-collect.service -n 20
 otelcol-contrib ставится из релизного пакета той же версии, что и gateway (0.162.0);
 его собственный otelcol-contrib.service отключите. Оба юнита получают доступ к Docker
 socket через группу docker — это эквивалент root на хосте. На NVIDIA-хостах не включайте
-PrivateDevices: nvidia-smi нужен /dev/nvidia*.
+PrivateDevices: nvidia-smi нужен /dev/nvidia*. Очередь отправки Collector хранится в
+/var/lib/gman-otelcol (StateDirectory юнита, владелец gman-otel, 0700) — раздел
+«Очередь Collector на диске».
 
 Агент доверяет пилотному CA через SSL_CERT_FILE в agent.env (Python с OpenSSL на Linux);
 либо добавьте ca.pem в системное хранилище (update-ca-certificates) и уберите строку.
@@ -671,6 +674,40 @@ kube-apiserver (envtest 1.36) через Collector с конфигурацией
 DCGM передаются без изменений и используются для GPU по pod-ам (см. «Процессы GPU в Kubernetes»).
 Логи приложений и traces не включены; Splunk не разворачивается.
 
+### Очередь Collector на диске
+
+Collector узлов (otel-agent.example.yaml и DaemonSet otel-k8s.yaml) держит очередь отправки
+в gateway на диске — расширение file_storage и `sending_queue: {storage: file_storage}`.
+Пакеты, которые gateway не принял (сервер GMan перезагружается, обновляется, недоступна
+сеть или nginx), переживают перезапуск Collector и самого узла и уходят, когда gateway
+снова доступен. Повторы не прекращаются (`max_elapsed_time: 0`; по умолчанию пакет
+выбрасывается через 5 минут), очередь ограничена объемом сериализованных данных
+(`sizer: bytes`, 256 МиБ на узел): при ~150 байт на точку это порядка 4 часов для хоста
+с ~50 контейнерами, точнее — по `otelcol_exporter_queue_size` на :8888 Collector. Когда
+очередь заполнена, новые пакеты отбрасываются (`otelcol_exporter_enqueue_failed_metric_points`).
+После разгрузки файл bbolt уплотняется (compaction on_rebound и при старте); каталог
+compaction задан явно — по умолчанию он /var/lib/otelcol, недоступный на запись.
+
+| Где | Каталог |
+| --- | --- |
+| Docker-хост (systemd) | /var/lib/gman-otelcol: StateDirectory= и ReadWritePaths= в gman-otelcol.service, другой путь — GMAN_OTEL_STORAGE_DIR в otelcol.env и свой ReadWritePaths |
+| Kubernetes (DaemonSet) | hostPath /var/lib/gman-otel (DirectoryOrCreate) на каждом узле; init-контейнер busybox отдает каталог uid 10001 (пользователь образа Collector), 0700. Очередь переживает перезапуск pod-а, rollout DaemonSet и перезагрузку узла |
+
+Ограничение: gateway отдает метрики Prometheus через pull-экспортер (prometheus, :8889),
+у него нет очереди и истории — после восстановления связи накопленные точки проходят
+через gateway за секунды, и Prometheus видит только последнее значение каждого ряда.
+Счетчики (CPU, сеть, диски, ECC) не теряют приращение за время простоя, но графики
+gauge-метрик за этот интервал остаются с пропуском. Восполнять историю можно будет только
+push-доставкой в Prometheus (remote write или OTLP receiver с out_of_order_time_window) —
+docs/next-steps.md. Поэтому и gateway без очереди на диске: ему нечего буферизовать.
+
+Проверено на otelcol-contrib 0.162.0 (бинарный релиз, `validate` всех конфигураций и
+прогон): Collector с конфигурацией очереди из otel-agent.example.yaml → gateway; gateway
+остановлен, 20 с метрик ушли в очередь, Collector перезапущен (очередь поднялась с диска),
+gateway запущен — все точки, собранные при остановленном gateway до перезапуска Collector,
+доставлены с исходными временными метками, очередь опустела. Юнит systemd и DaemonSet
+(права hostPath, init-контейнер) на реальных узлах не проверены; манифест проходит kubeconform.
+
 ### DCGM Exporter: набор полей
 
 Стандартный CSV счетчиков DCGM Exporter не включает ECC и причины снижения частот, на
@@ -847,6 +884,7 @@ Prometheus rules + Alertmanager, а не Grafana alerting: правила леж
 | GManTlsCertExpiring | до notAfter сертификата (portal, gateway, CA; каждого в цепочке) меньше 30 / 7 дней | warning / critical |
 | GManTlsCertExpired | сертификат просрочен | critical |
 | GManTlsFileError | файл из GMAN_TLS_WATCH_FILES 5 минут отсутствует, не читается или не разбирается | warning |
+| GManWatchdog | всегда (dead man's switch): уходит только во внешний сервис проверки, в портале не показывается | none |
 
 Источники данных. Хосты и GPU — телеметрия OTel (host_metrics, DCGM); где DCGM нет,
 температура, ECC и причины троттлинга берутся из nvidia-smi последнего снимка inventory
@@ -885,7 +923,8 @@ GMAN_ALERT_WEBHOOK_URL (JSON Alertmanager, send_resolved) и/или GMAN_ALERT_E
 GMAN_ALERT_EMAIL_FROM, GMAN_ALERT_SMTP_SMARTHOST (host:port), необязательными
 GMAN_ALERT_SMTP_USERNAME/GMAN_ALERT_SMTP_PASSWORD и GMAN_ALERT_SMTP_REQUIRE_TLS (true).
 Без них получатель пустой: алерты видны в Alertmanager (http://127.0.0.1:9093) и в
-портале, но никуда не отправляются. Пароль SMTP попадает в сгенерированный файл в томе
+портале, но никуда не отправляются. GMAN_ALERT_HEARTBEAT_URL — адрес внешней проверки
+для GManWatchdog (раздел «Внешний мониторинг сервера GMan»). Пароль SMTP попадает в сгенерированный файл в томе
 alertmanager с правами 0600.
 
 Портал: страница «Алерты» (GET /api/alerts читает Alertmanager по ALERTMANAGER_URL,
@@ -923,7 +962,47 @@ promtool check rules deploy/alerts/rules.yaml
 promtool test rules deploy/alerts/rules.test.yaml
 promtool check config deploy/prometheus.yaml
 deploy/alerts/alertmanager.sh --render /tmp/am.yml && amtool check-config /tmp/am.yml
+amtool config routes test --config.file=/tmp/am.yml alertname=GManWatchdog   # gman-heartbeat
 ```
+
+### Внешний мониторинг сервера GMan
+
+Алерты GMan вычисляет и отправляет сам сервер GMan: если он выключен, завис, кончился
+диск или пропала исходящая сеть, молчат и Prometheus, и Alertmanager. Поэтому сервер
+наблюдается снаружи двумя независимыми способами.
+
+**Dead man's switch.** Правило GManWatchdog (группа gman-heartbeat) срабатывает всегда.
+Маршрут Alertmanager для него стоит первым и без `continue`: алерт уходит только получателю
+gman-heartbeat (webhook POST на GMAN_ALERT_HEARTBEAT_URL, без resolved), отдельной группой,
+повтор каждые 5 минут (фактически 5–6: повтор отправляется на такте group_interval 1m).
+Inhibition его не касается (severity none), портал его не показывает (scope heartbeat).
+Внешний сервис — healthchecks.io (Simple check: период 5 минут, grace 10 минут), Dead
+Man's Snitch, push-монитор Uptime Kuma или аналог во внутренней сети — сам поднимает
+тревогу своими каналами, когда сигналы перестают приходить. Так ловится остановка
+сервера, Docker, Prometheus, вычисления правил, Alertmanager и его исходящей сети. URL
+проверки — секрет на уровне «кто знает, может слать сигналы»: храните в .env. Пустой
+GMAN_ALERT_HEARTBEAT_URL — сигнал никуда не отправляется.
+
+**Внешняя проба.** deploy/monitoring/probe.sh — для cron на другой машине (не на сервере
+GMan): `https://<host>/healthz` (сеть, DNS, nginx, сертификат портала),
+`https://<host>/api/auth/info` (API за nginx), сроки сертификатов, которые nginx отдает на
+443 и на OTLP-порту 4317 (по умолчанию тревога за 21 день; на 4317 nginx требует клиентский
+сертификат, но свой предъявляет). Молчит при успехе, при ошибке пишет в stderr и
+возвращает 1 — cron отправит вывод письмом; GMAN_PROBE_PING_URL дополнительно пингует
+сервис проверки (`<url>` при успехе, `<url>/fail` при ошибке, как у healthchecks.io), так
+что замечена будет и остановка самой пробы.
+
+```sh
+# crontab на машине мониторинга; ca.pem — пилотный CA (для корпоративного CA не нужен)
+*/5 * * * * GMAN_PROBE_CA=/etc/gman/ca.pem /usr/local/bin/gman-probe gman.example.org
+```
+
+Проверено: Prometheus 3.5.0 и Alertmanager 0.28.1 (бинарные релизы) с rules.yaml и
+конфигурацией, сгенерированной alertmanager.sh, — GManWatchdog приходит на тестовый
+приемник heartbeat через ~30 с после старта и повторяется через 5–6 минут, общий webhook
+его не получает; probe.sh — на локальных HTTPS-серверах с сертификатами пилотного CA
+(успех, сертификат на 10 дней, неизвестный CA, сервер недоступен, порт с обязательным
+клиентским сертификатом TLS 1.2 и 1.3), shellcheck.
 
 ## Проверка
 
@@ -944,8 +1023,9 @@ npm run build
 синтаксис Docker Compose; чтение AMD sysfs; браузерная проверка портала на тестовых
 данных с API на SQLite; bamboo_event.py против локального API. Тест test_deploy.py сверяет
 имена DCGM с deploy/dcgm-counters.csv, allowlist kube-state-metrics с правилами, дашбордами и шаблонами /api/workloads,
-runbook каждого алерта и переменные дашбордов в ссылках портала. Тесты проходят на SQLite
-(206 passed, 1 skipped); последний прогон на PostgreSQL 17 — до этих проверок (180 passed). Docker end-to-end, Kubernetes, NVIDIA/DCGM
+runbook каждого алерта, переменные дашбордов в ссылках портала, очередь Collector на диске и
+маршрут GManWatchdog. Тесты проходят на SQLite
+(208 passed, 1 skipped) и PostgreSQL 17 (209 passed). Docker end-to-end, Kubernetes, NVIDIA/DCGM
 и настоящий Bamboo еще не проверены.
 
 ## Хранилище
