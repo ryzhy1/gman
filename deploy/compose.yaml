@@ -26,23 +26,42 @@ services:
       GMAN_GRAFANA_URL: ${GMAN_GRAFANA_URL:-http://127.0.0.1:3000}
     depends_on:
       db: {condition: service_healthy}
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/healthz', timeout=3)"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 30s
     restart: unless-stopped
   portal:
     build: ../frontend
     ports: ["127.0.0.1:8080:80"]
-    depends_on: [api]
+    depends_on:
+      api: {condition: service_healthy}
+    healthcheck:
+      test: ["CMD", "wget", "-q", "-O", "/dev/null", "http://127.0.0.1/healthz"]
+      interval: 15s
+      timeout: 5s
+      retries: 3
     restart: unless-stopped
   otel:
     image: otel/opentelemetry-collector-contrib:0.162.0
     command: ["--config=/etc/otelcol/config.yaml"]
     volumes: ["./otel-gateway.yaml:/etc/otelcol/config.yaml:ro"]
     ports: ["127.0.0.1:4317:4317", "127.0.0.1:4318:4318"]
+    # The collector image is distroless (no shell/wget): no in-container healthcheck.
+    # Liveness is visible in Prometheus as up{job="otel"}.
     restart: unless-stopped
   prometheus:
     image: prom/prometheus:v3.5.0
     volumes: ["./prometheus.yaml:/etc/prometheus/prometheus.yml:ro", "prometheus:/prometheus"]
     command: ["--config.file=/etc/prometheus/prometheus.yml", "--storage.tsdb.retention.time=30d"]
     ports: ["127.0.0.1:9090:9090"]
+    healthcheck:
+      test: ["CMD", "wget", "-q", "-O", "/dev/null", "http://127.0.0.1:9090/-/healthy"]
+      interval: 15s
+      timeout: 5s
+      retries: 3
     restart: unless-stopped
   grafana:
     image: grafana/grafana:12.1.1
@@ -56,6 +75,12 @@ services:
       - ./grafana/dashboards:/etc/grafana/dashboards:ro
       - grafana:/var/lib/grafana
     ports: ["127.0.0.1:3000:3000"]
+    healthcheck:
+      test: ["CMD", "wget", "-q", "-O", "/dev/null", "http://127.0.0.1:3000/api/health"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 30s
     depends_on: [prometheus]
     restart: unless-stopped
 volumes:

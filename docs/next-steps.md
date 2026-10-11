@@ -15,6 +15,13 @@
    о хосте, узлы Kubernetes с ёмкостью и requests, OTel DaemonSet для кластера.
 4. Хранилище: нормализованная схема PostgreSQL, Alembic, история конфигураций по хешу,
    retention. Проверено на PostgreSQL 17.
+5. Production-развертывание (README «Production-развертывание»): deploy/compose.prod.yaml
+   (443/80 через nginx, OTLP 4317 с mTLS, Grafana на /grafana/, ротация логов),
+   deploy/nginx/gman.conf (TLS, HSTS, limit_req, client_max_body_size),
+   deploy/otel-gateway.prod.yaml (TLS + client_ca_file), deploy/pki/issue.sh (пилотный CA,
+   серверные и клиентские сертификаты), healthcheck сервисов в compose, сервис backup
+   (pg_dump с проверкой и ротацией) и процедура восстановления, systemd-юниты
+   gman-collect.service/.timer и gman-otelcol.service.
 
 Тесты: 31 passed, 1 skipped (тест конкурентности только для PostgreSQL).
 Frontend: `npm run build` проходит. Подробности — в README.
@@ -43,21 +50,35 @@ cd frontend && npm ci && npm run build && cd ..
 настоящий Bamboo. Метрики проверялись на otelcol-contrib 0.162.0, Prometheus 3.5.0,
 Grafana 12.1.1 с эмуляцией Docker API, kubelet и вывода DCGM.
 
+Production-развертывание проверено частично, без Docker daemon и Linux:
+- `docker compose config` для compose.yaml и compose.yaml + compose.prod.yaml (Compose
+  2.29.7; на 2.24.3 `!override` у ports молча не срабатывает — нужен ≥ 2.24.4);
+- issue.sh (shellcheck, выпуск в временный каталог, `openssl verify -purpose`);
+- gateway на otelcol-contrib 0.162.0: `validate`, доставка метрик от узлового Collector
+  с клиентским сертификатом, отказ без сертификата и с сертификатом чужого CA;
+- pg_backup.sh на PostgreSQL 17 (shellcheck, ротация, `--check`, отсутствие ротации при
+  сбое, `pg_restore --clean` в испорченную базу со схемой GMan);
+- urllib агента доверяет пилотному CA через SSL_CERT_FILE (Python с OpenSSL);
+- nginx-конфиги разобраны crossplane (контексты и число аргументов), не `nginx -t`.
+
+Не проверено: `nginx -t` и запуск nginx с TLS, подъем стека с override (healthcheck
+внутри образов: wget в grafana/prometheus, путь /grafana/api/health при
+serve_from_sub_path), Grafana за /grafana/ (вкл. Live/websocket), права uid 10001 на
+ключ gateway, systemd-юниты (`systemd-analyze verify`, sandboxing с docker/nvidia-smi/
+kubectl), сервис backup в контейнере (busybox sh/find).
+
 Первое, что стоит сделать на машине с Docker: `docker compose ... up --build`,
-пройти README «Локальный запуск», запустить агент на хосте с NVIDIA.
+пройти README «Локальный запуск», затем «Production-развертывание» на тестовом сервере,
+запустить агент на хосте с NVIDIA.
 
 ## Незавершенные задачи
 
 Эти задачи были начаты параллельными агентами и прерваны; изменений от них в коде нет.
 
-1. Production-развертывание. Агенты требуют HTTPS, а стек слушает только 127.0.0.1
-   без TLS; узловые Collector настроены на mTLS, а у gateway нет TLS receiver —
-   удаленные серверы пока не могут доставлять данные. Нужно: HTTPS для портала/API
-   (nginx), OTLP receiver gateway с TLS и проверкой клиентских сертификатов
-   (client_ca_file), compose override для production, скрипт выпуска пилотного CA
-   и сертификатов, limit_req и body size в nginx, healthcheck сервисов в compose,
-   бэкап PostgreSQL (pg_dump с ротацией) и процедура восстановления, systemd-юниты
-   для агента сбора (timer раз в минуту) и otelcol-contrib.
+1. ~~Production-развертывание~~ — сделано (см. «Что сделано», п. 5, и «Не проверено»).
+   Остается: проверка на реальном сервере, привязка клиентского сертификата OTLP
+   к host.id (сейчас любой сертификат пилотного CA принимается за любой узел), отзыв
+   сертификатов (CRL), выгрузка бэкапов за пределы сервера.
 2. Надежность агента сбора (agent/collect.py, только stdlib): ограниченный spool
    неотправленных снимков, повторы с backoff, flock против пересечения запусков,
    режим `--watch` по `docker events` с debounce, чтобы короткие перезапуски и

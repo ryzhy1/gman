@@ -64,11 +64,147 @@ Prometheus: http://127.0.0.1:9090. Grafana: http://127.0.0.1:3000 (admin /
 GRAFANA_ADMIN_PASSWORD из .env). Порты привязаны к loopback. Если .env создан
 предыдущей версией, добавьте в него GRAFANA_ADMIN_PASSWORD вручную.
 OTLP gateway принимает локально 4317/4318 без TLS: это конфигурация стенда.
-Не открывать ее удаленным хостам без настройки аутентифицированного TLS ingress.
+Для удаленных серверов используйте production-override (раздел ниже).
 
 init_env.py не перезаписывает существующий .env. Начальные source_id:
 server-01 и cluster-01; для остальных узлов добавьте отдельные токены в
 GMAN_AGENT_TOKENS и пересоздайте API. Не используйте один токен для всех серверов.
+
+## Production-развертывание
+
+Один сервер GMan за nginx с TLS; удаленные узлы отправляют inventory по HTTPS и метрики
+по OTLP с mTLS. Нужен Docker Compose не ниже 2.24.4 (теги `!override`/`!reset`;
+в 2.24.3 `!override` молча игнорируется, и порты стенда не снимаются).
+
+| Файл | Назначение |
+| --- | --- |
+| deploy/compose.prod.yaml | override: публикация 80/443 и 4317, сертификаты, бэкап, ротация логов |
+| deploy/nginx/gman.conf | HTTPS портала/API/Grafana, limit_req, client_max_body_size |
+| deploy/otel-gateway.prod.yaml | OTLP gRPC/HTTP только с TLS и проверкой клиента (client_ca_file) |
+| deploy/pki/issue.sh | пилотный CA, серверные и клиентские сертификаты (openssl) |
+| deploy/backup/pg_backup.sh | pg_dump с проверкой архива и ротацией |
+| deploy/systemd/ | юниты агента сбора (timer раз в минуту) и otelcol-contrib на узлах |
+
+### Сертификаты
+
+На машине администратора (ключ CA на сервер не копируется):
+
+```sh
+deploy/pki/issue.sh ca
+deploy/pki/issue.sh server portal  DNS:gman.example.org
+deploy/pki/issue.sh server gateway DNS:gman.example.org
+deploy/pki/issue.sh client server-01        # по одному на каждый узел
+```
+
+Файлы попадают в deploy/pki/out (исключен из репозитория, переопределяется PKI_DIR).
+Существующие файлы не перезаписываются; для перевыпуска удалите старые явно.
+Конечные сертификаты действуют 397 дней (CERT_DAYS), CA — 5 лет (CA_DAYS).
+Если есть корпоративный CA, используйте его сертификаты с теми же именами файлов.
+
+На сервер GMan в каталог GMAN_TLS_DIR (по умолчанию deploy/pki/out) кладутся только
+portal.pem, portal-key.pem, gateway.pem, gateway-key.pem и ca.pem. Collector в контейнере
+работает под uid 10001, поэтому: `sudo chown 10001 gateway-key.pem` (права 0600).
+
+### Запуск
+
+В .env добавьте `GMAN_PUBLIC_HOST=gman.example.org` (имя из сертификата портала).
+Необязательные: GMAN_BIND_ADDRESS и GMAN_OTLP_BIND_ADDRESS (по умолчанию 0.0.0.0),
+GMAN_TLS_DIR, GMAN_BACKUP_DIR (deploy/backups), GMAN_BACKUP_KEEP (14),
+GMAN_BACKUP_INTERVAL_SECONDS (86400).
+
+```sh
+docker compose --env-file .env -f deploy/compose.yaml -f deploy/compose.prod.yaml up --build -d
+docker compose --env-file .env -f deploy/compose.yaml -f deploy/compose.prod.yaml ps
+```
+
+Снаружи доступны: 443 (портал, /api, Grafana на /grafana/), 80 (только редирект на HTTPS)
+и 4317 (OTLP gRPC с mTLS). Prometheus остается на 127.0.0.1:9090, PostgreSQL и Grafana
+не публикуются. Ссылки Grafana в портале ведут на https://GMAN_PUBLIC_HOST/grafana.
+Ограничьте 443 и 4317 межсетевым экраном подсетями серверов и пользователей.
+
+nginx: HSTS, TLS 1.2/1.3; тело запроса до 1 МБ, для POST /api/inventory — до 20 МБ;
+limit_req по IP: /api 20 r/s (burst 40), /api/inventory 2 r/s (burst 10), Grafana
+50 r/s (burst 100), не более 64 соединений с IP; превышение — 429. Если агенты выходят
+через общий NAT, увеличьте лимит зоны gman_ingest.
+
+Gateway принимает только клиентов с сертификатом пилотного CA. Принадлежность
+сертификата хосту (CN против GMAN_HOST_ID) не проверяется: любой выпущенный клиентский
+сертификат может отправлять метрики за любой host.id. Отзыв — перевыпуск CA или
+отдельный CA на группу узлов; CRL пилот не поддерживает. Gateway перечитывает
+сертификаты раз в час без перезапуска; nginx — после `docker compose ... restart portal`.
+
+Healthcheck есть у db, api, portal, prometheus, grafana и backup (свежий бэкап моложе двух
+интервалов). Образ otelcol distroless, проверки внутри контейнера нет: следите за
+up{job="otel"} в Prometheus.
+
+### Узлы
+
+На каждом Docker-хосте (Linux, systemd):
+
+```sh
+sudo useradd --system --no-create-home --shell /usr/sbin/nologin gman-agent
+sudo useradd --system --no-create-home --shell /usr/sbin/nologin gman-otel
+sudo install -d -m 0755 /opt/gman/agent /etc/gman
+sudo install -m 0644 agent/collect.py /opt/gman/agent/
+sudo install -m 0600 deploy/systemd/agent.env.example /etc/gman/agent.env     # заполнить
+sudo install -m 0644 deploy/systemd/otelcol.env.example /etc/gman/otelcol.env # заполнить
+sudo install -m 0644 deploy/otel-agent.example.yaml /etc/gman/otel-agent.yaml
+sudo install -m 0644 ca.pem /etc/gman/ca.pem
+sudo install -m 0644 client-server-01.pem /etc/gman/client.pem
+sudo install -m 0640 -g gman-otel client-server-01-key.pem /etc/gman/client-key.pem
+sudo install -m 0644 deploy/systemd/gman-*.service deploy/systemd/gman-*.timer /etc/systemd/system/
+sudo systemctl daemon-reload
+sudo systemctl enable --now gman-collect.timer gman-otelcol.service
+journalctl -u gman-collect.service -n 20
+```
+
+otelcol-contrib ставится из релизного пакета той же версии, что и gateway (0.162.0);
+его собственный otelcol-contrib.service отключите. Оба юнита получают доступ к Docker
+socket через группу docker — это эквивалент root на хосте. На NVIDIA-хостах не включайте
+PrivateDevices: nvidia-smi нужен /dev/nvidia*.
+
+Агент доверяет пилотному CA через SSL_CERT_FILE в agent.env (Python с OpenSSL на Linux);
+либо добавьте ca.pem в системное хранилище (update-ca-certificates) и уберите строку.
+GMAN_SOURCE_ID в agent.env и GMAN_HOST_ID в otelcol.env должны совпадать.
+Timer запускает сбор раз в минуту со случайной задержкой до 15 с; oneshot-юнит не
+стартует повторно, пока идет предыдущий запуск, а зависший запуск снимается через 55 с.
+Для Kubernetes-агента: GMAN_RUNTIME=kubernetes и KUBECONFIG в agent.env (файл читаем
+для gman-agent), уберите SupplementaryGroups=docker из юнита.
+
+### Резервное копирование и восстановление
+
+Сервис backup выполняет `pg_dump --format=custom` сразу при старте и затем раз в сутки
+в GMAN_BACKUP_DIR на хосте (по умолчанию deploy/backups; файлы
+gman-YYYYMMDDTHHMMSSZ.dump, права 0600). Архив проверяется `pg_restore --list`, и только
+после этого удаляются файлы сверх GMAN_BACKUP_KEEP; неудачный дамп ничего не ротирует.
+Копируйте каталог за пределы сервера: бэкап на том же диске не защищает от его потери.
+Внеочередной бэкап, например перед обновлением:
+
+```sh
+C="docker compose --env-file .env -f deploy/compose.yaml -f deploy/compose.prod.yaml"
+$C run --rm backup --once
+```
+
+Восстановление (схема и данные заменяются целиком; версия Alembic входит в дамп):
+
+```sh
+$C stop portal api
+$C run --rm --entrypoint pg_restore backup \
+  --clean --if-exists --no-owner --exit-on-error -d gman /backups/gman-YYYYMMDDTHHMMSSZ.dump
+$C start api portal
+```
+
+Проверка дампа без изменения рабочей базы — восстановление в отдельную:
+
+```sh
+$C exec db createdb -U gman gman_restore_check
+$C run --rm --entrypoint pg_restore backup --no-owner -d gman_restore_check /backups/<файл>
+$C exec db psql -U gman -d gman_restore_check -c 'select count(*) from services'
+$C exec db dropdb -U gman gman_restore_check
+```
+
+Prometheus и Grafana не бэкапятся: метрики хранятся 30 дней, дашборды и datasource
+описаны в deploy/grafana. Сертификаты и .env храните отдельно, в бэкап они не входят.
 
 ## Регистрация сервиса
 
@@ -113,7 +249,8 @@ python3 agent/collect.py --runtime docker --source-id server-01
 Без --send выводится нормализованный JSON, без отправки в сеть. Для доставки
 задайте GMAN_URL и GMAN_AGENT_TOKEN этого source_id и добавьте --send.
 Для удаленного адреса скрипт требует HTTPS. Не передавайте токены в аргументах CLI.
-Настройте запуск раз в минуту через ваш планировщик; не допускайте пересечения запусков.
+Запуск раз в минуту без пересечений — systemd timer из deploy/systemd (раздел
+«Production-развертывание»).
 При ошибке полного сбора снимок не отправляется, чтобы не отметить все контейнеры удаленными.
 
 Для Kubernetes нужен kubectl с отдельным read-only kubeconfig:
@@ -227,8 +364,8 @@ GMAN_RETENTION_DAYS (по умолчанию 180, 0 — отключить) уд
 ## Границы пилота
 
 Это основа для развития, не завершенный production PaaS. Еще нужны SSO/RBAC,
-backup/restore, ограничение размера/частоты входящих запросов на ingress,
-agent spool/retry, поток runtime-событий и
+проверка production-стека и восстановления из бэкапа на реальном сервере, привязка
+клиентских сертификатов OTLP к host.id, agent spool/retry, поток runtime-событий и
 Kubernetes audit, нормализованные controllers/nodes, requests/probes/security config,
 проверка источников ссылок и тонкая редакция чувствительных строк конфигурации.
 Текущая история — изменения между снимками: короткие события между опросами
