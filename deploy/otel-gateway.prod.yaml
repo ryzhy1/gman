@@ -1,28 +1,18 @@
-# Production gateway: OTLP only over mutual TLS. Node Collectors must present a client
-# certificate signed by the pilot CA (deploy/pki/issue.sh client <host>).
-# Certificates are mounted by deploy/compose.prod.yaml into /etc/otelcol/tls.
-# The key must be readable by the container user (uid 10001), see README.
+# Production gateway. Node Collectors connect to nginx (deploy/nginx/gman.conf, port 4317), which terminates
+# mutual TLS (pilot CA + crl.pem) and forwards OTLP gRPC here over the internal Compose network with the
+# verified certificate identity in request metadata:
+#   x-gman-otlp-host     CN of an OU=client certificate (deploy/pki/issue.sh client <host.id>)
+#   x-gman-otlp-cluster  CN of an OU=cluster certificate (deploy/pki/issue.sh cluster <cluster>)
+# nginx always overwrites both headers, so a client cannot set them. This port is not published:
+# anything that reaches it directly bypasses mTLS, and its data is dropped for lacking an identity.
 receivers:
   otlp:
     protocols:
       grpc:
         endpoint: '0.0.0.0:4317'
         max_recv_msg_size_mib: 16
-        tls:
-          cert_file: /etc/otelcol/tls/gateway.pem
-          key_file: /etc/otelcol/tls/gateway-key.pem
-          client_ca_file: /etc/otelcol/tls/ca.pem
-          min_version: '1.2'
-          # Picks up reissued certificates without a restart.
-          reload_interval: 1h
-      http:
-        endpoint: '0.0.0.0:4318'
-        tls:
-          cert_file: /etc/otelcol/tls/gateway.pem
-          key_file: /etc/otelcol/tls/gateway-key.pem
-          client_ca_file: /etc/otelcol/tls/ca.pem
-          min_version: '1.2'
-          reload_interval: 1h
+        # Request headers become client metadata, read by resource/identity below.
+        include_metadata: true
 extensions:
   # Liveness endpoint on the internal network only (not published).
   health_check:
@@ -32,6 +22,27 @@ processors:
     check_interval: 1s
     limit_mib: 384
     spike_limit_mib: 96
+  # Certificate identity into temporary resource attributes. A missing header leaves the attribute unset.
+  resource/identity:
+    attributes:
+      - {key: gman.cert.host, from_context: metadata.x-gman-otlp-host, action: upsert}
+      - {key: gman.cert.cluster, from_context: metadata.x-gman-otlp-cluster, action: upsert}
+  # Host certificate: host.id must equal the certificate CN, otherwise the data is dropped (not rewritten,
+  # so a misconfigured GMAN_HOST_ID shows up as missing metrics and the telemetry alert, not as another host).
+  # Neither identity: dropped. Drops are counted in otelcol_processor_filter_datapoints_filtered (:8888).
+  filter/identity:
+    error_mode: ignore
+    metrics:
+      metric:
+        - 'resource.attributes["gman.cert.host"] == nil and resource.attributes["gman.cert.cluster"] == nil'
+        - 'resource.attributes["gman.cert.host"] != nil and resource.attributes["host.id"] != resource.attributes["gman.cert.host"]'
+  # Cluster certificate (shared by the DaemonSet pods, host.id is the node name and is not bound):
+  # k8s.cluster.name is always the certificate's cluster. Then the temporary attributes are removed.
+  resource/cluster:
+    attributes:
+      - {key: k8s.cluster.name, from_attribute: gman.cert.cluster, action: upsert}
+      - {key: gman.cert.host, action: delete}
+      - {key: gman.cert.cluster, action: delete}
   batch: {}
 exporters:
   prometheus:
@@ -44,5 +55,6 @@ service:
   pipelines:
     metrics:
       receivers: [otlp]
-      processors: [memory_limiter, batch]
+      # Identity checks run before batch: batch drops the request metadata.
+      processors: [memory_limiter, resource/identity, filter/identity, resource/cluster, batch]
       exporters: [prometheus]

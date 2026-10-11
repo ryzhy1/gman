@@ -7,6 +7,7 @@ import { ConfigHistory } from './configs';
 import { ServiceEditor } from './edit';
 import { ClusterCard, HostCard } from './hardware';
 import { date, grafanaLink, stale, syncServerClock } from './format';
+import { Releases } from './releases';
 import { Resources } from './resources';
 import './style.css';
 
@@ -69,6 +70,7 @@ function App() {
   const [selected, setSelected] = useState('');
   const [tab, setTab] = useState('Обзор');
   const [environment, setEnvironment] = useState(ALL);
+  const [release, setRelease] = useState<number | null>(null);
   const [range, setRange] = useState('1h');
   const [splunk, setSplunk] = useState<SplunkLinks | null>(null);
 
@@ -163,6 +165,10 @@ function App() {
   const gpuCount = hostSources.reduce((n, s) => n + s.gpus.length
     + (s.nodes ?? []).reduce((m, x) => m + x.gpu_capacity, 0), 0);
   const openService = (id: string) => { if (data?.services.some(s => s.id === id)) { setPage('Сервисы'); setSelected(id); setTab('Обзор'); } };
+  const openRelease = (id: number, serviceId: string) => {
+    if (!data?.services.some(s => s.id === serviceId)) return;
+    setPage('Сервисы'); setSelected(serviceId); setTab('Релизы'); setRelease(id);
+  };
   const open = (p: string) => { setPage(p); setSelected(''); setQuery(''); };
   const grafana = data?.grafana_url ?? '';
   // The card's environment and period travel to the dashboard; an explicit catalog link is used as is.
@@ -230,13 +236,13 @@ function App() {
           </section>}
 
           {service && <>
-            <button className="back" onClick={() => setSelected('')}>← Все сервисы</button>
+            <button className="back" onClick={() => { setSelected(''); setRelease(null); }}>← Все сервисы</button>
             <div className="links">{LINKS.map(([k, label]) => links![k]
               ? <a key={k} href={links![k]} target="_blank" rel="noopener noreferrer">{label} ↗</a>
               : k === 'splunk' ? null : <span key={k} title="Ссылка не задана в каталоге">{label} · не настроен</span>)}
             </div>
-            <div className="tabs">{['Обзор', 'Ресурсы', 'Экземпляры', 'Конфигурация', 'История'].map(t =>
-              <button key={t} className={tab === t ? 'chosen' : ''} onClick={() => setTab(t)}>{t}</button>)}
+            <div className="tabs">{['Обзор', 'Ресурсы', 'Экземпляры', 'Конфигурация', 'Релизы', 'История'].map(t =>
+              <button key={t} className={tab === t ? 'chosen' : ''} onClick={() => { setTab(t); setRelease(null); }}>{t}</button>)}
             </div>
             <section>
               {tab === 'Обзор' && <>
@@ -260,7 +266,9 @@ function App() {
                 <ConfigHistory key={service.id} token={token} serviceId={service.id}
                   instances={all.filter(i => i.service_id === service.id)} refreshKey={data.server_time} />
               </>}
-              {tab === 'История' && <History token={token} serviceId={service.id} refreshKey={data.server_time} />}
+              {tab === 'Релизы' && <Releases token={token} serviceId={service.id} environment={environment === ALL ? undefined : environment}
+                refreshKey={data.server_time} selected={release} onSelect={setRelease} />}
+              {tab === 'История' && <History token={token} serviceId={service.id} refreshKey={data.server_time} onRelease={openRelease} />}
             </section>
           </>}
 
@@ -273,7 +281,7 @@ function App() {
 
           {page === 'Алерты' && <Alerts token={token} refreshKey={data.server_time} />}
 
-          {page === 'Аудит' && <section><h2>Журнал событий</h2><History token={token} refreshKey={data.server_time} /></section>}
+          {page === 'Аудит' && <section><h2>Журнал событий</h2><History token={token} refreshKey={data.server_time} onRelease={openRelease} /></section>}
 
           <footer>Обновление каждые 30 секунд · Получено: {date(data.server_time)} · Время браузера: {Intl.DateTimeFormat().resolvedOptions().timeZone}</footer>
         </>}

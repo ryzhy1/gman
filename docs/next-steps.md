@@ -5,7 +5,7 @@
 
 ## Что сделано
 
-1. Каталог и inventory: нормализованная схема PostgreSQL (Alembic, миграции 0001–0003),
+1. Каталог и inventory: нормализованная схема PostgreSQL (Alembic, миграции 0001–0004),
    прием снимков Docker-хостов и Kubernetes-кластера с токеном на источник, состояние
    отдельно от health, происхождение по allowlist меток, история изменений по снимкам,
    retention. Исправлены баги из ревью (race `docker ps`/`inspect`, нулевое время старта,
@@ -35,7 +35,32 @@
    Grafana на /grafana/, ротация логов), deploy/pki/issue.sh, бэкап pg_dump с проверкой
    и ротацией, процедура восстановления, systemd-юниты агента и Collector.
 10. docs/architecture.md переписан по фактической реализации.
-11. Метрики и алерты Kubernetes и GPU: kube-state-metrics v2.20.0 (deploy/kube-state-metrics.yaml,
+11. Релизы (миграция 0004): событие Bamboo сверяется с runtime по image digest или
+    версии/тегу и окну времени; статусы started → rolling-out → succeeded / failed
+    (Bamboo failed, тайм-аут, crash loop/OOM новых экземпляров) / superseded; runtime-изменения
+    релиза атрибутируются инициатору из Bamboo; тайм-ауты в housekeeping после снимков;
+    `GET /api/releases`, `/api/releases/{id}`, вкладка «Релизы», ссылка из истории.
+    bamboo_event.py сверен с документацией Bamboo: deployment_id из deploymentResultId
+    (повторный деплой того же релиза больше не склеивается с первым), имя пользователя —
+    только при ручном триггере, deploy.version и planRepository.1.revision как запасные.
+
+12. Runtime-история: `--watch` для Kubernetes (list + watch pods и pod Events от resourceVersion,
+    BOOKMARK, relist на 410 Gone, backoff, промежуточный снимок для pod-ов, удаленных между
+    снимками); Kubernetes Events сервисов каталога в истории без message (allowlist причин,
+    дедупликация по uid + count/времени, миграция 0005 runtime_event_marks); Docker OOM под
+    restart policy по событию `oom` → last_oom_at экземпляра, событие instance-oom, метрика
+    gman_instance_last_oom_timestamp_seconds и третье условие GManInstanceOOMKilled; явная
+    отметка пробела в истории (history-gap: молчание > GMAN_HISTORY_GAP_SECONDS или
+    переполнение spool агента) с плашкой «Данные за период могут быть неполными» в портале.
+
+13. Безопасность и эксплуатация: OTLP mTLS завершает nginx (CA + CRL) и передает CN в gateway,
+    gateway отбрасывает метрики с host.id ≠ CN сертификата хоста и ставит k8s.cluster.name из
+    сертификата кластера; issue.sh `cluster`, `revoke`, `crl`; GPU DaemonSet на projected
+    token с audience `gman` и TokenReview (GMAN_K8S_TOKEN_REVIEW, backend/app/k8s_tokens.py),
+    узел из привязки токена; pg_backup.sh: хук выгрузки BACKUP_UPLOAD_CMD и проверка
+    восстановления во временную базу (`--restore-check`, раз в 7 дней), оба в healthcheck.
+
+14. Метрики и алерты Kubernetes и GPU: kube-state-metrics v2.20.0 (deploy/kube-state-metrics.yaml,
     минимальный RBAC, allowlist ресурсов и метрик) через Collector узла его pod-а; алерты
     workloads (недоступные реплики, застрявший rollout, Pending, упавшая Job, misscheduled
     DaemonSet, молчащий kube-state-metrics) с сервисом из меток pod-ов и inhibition; раздел
@@ -46,8 +71,12 @@
     GManTelemetryGatewayDown срабатывал бы на `up` упавшего DCGM Exporter, переотданный gateway.
 
 Проверено:
-- Тесты: 134 passed на PostgreSQL 17 (включая запросы истории конфигураций и тест
-  конкурентности), 133 passed и 1 skipped на SQLite. Frontend: `npm run build`.
+- Тесты: 195 passed на PostgreSQL 17 (включая запросы истории конфигураций и тест
+  конкурентности), 194 passed и 1 skipped на SQLite; миграции upgrade → downgrade base →
+  upgrade и `alembic check` на PostgreSQL 17. Frontend: `npm run build`.
+- Kubernetes watch и Events — на fixtures потоков (ADDED/MODIFIED/DELETED, BOOKMARK, ERROR 410,
+  сбой kubectl, HTTP 410 in-cluster), Docker `oom` — на fixtures событий; правило OOM —
+  `promtool test rules` (Prometheus 3.5.0).
 - Метрики: otelcol-contrib 0.162.0, Prometheus 3.5.0, Grafana 12.1.1 (бинарные релизы) с
   эмуляцией Docker Engine API, kubelet и вывода DCGM: имена метрик, метки, запросы API
   и дашбордов, provisioning Grafana.
@@ -67,6 +96,19 @@
   (ротация, `--check`, восстановление `pg_restore --clean`); доверие агента пилотному CA
   через SSL_CERT_FILE; nginx-конфиги разобраны crossplane.
 - SSO — против mock IdP в тестах; bamboo_event.py — против локального API; чтение AMD sysfs.
+- Привязка OTLP к сертификату: nginx 1.31 (OTLP-блок deploy/nginx/gman.conf) + otelcol-contrib
+  0.162.0 (deploy/otel-gateway.prod.yaml) + отправляющие otelcol с сертификатами issue.sh:
+  server-01 → host.id=server-01 принят; сертификат server-01 с host.id=server-02 и
+  поддельным заголовком x-gman-otlp-host — отброшен; сертификат кластера — принят,
+  k8s.cluster.name заменен на CN; отозванный (CRL) и чужой CA — 400 в nginx; прямо в gateway
+  без метаданных — отброшен.
+- TokenReview: настоящие kube-apiserver + etcd 1.36.2 (envtest) с RBAC, примененный
+  deploy/gpu-attribution-k8s.yaml, bound token pod-а на узле gpu-1 через API GMan: свой
+  узел — 200, другой узел и docker-host — 403, токен с audience API, чужой SA, не привязанный
+  к pod-у и токен удаленного pod-а — 401, статический токен — 200. Ветка Kubernetes < 1.30
+  (get pod) — только в тестах с MockTransport.
+- pg_backup.sh на PostgreSQL 17: выгрузка (cp), `--restore-check` (успех, битый дамп, дамп без
+  схемы), healthcheck при неудачной выгрузке и проверке.
 
 ## Подготовка на новой машине
 
@@ -109,17 +151,23 @@ deploy/alerts/alertmanager.sh --render /tmp/am.yml && amtool check-config /tmp/a
   Docker daemon), healthcheck внутри образов (wget в grafana/prometheus/alertmanager,
   /grafana/api/health при serve_from_sub_path), entrypoint alertmanager.sh под busybox sh
   и права тома /alertmanager, сервис backup в контейнере (busybox sh/find), права uid 10001
-  на ключ gateway; агент и `--watch` против настоящего Docker daemon.
+  на ключ gateway; агент и `--watch` против настоящего Docker daemon (включая событие `oom`
+  при restart policy и OOM kill дочернего процесса).
 - nginx: `nginx -t` и запуск с TLS, Grafana за /grafana/ (включая Live/websocket),
   limit_req на реальной нагрузке.
 - systemd: `systemd-analyze verify`, sandboxing с docker/nvidia-smi/kubectl, timer на Linux.
-- Восстановление из бэкапа на реальном сервере.
+- Восстановление из бэкапа на реальном сервере; выгрузка на настоящий сетевой ресурс/S3;
+  `--restore-check` внутри контейнера postgres:17-alpine (busybox find/sed).
+- OTLP через nginx в контейнере nginx:1.28-alpine и Compose-сеть (проверено нативными
+  бинарниками); TokenReview против настоящего кластера (не envtest) и Kubernetes < 1.30;
+  projected token и права файла при runAsUser 65534 в настоящем pod-е.
 - NVIDIA/DCGM: настоящие поля DCGM (XID, ECC, CLOCKS_EVENT_REASONS, SLOWDOWN_TEMP, метки
   pod/namespace/container), запуск exporter с deploy/dcgm-counters.csv (неизвестное версии
   DCGM поле не дает ему стартовать), пороги A100 в gman-gpu-thresholds против
   `nvidia-smi -q -d TEMPERATURE`, nvidia-smi на реальных драйверах, сверка показателей.
 - Kubernetes/CRI-O: k8s_attributes, обнаружение DCGM и kube-state-metrics, RBAC,
-  kubelet_stats, настоящие контроллеры (статусы rollout, Pending) в реальном кластере; для kubernetes-node — nvidia-smi через NVIDIA runtime без запроса GPU, список
+  kubelet_stats, настоящие контроллеры (статусы rollout, Pending) в реальном кластере; `--watch` кластера (потоковый вывод `kubectl get --raw` для watch, частота
+  BOOKMARK, 410 после compaction, нагрузка на API server), формат и series реальных Events; для kubernetes-node — nvidia-smi через NVIDIA runtime без запроса GPU, список
   процессов от non-root, PSA privileged для hostPID, формат cgroup на CRI-O/containerd.
 - SSO с настоящим IdP (Keycloak, AD FS, Okta): claim групп, end_session, cookie `__Host-`.
 - Интеграции: настоящий Bamboo (переменные `bamboo_*`), Splunk (индексы и поля),
@@ -137,34 +185,40 @@ deploy/alerts/alertmanager.sh --render /tmp/am.yml && amtool check-config /tmp/a
 ## Дальше по плану
 
 Безопасность и эксплуатация:
-- Привязать клиентский сертификат OTLP к host.id (CN/SAN против GMAN_HOST_ID на gateway);
-  сейчас любой сертификат пилотного CA отправляет метрики за любой узел.
-- Отзыв сертификатов (CRL) вместо перевыпуска CA.
-- Отдельный Secret или projected token на каждый GPU-узел в deploy/gpu-attribution-k8s.yaml:
-  сейчас токены всех узлов смонтированы в каждый pod (узел может слать снимки GPU за другой
-  GPU-узел; API лишь требует source_id = `<cluster>.<hostname>`). Обход сейчас — systemd на узле.
-- Выгрузка бэкапов за пределы сервера; регулярная проверка восстановления.
+- ~~Привязать клиентский сертификат OTLP к host.id~~ Сделано (п. 13: nginx + gateway). Остается:
+  сертификат кластера общий для DaemonSet, host.id узлов им не привязан; вариант —
+  сертификат на pod через cert-manager csi-driver (CN = имя узла, `OU=client`).
+- ~~Отзыв сертификатов (CRL) вместо перевыпуска CA~~ Сделано (п. 13: issue.sh revoke/crl, ssl_crl).
+  Напоминание о переподписи CRL до nextUpdate пока только в документации.
+- ~~Projected token на каждый GPU-узел в deploy/gpu-attribution-k8s.yaml~~ Сделано (п. 13, TokenReview).
+- ~~Выгрузка бэкапов за пределы сервера; регулярная проверка восстановления~~ Сделано (п. 13)
+  (BACKUP_UPLOAD_CMD, `--restore-check`); подключить реальное хранилище.
 - Внешний мониторинг самого сервера GMan; постоянная очередь Collector на диске (file_storage).
 
 Inventory и аудит:
-- `--watch` для Kubernetes (watch API вместо опроса раз в минуту), Kubernetes Events.
+- ~~`--watch` для Kubernetes (watch API вместо опроса раз в минуту), Kubernetes Events.~~ Сделано (п. 12).
 - Kubernetes audit log для API caller; аудит или аутентифицированный посредник для
   атрибуции ручных запусков Docker.
-- Корреляция событий Bamboo с runtime (digest, время) и сущность релиза со статусами.
-- Нормализованные controllers/workloads и nodes; явная отметка пробела в истории.
-- OOM в Docker с restart policy ловить по событию `oom` из `--watch`.
+- ~~Корреляция событий Bamboo с runtime (digest, время) и сущность релиза со статусами.~~ Сделано (п. 11).
+- Нормализованные controllers/workloads и nodes; ~~явная отметка пробела в истории~~ (сделано, п. 12).
+- ~~OOM в Docker с restart policy ловить по событию `oom` из `--watch`.~~ Сделано (п. 12).
+- Kubernetes Events узлов (OOMKilling от node-problem-detector, NodeNotReady) — сейчас только
+  события pod-ов; сопоставление OOM узла с pod-ом требует разбора message.
+- OOM в Docker без `--watch` (timer) виден, только пока контейнер остановлен.
 
 Метрики и алерты:
-- ~~kube-state-metrics (desired/available replicas, Pending, rollout).~~ Сделано (п. 11).
+- ~~kube-state-metrics (desired/available replicas, Pending, rollout).~~ Сделано (п. 14).
 - ~~Пороги температуры по моделям GPU; включить поля ECC и CLOCKS_EVENT_REASONS в CSV
-  счетчиков DCGM Exporter.~~ Сделано (п. 11); сверить пороги A100 и добавить модели пилота.
+  счетчиков DCGM Exporter.~~ Сделано (п. 14); сверить пороги A100 и добавить модели пилота.
 - Подключить реальный канал уведомлений.
-- ~~Ссылки Grafana с окружением и периодом карточки.~~ Сделано (п. 11).
+- ~~Ссылки Grafana с окружением и периодом карточки.~~ Сделано (п. 14).
 - Состояние workloads из kube-state-metrics в карточках портала (сейчас — алерты и Grafana);
   rollout StatefulSet с OnDelete и DaemonSet по updated/desired.
 
 Интеграции:
 - Согласовать индексы и имена полей Splunk и задать их в GMAN_SPLUNK_*.
-- Проверить переменные `bamboo_*` на используемой версии Bamboo.
+- Проверить переменные `bamboo_*` на используемой версии Bamboo: формат resultsUrl деплоя
+  (deploymentResultId), наличие ManualBuildTriggerReason.userName и triggerReason.key в
+  deployment job; совпадение окружения Bamboo с gman.environment.
 
 Дальнейший PaaS — architecture.md «Дальнейший PaaS».

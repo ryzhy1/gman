@@ -3,24 +3,85 @@
 # this DaemonSet runs agent/collect.py --runtime kubernetes-node on every GPU node in the host PID namespace.
 # Each node is its own GMan source "<cluster>.<node>" without instances: pods stay with the cluster source.
 #
+# Identity: each pod authenticates with its own bound service account token (projected volume, audience
+# "gman", 1 hour, rotated by the kubelet). The GMan API verifies it with this cluster's TokenReview API and
+# takes the node from the token's pod binding (Kubernetes >= 1.30: node-name claim; older: get the bound pod),
+# so a pod may send only the kubernetes-node snapshot of the node it runs on. No shared Secret with tokens.
+#
 # Before applying (namespace gman-gpu):
 #   kubectl create namespace gman-gpu
 #   kubectl -n gman-gpu create configmap gman-agent --from-file=collect.py=agent/collect.py
-#   kubectl -n gman-gpu create secret generic gman-gpu-agent-tokens \
-#     --from-literal=gpu-1=<token of cluster-01.gpu-1> --from-literal=gpu-2=<token of cluster-01.gpu-2>
-# Secret keys are node names; GMAN_AGENT_TOKENS on the API maps "cluster-01.<node>" to the same tokens.
 # Set GMAN_URL and GMAN_CLUSTER (the cluster agent's --source-id) below.
-# Residual risk: a DaemonSet cannot mount a different Secret per node, so every agent pod sees all node tokens.
-# Whoever controls one GPU node (root, or exec into this pod) can send GPU snapshots as another GPU node of the
-# same list. The API limits the damage: a token is bound to its source "<cluster>.<node>", which must equal
-# cluster + "." + hostname of the snapshot, and node sources carry only GPU readings (no instances, no history),
-# so cluster and Docker sources cannot be touched. Where that is not acceptable, run the agent on each GPU node
-# from systemd with its own token (deploy/systemd, GMAN_RUNTIME=kubernetes-node) instead of this DaemonSet.
+# After applying, give the API the reviewer credentials (README «Процессы GPU в Kubernetes»): GMAN_K8S_TOKEN_REVIEW
+# in .env, keyed by GMAN_CLUSTER, from
+#   kubectl -n gman-gpu get secret gman-token-reviewer -o jsonpath='{.data.token}' | base64 -d
+#   kubectl config view --raw --minify -o jsonpath='{.clusters[0].cluster.certificate-authority-data}'
+# as {"cluster-01": {"api_url": "https://<API server>:6443", "certificate_authority_data": "<base64>",
+#                    "token": "<reviewer token>"}}  (or ca_file / token_file, see backend/app/k8s_tokens.py).
+# Static per-node tokens (GMAN_AGENT_TOKENS "cluster-01.<node>") still work, e.g. for the systemd variant
+# (deploy/systemd, GMAN_RUNTIME=kubernetes-node), but are not used by this DaemonSet any more.
+# Remaining trust: root on a GPU node can read the tokens of pods on that node only (its own node).
 apiVersion: v1
 kind: ServiceAccount
 metadata:
   name: gman-gpu-agent
   namespace: gman-gpu
+---
+# Used by the GMan API, outside the cluster: TokenReview (system:auth-delegator) and, for Kubernetes < 1.30
+# whose tokens carry no node name, get pods in gman-gpu to resolve the bound pod's node.
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: gman-token-reviewer
+  namespace: gman-gpu
+---
+# Long-lived token of gman-token-reviewer for the API (it is not a pod, so it cannot use a projected token).
+# Rotate by deleting the Secret: Kubernetes issues a new token, then update the API's token_file.
+apiVersion: v1
+kind: Secret
+metadata:
+  name: gman-token-reviewer
+  namespace: gman-gpu
+  annotations:
+    kubernetes.io/service-account.name: gman-token-reviewer
+type: kubernetes.io/service-account-token
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: gman-token-reviewer
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: system:auth-delegator
+subjects:
+  - kind: ServiceAccount
+    name: gman-token-reviewer
+    namespace: gman-gpu
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: gman-token-reviewer
+  namespace: gman-gpu
+rules:
+  - apiGroups: ['']
+    resources: ['pods']
+    verbs: ['get']
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: gman-token-reviewer
+  namespace: gman-gpu
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: gman-token-reviewer
+subjects:
+  - kind: ServiceAccount
+    name: gman-token-reviewer
+    namespace: gman-gpu
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRole
@@ -85,8 +146,9 @@ spec:
               value: cluster-01  # Same as the cluster inventory agent's --source-id.
             - name: GMAN_URL
               value: https://gman.example  # Replace with the portal/API address (HTTPS).
+            # Bound token of this pod (re-read on every run, so the kubelet's rotation is picked up).
             - name: GMAN_AGENT_TOKEN_FILE
-              value: /etc/gman/tokens/$(NODE_NAME)
+              value: /var/run/secrets/gman/token
             # Spool of unsent snapshots and the run lock; the root filesystem is read-only. emptyDir on purpose:
             # the API keeps only the latest snapshot of a node source (no instances, so no history), so snapshots
             # lost with a pod restart carry nothing the next snapshot a minute later does not.
@@ -111,12 +173,16 @@ spec:
             capabilities: {drop: [ALL]}
           volumeMounts:
             - {name: agent, mountPath: /agent, readOnly: true}
-            - {name: tokens, mountPath: /etc/gman/tokens, readOnly: true}
+            - {name: gman-token, mountPath: /var/run/secrets/gman, readOnly: true}
             - {name: state, mountPath: /var/lib/gman-agent}
       volumes:
         - name: state
           emptyDir: {sizeLimit: 64Mi}
         - name: agent
           configMap: {name: gman-agent}
-        - name: tokens
-          secret: {secretName: gman-gpu-agent-tokens, defaultMode: 0444}
+        # Audience "gman": the API server will not accept it, and GMan will not accept the pod's default
+        # API token (mounted as usual for list pods). Bound to this pod: invalid once the pod is deleted.
+        - name: gman-token
+          projected:
+            sources:
+              - serviceAccountToken: {audience: gman, expirationSeconds: 3600, path: token}

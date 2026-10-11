@@ -35,6 +35,8 @@ export type Instance = {
   last_termination_reason: string;
   created_at: string | null; started_at: string | null; finished_at: string | null;
   restarts: number; origin: Origin; config: Record<string, unknown>;
+  /** Latest OOM kill (Docker `oom` event or OOMKilled, Kubernetes termination); kept after restarts. */
+  last_oom_at?: string | null;
 };
 
 /** Docker owner by container_id; Kubernetes (node source) also by pod and instance_id "<pod uid>:<container>". */
@@ -83,7 +85,37 @@ export type Audit = {
   status?: string; build_id?: string; build_url?: string; release?: string; commit?: string; image_digest?: string;
   instance_id?: string; instance_name?: string; instance_count?: number;
   before?: Instance; after?: Instance; changes?: Record<string, [unknown, unknown]>;
+  /** Release this event was correlated with (Bamboo deployment ↔ runtime). */
+  release_id?: number; deployment_id?: string; version?: string; image?: string;
+  /** runtime-event: a Kubernetes Event of a pod, without its message (only fixed phrases in `detail`). */
+  uid?: string; reason?: string; event_type?: 'Normal' | 'Warning'; count?: number; occurrences?: number;
+  first_at?: string | null; last_at?: string; namespace?: string; pod?: string; container?: string;
+  component?: string; detail?: string;
+  /** history-gap: changes between gap_from and gap_to may be missing. */
+  gap_from?: string; gap_to?: string; gap_seconds?: number; reasons?: string[]; dropped_snapshots?: number;
 };
+
+export type ReleaseStatus = 'started' | 'rolling-out' | 'succeeded' | 'failed' | 'superseded';
+
+export type Release = {
+  id: number; service_id: string; environment: string; release: string; version: string;
+  build_id: string; build_url: string; commit: string; image: string; image_digest: string;
+  initiator: string; initiator_kind: string; status: ReleaseStatus; status_reason: string;
+  bamboo_status: string; correlation: '' | 'digest' | 'version'; superseded_by: number | null;
+  progress: { total?: number; on_target?: number; healthy?: number; fresh?: number };
+  started_at: string; rollout_started_at: string | null; bamboo_finished_at: string | null;
+  finished_at: string | null; duration_seconds: number | null;
+};
+
+export type ReleaseInstance = {
+  source_id: string; id: string; name: string; node: string; status: string; health: string;
+  ready: boolean | null; reason: string; restarts: number; image: string; image_id: string;
+  created_at: string | null; started_at: string | null;
+  on_target: 'digest' | 'version' | null; healthy: boolean; new: boolean; crash: string | null;
+};
+
+export type ReleasePage = { releases: Release[]; next: string | null };
+export type ReleaseDetail = { release: Release; events: Audit[]; instances: ReleaseInstance[] };
 
 export type Overview = { services: Service[]; sources: Source[]; events: Audit[]; server_time: string; grafana_url: string };
 /** Splunk search links built by the API; instances are keyed "<source_id>/<instance_id>". */

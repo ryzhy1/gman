@@ -2,6 +2,8 @@
 # Docker socket access must be granted separately. No remote Docker API needed.
 # Environment:
 #   GMAN_HOST_ID   must equal the inventory agent's --source-id: GMan joins metrics on it.
+#                  It must also equal the CN of client.pem (deploy/pki/issue.sh client <GMAN_HOST_ID>):
+#                  the production gateway drops metrics whose host.id differs from the certificate.
 #   OTEL_GATEWAY   host:port of the central gateway's OTLP gRPC receiver.
 #   DOCKER_SOCKET  optional, defaults to unix:///var/run/docker.sock.
 receivers:

@@ -22,6 +22,8 @@ services:
       GMAN_ADMIN_TOKEN: ${GMAN_ADMIN_TOKEN:-}
       GMAN_CI_TOKEN: ${GMAN_CI_TOKEN:?Set GMAN_CI_TOKEN}
       GMAN_AGENT_TOKENS: ${GMAN_AGENT_TOKENS:?Set GMAN_AGENT_TOKENS}
+      # GPU DaemonSet pods: bound service account tokens verified by TokenReview (README, «Процессы GPU в Kubernetes»).
+      GMAN_K8S_TOKEN_REVIEW: ${GMAN_K8S_TOKEN_REVIEW:-}
       PROMETHEUS_URL: http://prometheus:9090
       # Address of Grafana as the browser sees it; used for default dashboard links.
       GMAN_GRAFANA_URL: ${GMAN_GRAFANA_URL:-http://127.0.0.1:3000}
