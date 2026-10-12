@@ -111,9 +111,9 @@ docker compose up --build -d
 
 Все конфигурации (Prometheus, правила алертов, Alertmanager, дашборды Grafana, OTel) собираются
 в образы, .env не обязателен: у всех переменных есть рабочие значения по умолчанию (список —
-в deploy/compose.yaml). Чтобы задать их, создайте .env рядом с compose.yaml. Случайные пароли
-PostgreSQL и администратора Grafana создает `python3 deploy/init_env.py` — только до первого
-запуска: PostgreSQL запоминает пароль, с которым создан volume. Остановить: `docker compose down`
+в .env.example). Чтобы задать их, скопируйте .env.example в .env рядом с compose.yaml. Пароли
+PostgreSQL и администратора Grafana меняйте до первого запуска: оба запоминают пароль, с которым
+созданы их volumes. Остановить: `docker compose down`
 (данные в volumes сохраняются; `down -v` удаляет их).
 
 | Сервис | Что делает |

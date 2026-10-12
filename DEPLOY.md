@@ -10,7 +10,7 @@
 ## 1. Сервер GMan
 
 ```sh
-git clone git@github.com:ryzhy1/gman.git && cd gman
+git clone git@github.com:ryzhy1/gman.git gman && cd gman   # или https://github.com/ryzhy1/gman.git
 docker compose up --build -d
 docker compose ps        # все сервисы running / healthy
 ```
@@ -21,8 +21,11 @@ docker compose ps        # все сервисы running / healthy
 
 ### Настройка (необязательно)
 
-Скопируйте `.env.example` в `.env` в корне репозитория и измените нужное **до первого запуска**
-(в примере все переменные с их значениями по умолчанию). Основные:
+```sh
+cp .env.example .env     # в примере все переменные с их значениями по умолчанию
+```
+
+Измените нужное **до первого запуска**. Основные:
 
 ```sh
 # Порты на хосте
@@ -37,13 +40,15 @@ GMAN_GRAFANA_PORT=3000       # только 127.0.0.1 (снаружи Grafana д
 GMAN_SOURCE_ID=gman-server
 GMAN_HOST_IP=10.0.0.5        # иначе показывается адрес контейнера агента
 
-# Пароли (по умолчанию gman / admin)
+# Пароли (по умолчанию gman / admin), например из `openssl rand -hex 24`
 POSTGRES_PASSWORD=...
 GRAFANA_ADMIN_PASSWORD=...
 ```
 
-Случайные пароли создает `python3 deploy/init_env.py`. Пароль PostgreSQL задается только до
-первого запуска: база запоминает пароль, с которым создан volume.
+Пароли действуют только при первом запуске: PostgreSQL и Grafana запоминают пароль, с которым
+созданы их volumes, и потом изменение `.env` на них не влияет. Остальные настройки применяются
+командой `docker compose up -d`.
+`GMAN_SOURCE_ID` у каждого сервера, включая сервер GMan, должен быть своим.
 
 Получатели алертов (webhook, email) и ссылки на Splunk — переменные `GMAN_ALERT_*` и
 `GMAN_SPLUNK_*`, описаны в README («Алерты», «Splunk»).
@@ -83,7 +88,7 @@ scp gman-host.tar.gz user@server-02:
 ```sh
 tar xzf gman-host.tar.gz && cd gman-host
 cp deploy/host/.env.example deploy/host/.env
-nano deploy/host/.env                     # GMAN_SERVER и GMAN_SOURCE_ID, при необходимости порты
+vi deploy/host/.env                       # GMAN_SERVER и GMAN_SOURCE_ID, при необходимости порты
 docker compose -f deploy/host/compose.yaml up -d --build
 ```
 
@@ -126,8 +131,8 @@ docker compose -f deploy/host/compose.yaml down -v
 
 ## Ограничения
 
-- GPU других серверов (nvidia-smi, процессы на GPU) агент в контейнере не видит; метрики GPU
-  дает DCGM Exporter (README, «DCGM Exporter»).
+- GPU не собираются ни с сервера GMan, ни с подключенных серверов: в контейнеры агента и
+  Collector не проброшены nvidia-smi и DCGM Exporter.
 - Kubernetes-кластеры подключаются отдельно: агент с `--runtime kubernetes` и
   `deploy/otel-k8s.yaml` (README, «Подключение inventory»).
 - Данные с серверов идут по HTTP и OTLP без шифрования. Через интернет — VPN или
