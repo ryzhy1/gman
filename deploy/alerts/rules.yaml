@@ -5,6 +5,10 @@
 #   kube_*               kube-state-metrics (deploy/kube-state-metrics.yaml) through the cluster's node Collector;
 #                        source_id = cluster (K8S_CLUSTER_NAME), no host_id.
 #   gman_*               inventory state from the API's /metrics (backend/app/exposition.py).
+#   nvidia_smi_*         nvidia_gpu_exporter (github.com/utkuozdemir/nvidia_gpu_exporter) scraped by the node Collector;
+#                        GPUs are labelled uuid without the "GPU-" prefix, rules below add it as UUID like DCGM.
+#   vllm:*               vLLM /metrics scraped by the node Collector, names as vLLM exports them;
+#                        gman_service binds the server to the catalog, model_name is vLLM's own label.
 # The gateway re-exports `up` of the Collectors' own scrapes (DCGM, kube-state-metrics) with exported_job set:
 # the gateway's own target is up{job="otel", exported_job=""}.
 # Labels used by Alertmanager (deploy/alerts/alertmanager.yaml):
@@ -17,15 +21,84 @@ groups:
   - name: gman-recording
     rules:
       # One series per GPU; DCGM is preferred, nvidia-smi from inventory fills in where DCGM is absent.
+      # Then nvidia_gpu_exporter, then the inventory snapshot.
       - record: gman:gpu_temperature_celsius:max
         expr: |
           max by (host_id, UUID) (DCGM_FI_DEV_GPU_TEMP)
+          or max by (host_id, UUID) (label_replace(nvidia_smi_temperature_gpu, "UUID", "GPU-$1", "uuid", "(?:GPU-)?(.+)"))
           or max by (host_id, UUID) (gman_gpu_temperature_celsius)
       # Bitmask of active clock throttle reasons. DCGM renamed the field in 3.3 (CLOCK_THROTTLE -> CLOCKS_EVENT).
+      # nvidia_gpu_exporter reports one 0/1 series per reason (clocks_event_reasons_* since driver 535, earlier
+      # clocks_throttle_reasons_*), combined here into the same bits; a reason the driver omits counts as inactive.
       - record: gman:gpu_clock_event_reasons:max
         expr: |
           max by (host_id, UUID) (DCGM_FI_DEV_CLOCKS_EVENT_REASONS or DCGM_FI_DEV_CLOCK_THROTTLE_REASONS)
+          or max by (host_id, UUID) (label_replace(
+            (max by (host_id, uuid) (nvidia_smi_clocks_event_reasons_gpu_idle or nvidia_smi_clocks_throttle_reasons_gpu_idle)
+             or max by (host_id, uuid) (nvidia_smi_gpu_info) * 0) * 1
+            + (max by (host_id, uuid) (nvidia_smi_clocks_event_reasons_applications_clocks_setting or nvidia_smi_clocks_throttle_reasons_applications_clocks_setting)
+             or max by (host_id, uuid) (nvidia_smi_gpu_info) * 0) * 2
+            + (max by (host_id, uuid) (nvidia_smi_clocks_event_reasons_sw_power_cap or nvidia_smi_clocks_throttle_reasons_sw_power_cap)
+             or max by (host_id, uuid) (nvidia_smi_gpu_info) * 0) * 4
+            + (max by (host_id, uuid) (nvidia_smi_clocks_event_reasons_hw_slowdown or nvidia_smi_clocks_throttle_reasons_hw_slowdown)
+             or max by (host_id, uuid) (nvidia_smi_gpu_info) * 0) * 8
+            + (max by (host_id, uuid) (nvidia_smi_clocks_event_reasons_sync_boost or nvidia_smi_clocks_throttle_reasons_sync_boost)
+             or max by (host_id, uuid) (nvidia_smi_gpu_info) * 0) * 16
+            + (max by (host_id, uuid) (nvidia_smi_clocks_event_reasons_sw_thermal_slowdown or nvidia_smi_clocks_throttle_reasons_sw_thermal_slowdown)
+             or max by (host_id, uuid) (nvidia_smi_gpu_info) * 0) * 32
+            + (max by (host_id, uuid) (nvidia_smi_clocks_event_reasons_hw_thermal_slowdown or nvidia_smi_clocks_throttle_reasons_hw_thermal_slowdown)
+             or max by (host_id, uuid) (nvidia_smi_gpu_info) * 0) * 64
+            + (max by (host_id, uuid) (nvidia_smi_clocks_event_reasons_hw_power_brake_slowdown or nvidia_smi_clocks_throttle_reasons_hw_power_brake_slowdown)
+             or max by (host_id, uuid) (nvidia_smi_gpu_info) * 0) * 128,
+            "UUID", "GPU-$1", "uuid", "(?:GPU-)?(.+)"))
           or max by (host_id, UUID) (gman_gpu_clock_event_reasons)
+      # GPU state in one set of series for the gman-gpu dashboard and the portal, whichever exporter the host runs.
+      - record: gman:gpu_utilization:ratio
+        expr: |
+          max by (host_id, UUID) (DCGM_FI_DEV_GPU_UTIL) / 100
+          or max by (host_id, UUID) (label_replace(nvidia_smi_utilization_gpu_ratio, "UUID", "GPU-$1", "uuid", "(?:GPU-)?(.+)"))
+      # Share of time device memory was read or written (not VRAM occupancy).
+      - record: gman:gpu_memory_activity:ratio
+        expr: |
+          max by (host_id, UUID) (DCGM_FI_DEV_MEM_COPY_UTIL) / 100
+          or max by (host_id, UUID) (label_replace(nvidia_smi_utilization_memory_ratio, "UUID", "GPU-$1", "uuid", "(?:GPU-)?(.+)"))
+      - record: gman:gpu_memory_used_bytes:max
+        expr: |
+          max by (host_id, UUID) (DCGM_FI_DEV_FB_USED) * 1048576
+          or max by (host_id, UUID) (label_replace(nvidia_smi_memory_used_bytes, "UUID", "GPU-$1", "uuid", "(?:GPU-)?(.+)"))
+      - record: gman:gpu_memory_total_bytes:max
+        expr: |
+          (max by (host_id, UUID) (DCGM_FI_DEV_FB_USED) + max by (host_id, UUID) (DCGM_FI_DEV_FB_FREE)) * 1048576
+          or max by (host_id, UUID) (label_replace(nvidia_smi_memory_total_bytes, "UUID", "GPU-$1", "uuid", "(?:GPU-)?(.+)"))
+      - record: gman:gpu_power_watts:max
+        expr: |
+          max by (host_id, UUID) (DCGM_FI_DEV_POWER_USAGE)
+          or max by (host_id, UUID) (label_replace(nvidia_smi_power_draw_watts, "UUID", "GPU-$1", "uuid", "(?:GPU-)?(.+)"))
+      # Limit in force: enforced, otherwise the configured one (nvidia_gpu_exporter only).
+      - record: gman:gpu_power_limit_watts:max
+        expr: |
+          max by (host_id, UUID) (label_replace(nvidia_smi_enforced_power_limit_watts, "UUID", "GPU-$1", "uuid", "(?:GPU-)?(.+)"))
+          or max by (host_id, UUID) (label_replace(nvidia_smi_power_limit_watts, "UUID", "GPU-$1", "uuid", "(?:GPU-)?(.+)"))
+      - record: gman:gpu_sm_clock_hertz:max
+        expr: |
+          max by (host_id, UUID) (DCGM_FI_DEV_SM_CLOCK) * 1e6
+          or max by (host_id, UUID) (label_replace(nvidia_smi_clocks_current_sm_clock_hz, "UUID", "GPU-$1", "uuid", "(?:GPU-)?(.+)"))
+      - record: gman:gpu_memory_clock_hertz:max
+        expr: |
+          max by (host_id, UUID) (DCGM_FI_DEV_MEM_CLOCK) * 1e6
+          or max by (host_id, UUID) (label_replace(nvidia_smi_clocks_current_memory_clock_hz, "UUID", "GPU-$1", "uuid", "(?:GPU-)?(.+)"))
+      - record: gman:gpu_max_sm_clock_hertz:max
+        expr: max by (host_id, UUID) (label_replace(nvidia_smi_clocks_max_sm_clock_hz, "UUID", "GPU-$1", "uuid", "(?:GPU-)?(.+)"))
+      - record: gman:gpu_fan:ratio
+        expr: max by (host_id, UUID) (label_replace(nvidia_smi_fan_speed_ratio, "UUID", "GPU-$1", "uuid", "(?:GPU-)?(.+)"))
+      # P-state: 0 is maximum performance, 8 and above idle.
+      - record: gman:gpu_pstate:max
+        expr: max by (host_id, UUID) (label_replace(nvidia_smi_pstate, "UUID", "GPU-$1", "uuid", "(?:GPU-)?(.+)"))
+      # Cumulative energy in joules: DCGM counts millijoules.
+      - record: gman:gpu_energy_joules:total
+        expr: |
+          max by (host_id, UUID) (DCGM_FI_DEV_TOTAL_ENERGY_CONSUMPTION_total) / 1000
+          or max by (host_id, UUID) (label_replace(nvidia_smi_energy_joules_total, "UUID", "GPU-$1", "uuid", "(?:GPU-)?(.+)"))
       # Hosts that should be sending telemetry: seen in the last 6 hours or known to inventory.
       - record: gman:host_expected:max
         expr: |
@@ -54,11 +127,13 @@ groups:
       - record: gman:gpu_model_temperature_threshold_celsius
         expr: vector(87)
         labels: {model: NVIDIA A100-SXM4-40GB, severity: critical}
-      # Model of each GPU: DCGM first, nvidia-smi from inventory where DCGM is absent. One series per GPU.
+      # Model of each GPU: DCGM first, then nvidia_gpu_exporter, then nvidia-smi from inventory. One series per GPU.
       - record: gman:gpu_model:info
         expr: |
           topk by (host_id, UUID) (1,
             group by (host_id, UUID, model) (label_replace(DCGM_FI_DEV_GPU_TEMP, "model", "$1", "modelName", "(.+)"))
+            or on (host_id, UUID) group by (host_id, UUID, model) (label_replace(
+              label_replace(nvidia_smi_gpu_info, "UUID", "GPU-$1", "uuid", "(?:GPU-)?(.+)"), "model", "$1", "name", "(.+)"))
             or on (host_id, UUID) group by (host_id, UUID, model) (gman_gpu_temperature_celsius{model!=""}))
       # Threshold of every GPU with a temperature: the model's row, otherwise the default.
       - record: gman:gpu_temperature_threshold_celsius
@@ -167,6 +242,17 @@ groups:
           summary: 'Нет метрик DCGM для GPU {{ $labels.UUID }} на {{ $labels.host_id }}'
           description: Метрики хоста поступают, а DCGM Exporter перестал отвечать или GPU пропал из системы.
           runbook_url: '{{ $externalLabels.gman_portal }}/#alerts/GManGpuTelemetryAbsent'
+      - alert: GManGpuTelemetryAbsent
+        expr: |
+          max by (host_id, UUID) (label_replace(max_over_time(nvidia_smi_temperature_gpu[6h]), "UUID", "GPU-$1", "uuid", "(?:GPU-)?(.+)"))
+          unless on (host_id, UUID) max by (host_id, UUID) (label_replace(nvidia_smi_temperature_gpu, "UUID", "GPU-$1", "uuid", "(?:GPU-)?(.+)"))
+          and on () (up{job="otel", exported_job=""} == 1)
+        for: 5m
+        labels: {severity: warning, scope: gpu, source: nvidia_gpu_exporter}
+        annotations:
+          summary: 'Нет метрик nvidia_gpu_exporter для GPU {{ $labels.UUID }} на {{ $labels.host_id }}'
+          description: Метрики хоста поступают, а nvidia_gpu_exporter перестал отвечать или GPU пропал из системы.
+          runbook_url: '{{ $externalLabels.gman_portal }}/#alerts/GManGpuTelemetryAbsent'
       # DCGM keeps the last XID code until the GPU is reset; after handling, silence the alert in Alertmanager.
       - alert: GManGpuXidError
         expr: max by (host_id, UUID) (DCGM_FI_DEV_XID_ERRORS) > 0
@@ -188,15 +274,26 @@ groups:
           summary: 'Аппаратная XID {{ $value }} на GPU {{ $labels.UUID }} ({{ $labels.host_id }})'
           description: Ошибка указывает на память, шину или прошивку GPU. Нужен вывод GPU из работы и проверка.
           runbook_url: '{{ $externalLabels.gman_portal }}/#alerts/GManGpuXidError'
+      # nvidia_gpu_exporter (nvml backend) keeps the time of the last XID; increase() of its counter misses the
+      # first event of a series, so the alert holds for 15 minutes after each XID instead.
+      - alert: GManGpuXidError
+        expr: |
+          max by (host_id, UUID) (label_replace(time() - nvidia_smi_xid_last_timestamp_seconds, "UUID", "GPU-$1", "uuid", "(?:GPU-)?(.+)")) < 900
+        labels: {severity: warning, scope: gpu, source: nvidia_gpu_exporter}
+        annotations:
+          summary: 'Недавняя XID-ошибка на GPU {{ $labels.UUID }} ({{ $labels.host_id }})'
+          description: 'nvidia_gpu_exporter зафиксировал XID {{ $value | humanizeDuration }} назад; код — на дашборде GMan · GPU.'
+          runbook_url: '{{ $externalLabels.gman_portal }}/#alerts/GManGpuXidError'
       - alert: GManGpuEccUncorrectable
         expr: |
           max by (host_id, UUID) (increase(DCGM_FI_DEV_ECC_DBE_VOL_TOTAL_total[10m]) > 0)
           or max by (host_id, UUID) (increase(gman_gpu_ecc_uncorrected_errors[10m]) > 0)
+          or max by (host_id, UUID) (label_replace(increase(nvidia_smi_ecc_errors_uncorrected_aggregate_total[10m]), "UUID", "GPU-$1", "uuid", "(?:GPU-)?(.+)") > 0)
           or max by (host_id, UUID) (DCGM_FI_DEV_ROW_REMAP_FAILURE > 0)
         labels: {severity: critical, scope: gpu}
         annotations:
           summary: 'Неисправимые ошибки ECC на GPU {{ $labels.UUID }} ({{ $labels.host_id }})'
-          description: Рост double-bit ECC (DCGM или nvidia-smi) либо сбой переназначения строк памяти.
+          description: Рост double-bit ECC (DCGM, nvidia_gpu_exporter или nvidia-smi) либо сбой переназначения строк памяти.
           runbook_url: '{{ $externalLabels.gman_portal }}/#alerts/GManGpuEccUncorrectable'
       - alert: GManGpuEccCorrectableHigh
         expr: max by (host_id, UUID) (increase(DCGM_FI_DEV_ECC_SBE_VOL_TOTAL_total[1h])) > 100
@@ -254,6 +351,92 @@ groups:
           summary: 'Аппаратное снижение частот GPU {{ $labels.UUID }} ({{ $labels.host_id }})'
           description: Активны hw_slowdown или hw_power_brake дольше пяти минут — проверить питание и охлаждение.
           runbook_url: '{{ $externalLabels.gman_portal }}/#alerts/GManGpuHardwareSlowdown'
+
+  # vLLM per catalog service and model, over all replicas (5-minute windows). Latency quantiles are absent while
+  # the model serves no requests. vLLM 0.10+ renamed time_per_output_token to inter_token_latency and
+  # gpu_cache_usage_perc to kv_cache_usage_perc: both names are read.
+  - name: gman-llm
+    rules:
+      # Time to first token: queueing plus prefill, what a streaming client waits before the answer starts.
+      - record: gman:llm_ttft_seconds:p50
+        expr: histogram_quantile(0.5, sum by (gman_service, model_name, le) (rate(vllm:time_to_first_token_seconds_bucket[5m])))
+      - record: gman:llm_ttft_seconds:p95
+        expr: histogram_quantile(0.95, sum by (gman_service, model_name, le) (rate(vllm:time_to_first_token_seconds_bucket[5m])))
+      - record: gman:llm_ttft_seconds:p99
+        expr: histogram_quantile(0.99, sum by (gman_service, model_name, le) (rate(vllm:time_to_first_token_seconds_bucket[5m])))
+      # Time per output token after the first one (decode speed seen by one request).
+      - record: gman:llm_tpot_seconds:p50
+        expr: histogram_quantile(0.5, sum by (gman_service, model_name, le) (rate(vllm:inter_token_latency_seconds_bucket[5m]) or rate(vllm:time_per_output_token_seconds_bucket[5m])))
+      - record: gman:llm_tpot_seconds:p95
+        expr: histogram_quantile(0.95, sum by (gman_service, model_name, le) (rate(vllm:inter_token_latency_seconds_bucket[5m]) or rate(vllm:time_per_output_token_seconds_bucket[5m])))
+      - record: gman:llm_e2e_seconds:p50
+        expr: histogram_quantile(0.5, sum by (gman_service, model_name, le) (rate(vllm:e2e_request_latency_seconds_bucket[5m])))
+      - record: gman:llm_e2e_seconds:p95
+        expr: histogram_quantile(0.95, sum by (gman_service, model_name, le) (rate(vllm:e2e_request_latency_seconds_bucket[5m])))
+      - record: gman:llm_queue_seconds:p95
+        expr: histogram_quantile(0.95, sum by (gman_service, model_name, le) (rate(vllm:request_queue_time_seconds_bucket[5m])))
+      - record: gman:llm_requests:rate5m
+        expr: sum by (gman_service, model_name) (rate(vllm:request_success_total[5m]))
+      - record: gman:llm_prompt_tokens:rate5m
+        expr: sum by (gman_service, model_name) (rate(vllm:prompt_tokens_total[5m]))
+      - record: gman:llm_generation_tokens:rate5m
+        expr: sum by (gman_service, model_name) (rate(vllm:generation_tokens_total[5m]))
+      - record: gman:llm_requests_running:sum
+        expr: sum by (gman_service, model_name) (vllm:num_requests_running)
+      - record: gman:llm_requests_waiting:sum
+        expr: sum by (gman_service, model_name) (vllm:num_requests_waiting)
+      # KV cache occupancy, 0..1 despite the vLLM name "perc"; the fullest replica.
+      - record: gman:llm_kv_cache_usage:max
+        expr: max by (gman_service, model_name) (vllm:kv_cache_usage_perc or vllm:gpu_cache_usage_perc)
+      # Requests evicted from the KV cache and recomputed later: the cache is too small for the load.
+      - record: gman:llm_preemptions:rate5m
+        expr: sum by (gman_service, model_name) (rate(vllm:num_preemptions_total[5m]))
+      - record: gman:llm_prefix_cache_hit:ratio5m
+        expr: |
+          sum by (gman_service, model_name) (rate(vllm:prefix_cache_hits_total[5m]))
+          / sum by (gman_service, model_name) (rate(vllm:prefix_cache_queries_total[5m])) > -1
+
+      # `up` of the Collector's vllm scrape, re-exported by the gateway with exported_job.
+      - alert: GManLlmEndpointDown
+        expr: max by (host_id, gman_service, exported_instance) (up{job="otel", exported_job="vllm"}) == 0
+        for: 3m
+        labels: {severity: critical, scope: instance}
+        annotations:
+          summary: 'vLLM {{ $labels.gman_service }} на {{ $labels.host_id }} не отвечает'
+          description: 'Collector не может прочитать {{ $labels.exported_instance }}/metrics три минуты: сервер модели остановлен или завис.'
+          runbook_url: '{{ $externalLabels.gman_portal }}/#alerts/GManLlmEndpointDown'
+      - alert: GManLlmSlowFirstToken
+        expr: gman:llm_ttft_seconds:p95 > 5
+        for: 10m
+        labels: {severity: warning, scope: instance}
+        annotations:
+          summary: 'TTFT p95 {{ $labels.model_name }} ({{ $labels.gman_service }}): {{ $value | humanizeDuration }}'
+          description: Пользователи ждут первый токен дольше 5 секунд (95-й перцентиль) десять минут.
+          runbook_url: '{{ $externalLabels.gman_portal }}/#alerts/GManLlmSlowFirstToken'
+      - alert: GManLlmQueueBacklog
+        expr: gman:llm_queue_seconds:p95 > 5 and gman:llm_requests_waiting:sum > 0
+        for: 10m
+        labels: {severity: warning, scope: instance}
+        annotations:
+          summary: 'Очередь {{ $labels.model_name }} ({{ $labels.gman_service }}): ожидание p95 {{ $value | humanizeDuration }}'
+          description: Запросы ждут начала обработки дольше 5 секунд десять минут — не хватает мощности сервера модели.
+          runbook_url: '{{ $externalLabels.gman_portal }}/#alerts/GManLlmQueueBacklog'
+      - alert: GManLlmKvCacheFull
+        expr: gman:llm_kv_cache_usage:max > 0.95
+        for: 15m
+        labels: {severity: warning, scope: instance}
+        annotations:
+          summary: 'KV-кэш {{ $labels.model_name }} ({{ $labels.gman_service }}) заполнен на {{ $value | humanizePercentage }}'
+          description: Кэш почти полон 15 минут; новые запросы ждут места, длинные контексты вытесняются.
+          runbook_url: '{{ $externalLabels.gman_portal }}/#alerts/GManLlmKvCacheFull'
+      - alert: GManLlmPreemptions
+        expr: gman:llm_preemptions:rate5m > 0.1
+        for: 10m
+        labels: {severity: warning, scope: instance}
+        annotations:
+          summary: 'Вытеснения запросов {{ $labels.model_name }} ({{ $labels.gman_service }}): {{ $value | humanize }}/с'
+          description: vLLM вытесняет запросы из KV-кэша и пересчитывает их — растут задержки и падает пропускная способность.
+          runbook_url: '{{ $externalLabels.gman_portal }}/#alerts/GManLlmPreemptions'
 
   - name: gman-instances
     rules:

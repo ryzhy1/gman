@@ -1,0 +1,45 @@
+# Run natively on the workstation, not inside Docker Desktop's Linux VM.
+# GMAN_HOST_ID must match inventory source_id; DOCKER_SOCKET is the local Docker socket.
+receivers:
+  host_metrics:
+    collection_interval: 15s
+    scrapers:
+      cpu:
+        metrics:
+          system.cpu.utilization: {enabled: true}
+      memory:
+        metrics:
+          system.memory.utilization: {enabled: true}
+          system.memory.limit: {enabled: true}
+      load: {}
+      disk: {}
+      filesystem:
+        metrics:
+          system.filesystem.utilization: {enabled: true}
+      network: {}
+  docker_stats:
+    endpoint: ${env:DOCKER_SOCKET}
+    collection_interval: 15s
+    container_labels_to_metric_labels:
+      gman.service: gman_service
+      gman.environment: gman_environment
+processors:
+  resource:
+    attributes:
+      - key: host.id
+        value: ${env:GMAN_HOST_ID}
+        action: upsert
+  batch: {}
+exporters:
+  otlp_grpc:
+    endpoint: 127.0.0.1:4317
+    tls: {insecure: true}
+service:
+  telemetry:
+    metrics:
+      level: none
+  pipelines:
+    metrics:
+      receivers: [host_metrics, docker_stats]
+      processors: [resource, batch]
+      exporters: [otlp_grpc]

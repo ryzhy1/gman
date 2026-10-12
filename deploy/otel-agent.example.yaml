@@ -46,7 +46,8 @@ receivers:
       container.pids.count: {enabled: true}
       container.uptime: {enabled: true}
       container.restarts: {enabled: true}
-  # NVIDIA DCGM Exporter on the same host; see README for its deployment.
+  # GPU exporters on the same host; see README for their deployment. Either or both may run: rules prefer DCGM
+  # per GPU and fall back to nvidia_gpu_exporter. A target that is not running only marks its `up` as 0.
   prometheus/gpu:
     config:
       scrape_configs:
@@ -54,6 +55,41 @@ receivers:
           scrape_interval: 15s
           static_configs:
             - targets: ['127.0.0.1:9400']
+        # github.com/utkuozdemir/nvidia_gpu_exporter (nvidia_smi_* series).
+        - job_name: nvidia_smi
+          scrape_interval: 15s
+          static_configs:
+            - targets: ['127.0.0.1:9835']
+  # vLLM servers in Docker containers on this host, found by labels (README, «Метрики LLM»):
+  #   gman.metrics=vllm, gman.metrics.port=<host port of the OpenAI API>, gman.service=<catalog id>.
+  # The port is the published one (or the container's own with network_mode: host): this Collector runs on the host.
+  prometheus/llm:
+    config:
+      scrape_configs:
+        - job_name: vllm
+          scrape_interval: 15s
+          docker_sd_configs:
+            - host: ${env:DOCKER_SOCKET:-unix:///var/run/docker.sock}
+              filters:
+                - name: label
+                  values: ['gman.metrics=vllm']
+          relabel_configs:
+            # $$ is a literal $ (regex group): the Collector expands $ as environment variables.
+            # One target per container (Docker SD yields one per network port; equal targets are merged).
+            - source_labels: [__meta_docker_container_label_gman_metrics_port]
+              regex: '(\d+)'
+              target_label: __address__
+              replacement: '127.0.0.1:$$1'
+            - source_labels: [__meta_docker_container_label_gman_metrics_port]
+              regex: '\d+'
+              action: keep
+            - source_labels: [__meta_docker_container_label_gman_service]
+              target_label: gman_service
+            - source_labels: [__meta_docker_container_label_gman_environment]
+              target_label: gman_environment
+            - source_labels: [__meta_docker_container_name]
+              regex: '/?(.+)'
+              target_label: container_name
 extensions:
   # Persistent sending queue: batches the gateway has not accepted survive a restart of this Collector or
   # of the host and are sent when the gateway is back (README, «Очередь Collector на диске»).
@@ -101,6 +137,6 @@ service:
   extensions: [file_storage]
   pipelines:
     metrics:
-      receivers: [host_metrics, docker_stats, prometheus/gpu]
+      receivers: [host_metrics, docker_stats, prometheus/gpu, prometheus/llm]
       processors: [memory_limiter, resource, batch]
       exporters: [otlp_grpc]

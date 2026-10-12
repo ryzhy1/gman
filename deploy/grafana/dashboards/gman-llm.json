@@ -1,0 +1,1677 @@
+{
+ "uid": "gman-llm",
+ "title": "GMan · LLM",
+ "description": "Серверы моделей vLLM: время до первого токена, скорость генерации, очередь, KV-кэш, токены и GPU, на которых работают модели.",
+ "tags": [
+  "gman"
+ ],
+ "timezone": "browser",
+ "schemaVersion": 39,
+ "version": 1,
+ "editable": true,
+ "refresh": "30s",
+ "time": {
+  "from": "now-6h",
+  "to": "now"
+ },
+ "templating": {
+  "list": [
+   {
+    "name": "service",
+    "label": "Сервис",
+    "type": "query",
+    "datasource": {
+     "type": "prometheus",
+     "uid": "prometheus"
+    },
+    "query": {
+     "query": "label_values(vllm:num_requests_running, gman_service)",
+     "refId": "service"
+    },
+    "definition": "label_values(vllm:num_requests_running, gman_service)",
+    "refresh": 2,
+    "sort": 1,
+    "includeAll": true,
+    "multi": true,
+    "allValue": ".*",
+    "current": {
+     "text": "All",
+     "value": "$__all"
+    }
+   },
+   {
+    "name": "model",
+    "label": "Модель",
+    "type": "query",
+    "datasource": {
+     "type": "prometheus",
+     "uid": "prometheus"
+    },
+    "query": {
+     "query": "label_values(vllm:num_requests_running{gman_service=~\"$service\"}, model_name)",
+     "refId": "model"
+    },
+    "definition": "label_values(vllm:num_requests_running{gman_service=~\"$service\"}, model_name)",
+    "refresh": 2,
+    "sort": 1,
+    "includeAll": true,
+    "multi": true,
+    "allValue": ".*",
+    "current": {
+     "text": "All",
+     "value": "$__all"
+    }
+   }
+  ]
+ },
+ "links": [
+  {
+   "title": "Дашборды GMan",
+   "type": "dashboards",
+   "tags": [
+    "gman"
+   ],
+   "asDropdown": false,
+   "keepTime": true,
+   "includeVars": false,
+   "targetBlank": false,
+   "icon": "external link"
+  }
+ ],
+ "panels": [
+  {
+   "type": "row",
+   "title": "Сейчас",
+   "collapsed": false,
+   "gridPos": {
+    "x": 0,
+    "y": 0,
+    "w": 24,
+    "h": 1
+   },
+   "panels": []
+  },
+  {
+   "type": "stat",
+   "title": "Запросов/с",
+   "description": "Завершенных запросов в секунду за 5 минут.",
+   "datasource": {
+    "type": "prometheus",
+    "uid": "prometheus"
+   },
+   "fieldConfig": {
+    "defaults": {
+     "unit": "reqps",
+     "noValue": "—",
+     "mappings": [],
+     "thresholds": {
+      "mode": "absolute",
+      "steps": [
+       {
+        "color": "green",
+        "value": null
+       }
+      ]
+     },
+     "color": {
+      "mode": "thresholds"
+     }
+    },
+    "overrides": []
+   },
+   "options": {
+    "reduceOptions": {
+     "calcs": [
+      "lastNotNull"
+     ],
+     "fields": "",
+     "values": false
+    },
+    "colorMode": "value",
+    "graphMode": "area",
+    "textMode": "auto",
+    "justifyMode": "auto",
+    "orientation": "auto"
+   },
+   "targets": [
+    {
+     "datasource": {
+      "type": "prometheus",
+      "uid": "prometheus"
+     },
+     "refId": "A",
+     "expr": "sum(gman:llm_requests:rate5m{gman_service=~\"$service\", model_name=~\"$model\"})",
+     "legendFormat": ""
+    }
+   ],
+   "gridPos": {
+    "x": 0,
+    "y": 1,
+    "w": 3,
+    "h": 4
+   },
+   "id": 2
+  },
+  {
+   "type": "stat",
+   "title": "TTFT p95",
+   "description": "Время до первого токена (очередь + prefill), 95-й перцентиль за 5 минут.",
+   "datasource": {
+    "type": "prometheus",
+    "uid": "prometheus"
+   },
+   "fieldConfig": {
+    "defaults": {
+     "unit": "s",
+     "noValue": "—",
+     "mappings": [],
+     "thresholds": {
+      "mode": "absolute",
+      "steps": [
+       {
+        "color": "green",
+        "value": null
+       },
+       {
+        "color": "orange",
+        "value": 2
+       },
+       {
+        "color": "red",
+        "value": 5
+       }
+      ]
+     },
+     "color": {
+      "mode": "thresholds"
+     }
+    },
+    "overrides": []
+   },
+   "options": {
+    "reduceOptions": {
+     "calcs": [
+      "lastNotNull"
+     ],
+     "fields": "",
+     "values": false
+    },
+    "colorMode": "value",
+    "graphMode": "area",
+    "textMode": "auto",
+    "justifyMode": "auto",
+    "orientation": "auto"
+   },
+   "targets": [
+    {
+     "datasource": {
+      "type": "prometheus",
+      "uid": "prometheus"
+     },
+     "refId": "A",
+     "expr": "max(gman:llm_ttft_seconds:p95{gman_service=~\"$service\", model_name=~\"$model\"})",
+     "legendFormat": ""
+    }
+   ],
+   "gridPos": {
+    "x": 3,
+    "y": 1,
+    "w": 3,
+    "h": 4
+   },
+   "id": 3
+  },
+  {
+   "type": "stat",
+   "title": "TPOT p95",
+   "description": "Время на каждый следующий токен (скорость генерации для одного запроса).",
+   "datasource": {
+    "type": "prometheus",
+    "uid": "prometheus"
+   },
+   "fieldConfig": {
+    "defaults": {
+     "unit": "s",
+     "noValue": "—",
+     "mappings": [],
+     "thresholds": {
+      "mode": "absolute",
+      "steps": [
+       {
+        "color": "green",
+        "value": null
+       },
+       {
+        "color": "orange",
+        "value": 0.1
+       },
+       {
+        "color": "red",
+        "value": 0.2
+       }
+      ]
+     },
+     "color": {
+      "mode": "thresholds"
+     }
+    },
+    "overrides": []
+   },
+   "options": {
+    "reduceOptions": {
+     "calcs": [
+      "lastNotNull"
+     ],
+     "fields": "",
+     "values": false
+    },
+    "colorMode": "value",
+    "graphMode": "area",
+    "textMode": "auto",
+    "justifyMode": "auto",
+    "orientation": "auto"
+   },
+   "targets": [
+    {
+     "datasource": {
+      "type": "prometheus",
+      "uid": "prometheus"
+     },
+     "refId": "A",
+     "expr": "max(gman:llm_tpot_seconds:p95{gman_service=~\"$service\", model_name=~\"$model\"})",
+     "legendFormat": ""
+    }
+   ],
+   "gridPos": {
+    "x": 6,
+    "y": 1,
+    "w": 3,
+    "h": 4
+   },
+   "id": 4
+  },
+  {
+   "type": "stat",
+   "title": "E2E p95",
+   "description": "Полное время запроса от поступления до последнего токена.",
+   "datasource": {
+    "type": "prometheus",
+    "uid": "prometheus"
+   },
+   "fieldConfig": {
+    "defaults": {
+     "unit": "s",
+     "noValue": "—",
+     "mappings": [],
+     "thresholds": {
+      "mode": "absolute",
+      "steps": [
+       {
+        "color": "green",
+        "value": null
+       }
+      ]
+     },
+     "color": {
+      "mode": "thresholds"
+     }
+    },
+    "overrides": []
+   },
+   "options": {
+    "reduceOptions": {
+     "calcs": [
+      "lastNotNull"
+     ],
+     "fields": "",
+     "values": false
+    },
+    "colorMode": "value",
+    "graphMode": "area",
+    "textMode": "auto",
+    "justifyMode": "auto",
+    "orientation": "auto"
+   },
+   "targets": [
+    {
+     "datasource": {
+      "type": "prometheus",
+      "uid": "prometheus"
+     },
+     "refId": "A",
+     "expr": "max(gman:llm_e2e_seconds:p95{gman_service=~\"$service\", model_name=~\"$model\"})",
+     "legendFormat": ""
+    }
+   ],
+   "gridPos": {
+    "x": 9,
+    "y": 1,
+    "w": 3,
+    "h": 4
+   },
+   "id": 5
+  },
+  {
+   "type": "stat",
+   "title": "Генерация",
+   "description": "Сгенерированных токенов в секунду, все реплики.",
+   "datasource": {
+    "type": "prometheus",
+    "uid": "prometheus"
+   },
+   "fieldConfig": {
+    "defaults": {
+     "unit": "short",
+     "noValue": "—",
+     "mappings": [],
+     "thresholds": {
+      "mode": "absolute",
+      "steps": [
+       {
+        "color": "green",
+        "value": null
+       }
+      ]
+     },
+     "color": {
+      "mode": "thresholds"
+     }
+    },
+    "overrides": []
+   },
+   "options": {
+    "reduceOptions": {
+     "calcs": [
+      "lastNotNull"
+     ],
+     "fields": "",
+     "values": false
+    },
+    "colorMode": "value",
+    "graphMode": "area",
+    "textMode": "auto",
+    "justifyMode": "auto",
+    "orientation": "auto"
+   },
+   "targets": [
+    {
+     "datasource": {
+      "type": "prometheus",
+      "uid": "prometheus"
+     },
+     "refId": "A",
+     "expr": "sum(gman:llm_generation_tokens:rate5m{gman_service=~\"$service\", model_name=~\"$model\"})",
+     "legendFormat": ""
+    }
+   ],
+   "gridPos": {
+    "x": 12,
+    "y": 1,
+    "w": 3,
+    "h": 4
+   },
+   "id": 6
+  },
+  {
+   "type": "stat",
+   "title": "Выполняются",
+   "description": "Запросов в обработке на GPU сейчас.",
+   "datasource": {
+    "type": "prometheus",
+    "uid": "prometheus"
+   },
+   "fieldConfig": {
+    "defaults": {
+     "unit": "none",
+     "noValue": "—",
+     "mappings": [],
+     "thresholds": {
+      "mode": "absolute",
+      "steps": [
+       {
+        "color": "green",
+        "value": null
+       }
+      ]
+     },
+     "color": {
+      "mode": "thresholds"
+     }
+    },
+    "overrides": []
+   },
+   "options": {
+    "reduceOptions": {
+     "calcs": [
+      "lastNotNull"
+     ],
+     "fields": "",
+     "values": false
+    },
+    "colorMode": "value",
+    "graphMode": "area",
+    "textMode": "auto",
+    "justifyMode": "auto",
+    "orientation": "auto"
+   },
+   "targets": [
+    {
+     "datasource": {
+      "type": "prometheus",
+      "uid": "prometheus"
+     },
+     "refId": "A",
+     "expr": "sum(gman:llm_requests_running:sum{gman_service=~\"$service\", model_name=~\"$model\"})",
+     "legendFormat": ""
+    }
+   ],
+   "gridPos": {
+    "x": 15,
+    "y": 1,
+    "w": 3,
+    "h": 4
+   },
+   "id": 7
+  },
+  {
+   "type": "stat",
+   "title": "В очереди",
+   "description": "Запросов, ожидающих места в батче.",
+   "datasource": {
+    "type": "prometheus",
+    "uid": "prometheus"
+   },
+   "fieldConfig": {
+    "defaults": {
+     "unit": "none",
+     "noValue": "—",
+     "mappings": [],
+     "thresholds": {
+      "mode": "absolute",
+      "steps": [
+       {
+        "color": "green",
+        "value": null
+       },
+       {
+        "color": "orange",
+        "value": 1
+       },
+       {
+        "color": "red",
+        "value": 20
+       }
+      ]
+     },
+     "color": {
+      "mode": "thresholds"
+     }
+    },
+    "overrides": []
+   },
+   "options": {
+    "reduceOptions": {
+     "calcs": [
+      "lastNotNull"
+     ],
+     "fields": "",
+     "values": false
+    },
+    "colorMode": "value",
+    "graphMode": "area",
+    "textMode": "auto",
+    "justifyMode": "auto",
+    "orientation": "auto"
+   },
+   "targets": [
+    {
+     "datasource": {
+      "type": "prometheus",
+      "uid": "prometheus"
+     },
+     "refId": "A",
+     "expr": "sum(gman:llm_requests_waiting:sum{gman_service=~\"$service\", model_name=~\"$model\"})",
+     "legendFormat": ""
+    }
+   ],
+   "gridPos": {
+    "x": 18,
+    "y": 1,
+    "w": 3,
+    "h": 4
+   },
+   "id": 8
+  },
+  {
+   "type": "stat",
+   "title": "KV-кэш",
+   "description": "Заполненность KV-кэша (самая загруженная реплика).",
+   "datasource": {
+    "type": "prometheus",
+    "uid": "prometheus"
+   },
+   "fieldConfig": {
+    "defaults": {
+     "unit": "percentunit",
+     "noValue": "—",
+     "mappings": [],
+     "thresholds": {
+      "mode": "absolute",
+      "steps": [
+       {
+        "color": "green",
+        "value": null
+       },
+       {
+        "color": "orange",
+        "value": 0.85
+       },
+       {
+        "color": "red",
+        "value": 0.95
+       }
+      ]
+     },
+     "color": {
+      "mode": "thresholds"
+     }
+    },
+    "overrides": []
+   },
+   "options": {
+    "reduceOptions": {
+     "calcs": [
+      "lastNotNull"
+     ],
+     "fields": "",
+     "values": false
+    },
+    "colorMode": "value",
+    "graphMode": "area",
+    "textMode": "auto",
+    "justifyMode": "auto",
+    "orientation": "auto"
+   },
+   "targets": [
+    {
+     "datasource": {
+      "type": "prometheus",
+      "uid": "prometheus"
+     },
+     "refId": "A",
+     "expr": "max(gman:llm_kv_cache_usage:max{gman_service=~\"$service\", model_name=~\"$model\"})",
+     "legendFormat": ""
+    }
+   ],
+   "gridPos": {
+    "x": 21,
+    "y": 1,
+    "w": 3,
+    "h": 4
+   },
+   "id": 9
+  },
+  {
+   "type": "row",
+   "title": "Задержки",
+   "collapsed": false,
+   "gridPos": {
+    "x": 0,
+    "y": 5,
+    "w": 24,
+    "h": 1
+   },
+   "panels": []
+  },
+  {
+   "type": "timeseries",
+   "title": "Время до первого токена (TTFT)",
+   "description": "Перцентили за интервал графика. Растет с очередью и длиной промпта.",
+   "datasource": {
+    "type": "prometheus",
+    "uid": "prometheus"
+   },
+   "fieldConfig": {
+    "defaults": {
+     "unit": "s",
+     "custom": {
+      "fillOpacity": 5,
+      "stacking": {
+       "mode": "none"
+      },
+      "showPoints": "never",
+      "lineWidth": 1,
+      "spanNulls": false
+     },
+     "min": 0
+    },
+    "overrides": []
+   },
+   "options": {
+    "legend": {
+     "displayMode": "table",
+     "placement": "bottom",
+     "calcs": [
+      "lastNotNull",
+      "max"
+     ]
+    },
+    "tooltip": {
+     "mode": "multi",
+     "sort": "desc"
+    }
+   },
+   "targets": [
+    {
+     "datasource": {
+      "type": "prometheus",
+      "uid": "prometheus"
+     },
+     "refId": "A",
+     "expr": "histogram_quantile(0.5, sum by (model_name, le) (rate(vllm:time_to_first_token_seconds_bucket{gman_service=~\"$service\", model_name=~\"$model\"}[$__rate_interval])))",
+     "legendFormat": "p50 {{model_name}}"
+    },
+    {
+     "datasource": {
+      "type": "prometheus",
+      "uid": "prometheus"
+     },
+     "refId": "B",
+     "expr": "histogram_quantile(0.95, sum by (model_name, le) (rate(vllm:time_to_first_token_seconds_bucket{gman_service=~\"$service\", model_name=~\"$model\"}[$__rate_interval])))",
+     "legendFormat": "p95 {{model_name}}"
+    },
+    {
+     "datasource": {
+      "type": "prometheus",
+      "uid": "prometheus"
+     },
+     "refId": "C",
+     "expr": "histogram_quantile(0.99, sum by (model_name, le) (rate(vllm:time_to_first_token_seconds_bucket{gman_service=~\"$service\", model_name=~\"$model\"}[$__rate_interval])))",
+     "legendFormat": "p99 {{model_name}}"
+    }
+   ],
+   "gridPos": {
+    "x": 0,
+    "y": 6,
+    "w": 12,
+    "h": 8
+   },
+   "id": 11
+  },
+  {
+   "type": "timeseries",
+   "title": "Время на токен (TPOT)",
+   "description": "Интервал между токенами ответа после первого.",
+   "datasource": {
+    "type": "prometheus",
+    "uid": "prometheus"
+   },
+   "fieldConfig": {
+    "defaults": {
+     "unit": "s",
+     "custom": {
+      "fillOpacity": 5,
+      "stacking": {
+       "mode": "none"
+      },
+      "showPoints": "never",
+      "lineWidth": 1,
+      "spanNulls": false
+     },
+     "min": 0
+    },
+    "overrides": []
+   },
+   "options": {
+    "legend": {
+     "displayMode": "table",
+     "placement": "bottom",
+     "calcs": [
+      "lastNotNull",
+      "max"
+     ]
+    },
+    "tooltip": {
+     "mode": "multi",
+     "sort": "desc"
+    }
+   },
+   "targets": [
+    {
+     "datasource": {
+      "type": "prometheus",
+      "uid": "prometheus"
+     },
+     "refId": "A",
+     "expr": "histogram_quantile(0.5, sum by (model_name, le) (rate(vllm:inter_token_latency_seconds_bucket{gman_service=~\"$service\", model_name=~\"$model\"}[$__rate_interval]) or rate(vllm:time_per_output_token_seconds_bucket{gman_service=~\"$service\", model_name=~\"$model\"}[$__rate_interval])))",
+     "legendFormat": "p50 {{model_name}}"
+    },
+    {
+     "datasource": {
+      "type": "prometheus",
+      "uid": "prometheus"
+     },
+     "refId": "B",
+     "expr": "histogram_quantile(0.95, sum by (model_name, le) (rate(vllm:inter_token_latency_seconds_bucket{gman_service=~\"$service\", model_name=~\"$model\"}[$__rate_interval]) or rate(vllm:time_per_output_token_seconds_bucket{gman_service=~\"$service\", model_name=~\"$model\"}[$__rate_interval])))",
+     "legendFormat": "p95 {{model_name}}"
+    }
+   ],
+   "gridPos": {
+    "x": 12,
+    "y": 6,
+    "w": 12,
+    "h": 8
+   },
+   "id": 12
+  },
+  {
+   "type": "timeseries",
+   "title": "Полное время запроса (E2E)",
+   "description": "От поступления запроса до последнего токена.",
+   "datasource": {
+    "type": "prometheus",
+    "uid": "prometheus"
+   },
+   "fieldConfig": {
+    "defaults": {
+     "unit": "s",
+     "custom": {
+      "fillOpacity": 5,
+      "stacking": {
+       "mode": "none"
+      },
+      "showPoints": "never",
+      "lineWidth": 1,
+      "spanNulls": false
+     },
+     "min": 0
+    },
+    "overrides": []
+   },
+   "options": {
+    "legend": {
+     "displayMode": "table",
+     "placement": "bottom",
+     "calcs": [
+      "lastNotNull",
+      "max"
+     ]
+    },
+    "tooltip": {
+     "mode": "multi",
+     "sort": "desc"
+    }
+   },
+   "targets": [
+    {
+     "datasource": {
+      "type": "prometheus",
+      "uid": "prometheus"
+     },
+     "refId": "A",
+     "expr": "histogram_quantile(0.5, sum by (model_name, le) (rate(vllm:e2e_request_latency_seconds_bucket{gman_service=~\"$service\", model_name=~\"$model\"}[$__rate_interval])))",
+     "legendFormat": "p50 {{model_name}}"
+    },
+    {
+     "datasource": {
+      "type": "prometheus",
+      "uid": "prometheus"
+     },
+     "refId": "B",
+     "expr": "histogram_quantile(0.95, sum by (model_name, le) (rate(vllm:e2e_request_latency_seconds_bucket{gman_service=~\"$service\", model_name=~\"$model\"}[$__rate_interval])))",
+     "legendFormat": "p95 {{model_name}}"
+    }
+   ],
+   "gridPos": {
+    "x": 0,
+    "y": 14,
+    "w": 12,
+    "h": 8
+   },
+   "id": 13
+  },
+  {
+   "type": "timeseries",
+   "title": "Фазы запроса, p95",
+   "description": "Ожидание в очереди, prefill (обработка промпта) и decode (генерация).",
+   "datasource": {
+    "type": "prometheus",
+    "uid": "prometheus"
+   },
+   "fieldConfig": {
+    "defaults": {
+     "unit": "s",
+     "custom": {
+      "fillOpacity": 5,
+      "stacking": {
+       "mode": "none"
+      },
+      "showPoints": "never",
+      "lineWidth": 1,
+      "spanNulls": false
+     },
+     "min": 0
+    },
+    "overrides": []
+   },
+   "options": {
+    "legend": {
+     "displayMode": "table",
+     "placement": "bottom",
+     "calcs": [
+      "lastNotNull",
+      "max"
+     ]
+    },
+    "tooltip": {
+     "mode": "multi",
+     "sort": "desc"
+    }
+   },
+   "targets": [
+    {
+     "datasource": {
+      "type": "prometheus",
+      "uid": "prometheus"
+     },
+     "refId": "A",
+     "expr": "histogram_quantile(0.95, sum by (model_name, le) (rate(vllm:request_queue_time_seconds_bucket{gman_service=~\"$service\", model_name=~\"$model\"}[$__rate_interval])))",
+     "legendFormat": "очередь {{model_name}}"
+    },
+    {
+     "datasource": {
+      "type": "prometheus",
+      "uid": "prometheus"
+     },
+     "refId": "B",
+     "expr": "histogram_quantile(0.95, sum by (model_name, le) (rate(vllm:request_prefill_time_seconds_bucket{gman_service=~\"$service\", model_name=~\"$model\"}[$__rate_interval])))",
+     "legendFormat": "prefill {{model_name}}"
+    },
+    {
+     "datasource": {
+      "type": "prometheus",
+      "uid": "prometheus"
+     },
+     "refId": "C",
+     "expr": "histogram_quantile(0.95, sum by (model_name, le) (rate(vllm:request_decode_time_seconds_bucket{gman_service=~\"$service\", model_name=~\"$model\"}[$__rate_interval])))",
+     "legendFormat": "decode {{model_name}}"
+    }
+   ],
+   "gridPos": {
+    "x": 12,
+    "y": 14,
+    "w": 12,
+    "h": 8
+   },
+   "id": 14
+  },
+  {
+   "type": "heatmap",
+   "title": "Распределение TTFT",
+   "description": "Сколько запросов получили первый токен за каждое время.",
+   "datasource": {
+    "type": "prometheus",
+    "uid": "prometheus"
+   },
+   "fieldConfig": {
+    "defaults": {},
+    "overrides": []
+   },
+   "options": {
+    "calculate": false,
+    "yAxis": {
+     "unit": "s"
+    },
+    "cellGap": 1,
+    "color": {
+     "mode": "scheme",
+     "scheme": "Oranges",
+     "steps": 64
+    },
+    "tooltip": {
+     "show": true,
+     "yHistogram": true
+    }
+   },
+   "targets": [
+    {
+     "datasource": {
+      "type": "prometheus",
+      "uid": "prometheus"
+     },
+     "refId": "A",
+     "format": "heatmap",
+     "legendFormat": "{{le}}",
+     "expr": "sum by (le) (increase(vllm:time_to_first_token_seconds_bucket{gman_service=~\"$service\", model_name=~\"$model\"}[$__rate_interval]))"
+    }
+   ],
+   "gridPos": {
+    "x": 0,
+    "y": 22,
+    "w": 24,
+    "h": 8
+   },
+   "id": 15
+  },
+  {
+   "type": "row",
+   "title": "Нагрузка и пропускная способность",
+   "collapsed": false,
+   "gridPos": {
+    "x": 0,
+    "y": 30,
+    "w": 24,
+    "h": 1
+   },
+   "panels": []
+  },
+  {
+   "type": "timeseries",
+   "title": "Запросы по причине завершения",
+   "description": "stop — модель закончила ответ, length — уперлась в max_tokens, abort — клиент отменил или ошибка.",
+   "datasource": {
+    "type": "prometheus",
+    "uid": "prometheus"
+   },
+   "fieldConfig": {
+    "defaults": {
+     "unit": "reqps",
+     "custom": {
+      "fillOpacity": 30,
+      "stacking": {
+       "mode": "normal"
+      },
+      "showPoints": "never",
+      "lineWidth": 1,
+      "spanNulls": false
+     },
+     "min": 0
+    },
+    "overrides": []
+   },
+   "options": {
+    "legend": {
+     "displayMode": "table",
+     "placement": "bottom",
+     "calcs": [
+      "lastNotNull",
+      "max"
+     ]
+    },
+    "tooltip": {
+     "mode": "multi",
+     "sort": "desc"
+    }
+   },
+   "targets": [
+    {
+     "datasource": {
+      "type": "prometheus",
+      "uid": "prometheus"
+     },
+     "refId": "A",
+     "expr": "sum by (finished_reason) (rate(vllm:request_success_total{gman_service=~\"$service\", model_name=~\"$model\"}[$__rate_interval]))",
+     "legendFormat": "{{finished_reason}}"
+    }
+   ],
+   "gridPos": {
+    "x": 0,
+    "y": 31,
+    "w": 12,
+    "h": 8
+   },
+   "id": 17
+  },
+  {
+   "type": "timeseries",
+   "title": "Токены/с",
+   "description": "Обработанные токены промптов и сгенерированные токены.",
+   "datasource": {
+    "type": "prometheus",
+    "uid": "prometheus"
+   },
+   "fieldConfig": {
+    "defaults": {
+     "unit": "short",
+     "custom": {
+      "fillOpacity": 5,
+      "stacking": {
+       "mode": "none"
+      },
+      "showPoints": "never",
+      "lineWidth": 1,
+      "spanNulls": false
+     },
+     "min": 0
+    },
+    "overrides": []
+   },
+   "options": {
+    "legend": {
+     "displayMode": "table",
+     "placement": "bottom",
+     "calcs": [
+      "lastNotNull",
+      "max"
+     ]
+    },
+    "tooltip": {
+     "mode": "multi",
+     "sort": "desc"
+    }
+   },
+   "targets": [
+    {
+     "datasource": {
+      "type": "prometheus",
+      "uid": "prometheus"
+     },
+     "refId": "A",
+     "expr": "sum by (model_name) (rate(vllm:prompt_tokens_total{gman_service=~\"$service\", model_name=~\"$model\"}[$__rate_interval]))",
+     "legendFormat": "промпт {{model_name}}"
+    },
+    {
+     "datasource": {
+      "type": "prometheus",
+      "uid": "prometheus"
+     },
+     "refId": "B",
+     "expr": "sum by (model_name) (rate(vllm:generation_tokens_total{gman_service=~\"$service\", model_name=~\"$model\"}[$__rate_interval]))",
+     "legendFormat": "генерация {{model_name}}"
+    }
+   ],
+   "gridPos": {
+    "x": 12,
+    "y": 31,
+    "w": 12,
+    "h": 8
+   },
+   "id": 18
+  },
+  {
+   "type": "timeseries",
+   "title": "Запросы в работе и в очереди",
+   "description": "Очередь растет, когда батч заполнен или не хватает KV-кэша.",
+   "datasource": {
+    "type": "prometheus",
+    "uid": "prometheus"
+   },
+   "fieldConfig": {
+    "defaults": {
+     "unit": "none",
+     "custom": {
+      "fillOpacity": 5,
+      "stacking": {
+       "mode": "none"
+      },
+      "showPoints": "never",
+      "lineWidth": 1,
+      "spanNulls": false
+     },
+     "min": 0
+    },
+    "overrides": []
+   },
+   "options": {
+    "legend": {
+     "displayMode": "table",
+     "placement": "bottom",
+     "calcs": [
+      "lastNotNull",
+      "max"
+     ]
+    },
+    "tooltip": {
+     "mode": "multi",
+     "sort": "desc"
+    }
+   },
+   "targets": [
+    {
+     "datasource": {
+      "type": "prometheus",
+      "uid": "prometheus"
+     },
+     "refId": "A",
+     "expr": "sum by (model_name) (vllm:num_requests_running{gman_service=~\"$service\", model_name=~\"$model\"})",
+     "legendFormat": "выполняются {{model_name}}"
+    },
+    {
+     "datasource": {
+      "type": "prometheus",
+      "uid": "prometheus"
+     },
+     "refId": "B",
+     "expr": "sum by (model_name) (vllm:num_requests_waiting{gman_service=~\"$service\", model_name=~\"$model\"})",
+     "legendFormat": "в очереди {{model_name}}"
+    }
+   ],
+   "gridPos": {
+    "x": 0,
+    "y": 39,
+    "w": 12,
+    "h": 8
+   },
+   "id": 19
+  },
+  {
+   "type": "timeseries",
+   "title": "KV-кэш",
+   "description": "Заполненность KV-кэша по репликам. Около 100% — запросы ждут или вытесняются.",
+   "datasource": {
+    "type": "prometheus",
+    "uid": "prometheus"
+   },
+   "fieldConfig": {
+    "defaults": {
+     "unit": "percentunit",
+     "custom": {
+      "fillOpacity": 5,
+      "stacking": {
+       "mode": "none"
+      },
+      "showPoints": "never",
+      "lineWidth": 1,
+      "spanNulls": false,
+      "thresholdsStyle": {
+       "mode": "line"
+      }
+     },
+     "min": 0,
+     "max": 1,
+     "thresholds": {
+      "mode": "absolute",
+      "steps": [
+       {
+        "color": "transparent",
+        "value": null
+       },
+       {
+        "color": "red",
+        "value": 0.95
+       }
+      ]
+     }
+    },
+    "overrides": []
+   },
+   "options": {
+    "legend": {
+     "displayMode": "table",
+     "placement": "bottom",
+     "calcs": [
+      "lastNotNull",
+      "max"
+     ]
+    },
+    "tooltip": {
+     "mode": "multi",
+     "sort": "desc"
+    }
+   },
+   "targets": [
+    {
+     "datasource": {
+      "type": "prometheus",
+      "uid": "prometheus"
+     },
+     "refId": "A",
+     "expr": "vllm:kv_cache_usage_perc{gman_service=~\"$service\", model_name=~\"$model\"} or vllm:gpu_cache_usage_perc{gman_service=~\"$service\", model_name=~\"$model\"}",
+     "legendFormat": "{{model_name}} {{host_id}} {{container_name}}{{pod}}"
+    }
+   ],
+   "gridPos": {
+    "x": 12,
+    "y": 39,
+    "w": 12,
+    "h": 8
+   },
+   "id": 20
+  },
+  {
+   "type": "timeseries",
+   "title": "Вытеснения",
+   "description": "Запросы, вытесненные из KV-кэша и пересчитанные позже.",
+   "datasource": {
+    "type": "prometheus",
+    "uid": "prometheus"
+   },
+   "fieldConfig": {
+    "defaults": {
+     "unit": "short",
+     "custom": {
+      "fillOpacity": 5,
+      "stacking": {
+       "mode": "none"
+      },
+      "showPoints": "never",
+      "lineWidth": 1,
+      "spanNulls": false
+     },
+     "min": 0
+    },
+    "overrides": []
+   },
+   "options": {
+    "legend": {
+     "displayMode": "table",
+     "placement": "bottom",
+     "calcs": [
+      "lastNotNull",
+      "max"
+     ]
+    },
+    "tooltip": {
+     "mode": "multi",
+     "sort": "desc"
+    }
+   },
+   "targets": [
+    {
+     "datasource": {
+      "type": "prometheus",
+      "uid": "prometheus"
+     },
+     "refId": "A",
+     "expr": "sum by (model_name) (rate(vllm:num_preemptions_total{gman_service=~\"$service\", model_name=~\"$model\"}[$__rate_interval]))",
+     "legendFormat": "{{model_name}}"
+    }
+   ],
+   "gridPos": {
+    "x": 0,
+    "y": 47,
+    "w": 12,
+    "h": 8
+   },
+   "id": 21
+  },
+  {
+   "type": "timeseries",
+   "title": "Попадания в prefix cache",
+   "description": "Доля токенов промптов, найденных в кэше префиксов (vLLM 0.8+).",
+   "datasource": {
+    "type": "prometheus",
+    "uid": "prometheus"
+   },
+   "fieldConfig": {
+    "defaults": {
+     "unit": "percentunit",
+     "custom": {
+      "fillOpacity": 5,
+      "stacking": {
+       "mode": "none"
+      },
+      "showPoints": "never",
+      "lineWidth": 1,
+      "spanNulls": false
+     },
+     "min": 0,
+     "max": 1
+    },
+    "overrides": []
+   },
+   "options": {
+    "legend": {
+     "displayMode": "table",
+     "placement": "bottom",
+     "calcs": [
+      "lastNotNull",
+      "max"
+     ]
+    },
+    "tooltip": {
+     "mode": "multi",
+     "sort": "desc"
+    }
+   },
+   "targets": [
+    {
+     "datasource": {
+      "type": "prometheus",
+      "uid": "prometheus"
+     },
+     "refId": "A",
+     "expr": "sum by (model_name) (rate(vllm:prefix_cache_hits_total{gman_service=~\"$service\", model_name=~\"$model\"}[$__rate_interval])) / sum by (model_name) (rate(vllm:prefix_cache_queries_total{gman_service=~\"$service\", model_name=~\"$model\"}[$__rate_interval]))",
+     "legendFormat": "{{model_name}}"
+    }
+   ],
+   "gridPos": {
+    "x": 12,
+    "y": 47,
+    "w": 12,
+    "h": 8
+   },
+   "id": 22
+  },
+  {
+   "type": "row",
+   "title": "Запросы",
+   "collapsed": false,
+   "gridPos": {
+    "x": 0,
+    "y": 55,
+    "w": 24,
+    "h": 1
+   },
+   "panels": []
+  },
+  {
+   "type": "timeseries",
+   "title": "Длина промпта",
+   "description": "Токенов во входе запроса.",
+   "datasource": {
+    "type": "prometheus",
+    "uid": "prometheus"
+   },
+   "fieldConfig": {
+    "defaults": {
+     "unit": "short",
+     "custom": {
+      "fillOpacity": 5,
+      "stacking": {
+       "mode": "none"
+      },
+      "showPoints": "never",
+      "lineWidth": 1,
+      "spanNulls": false
+     },
+     "min": 0
+    },
+    "overrides": []
+   },
+   "options": {
+    "legend": {
+     "displayMode": "table",
+     "placement": "bottom",
+     "calcs": [
+      "lastNotNull",
+      "max"
+     ]
+    },
+    "tooltip": {
+     "mode": "multi",
+     "sort": "desc"
+    }
+   },
+   "targets": [
+    {
+     "datasource": {
+      "type": "prometheus",
+      "uid": "prometheus"
+     },
+     "refId": "A",
+     "expr": "histogram_quantile(0.5, sum by (model_name, le) (rate(vllm:request_prompt_tokens_bucket{gman_service=~\"$service\", model_name=~\"$model\"}[$__rate_interval])))",
+     "legendFormat": "p50 {{model_name}}"
+    },
+    {
+     "datasource": {
+      "type": "prometheus",
+      "uid": "prometheus"
+     },
+     "refId": "B",
+     "expr": "histogram_quantile(0.95, sum by (model_name, le) (rate(vllm:request_prompt_tokens_bucket{gman_service=~\"$service\", model_name=~\"$model\"}[$__rate_interval])))",
+     "legendFormat": "p95 {{model_name}}"
+    }
+   ],
+   "gridPos": {
+    "x": 0,
+    "y": 56,
+    "w": 12,
+    "h": 8
+   },
+   "id": 24
+  },
+  {
+   "type": "timeseries",
+   "title": "Длина ответа",
+   "description": "Сгенерированных токенов в запросе.",
+   "datasource": {
+    "type": "prometheus",
+    "uid": "prometheus"
+   },
+   "fieldConfig": {
+    "defaults": {
+     "unit": "short",
+     "custom": {
+      "fillOpacity": 5,
+      "stacking": {
+       "mode": "none"
+      },
+      "showPoints": "never",
+      "lineWidth": 1,
+      "spanNulls": false
+     },
+     "min": 0
+    },
+    "overrides": []
+   },
+   "options": {
+    "legend": {
+     "displayMode": "table",
+     "placement": "bottom",
+     "calcs": [
+      "lastNotNull",
+      "max"
+     ]
+    },
+    "tooltip": {
+     "mode": "multi",
+     "sort": "desc"
+    }
+   },
+   "targets": [
+    {
+     "datasource": {
+      "type": "prometheus",
+      "uid": "prometheus"
+     },
+     "refId": "A",
+     "expr": "histogram_quantile(0.5, sum by (model_name, le) (rate(vllm:request_generation_tokens_bucket{gman_service=~\"$service\", model_name=~\"$model\"}[$__rate_interval])))",
+     "legendFormat": "p50 {{model_name}}"
+    },
+    {
+     "datasource": {
+      "type": "prometheus",
+      "uid": "prometheus"
+     },
+     "refId": "B",
+     "expr": "histogram_quantile(0.95, sum by (model_name, le) (rate(vllm:request_generation_tokens_bucket{gman_service=~\"$service\", model_name=~\"$model\"}[$__rate_interval])))",
+     "legendFormat": "p95 {{model_name}}"
+    }
+   ],
+   "gridPos": {
+    "x": 12,
+    "y": 56,
+    "w": 12,
+    "h": 8
+   },
+   "id": 25
+  },
+  {
+   "type": "row",
+   "title": "GPU серверов модели",
+   "collapsed": false,
+   "gridPos": {
+    "x": 0,
+    "y": 64,
+    "w": 24,
+    "h": 1
+   },
+   "panels": []
+  },
+  {
+   "type": "timeseries",
+   "title": "Загрузка GPU",
+   "description": "GPU хостов, на которых работают выбранные модели (дашборд GMan · GPU — подробно).",
+   "datasource": {
+    "type": "prometheus",
+    "uid": "prometheus"
+   },
+   "fieldConfig": {
+    "defaults": {
+     "unit": "percentunit",
+     "custom": {
+      "fillOpacity": 5,
+      "stacking": {
+       "mode": "none"
+      },
+      "showPoints": "never",
+      "lineWidth": 1,
+      "spanNulls": false
+     },
+     "min": 0,
+     "max": 1
+    },
+    "overrides": []
+   },
+   "options": {
+    "legend": {
+     "displayMode": "table",
+     "placement": "bottom",
+     "calcs": [
+      "lastNotNull",
+      "max"
+     ]
+    },
+    "tooltip": {
+     "mode": "multi",
+     "sort": "desc"
+    }
+   },
+   "targets": [
+    {
+     "datasource": {
+      "type": "prometheus",
+      "uid": "prometheus"
+     },
+     "refId": "A",
+     "expr": "gman:gpu_utilization:ratio * on (host_id) group_left () group by (host_id) (vllm:num_requests_running{gman_service=~\"$service\", model_name=~\"$model\"})",
+     "legendFormat": "{{host_id}} {{UUID}}"
+    }
+   ],
+   "gridPos": {
+    "x": 0,
+    "y": 65,
+    "w": 12,
+    "h": 8
+   },
+   "id": 27
+  },
+  {
+   "type": "timeseries",
+   "title": "VRAM занято",
+   "description": "vLLM заранее резервирует память под KV-кэш (gpu_memory_utilization), поэтому VRAM почти полна и без нагрузки.",
+   "datasource": {
+    "type": "prometheus",
+    "uid": "prometheus"
+   },
+   "fieldConfig": {
+    "defaults": {
+     "unit": "percentunit",
+     "custom": {
+      "fillOpacity": 5,
+      "stacking": {
+       "mode": "none"
+      },
+      "showPoints": "never",
+      "lineWidth": 1,
+      "spanNulls": false
+     },
+     "min": 0,
+     "max": 1
+    },
+    "overrides": []
+   },
+   "options": {
+    "legend": {
+     "displayMode": "table",
+     "placement": "bottom",
+     "calcs": [
+      "lastNotNull",
+      "max"
+     ]
+    },
+    "tooltip": {
+     "mode": "multi",
+     "sort": "desc"
+    }
+   },
+   "targets": [
+    {
+     "datasource": {
+      "type": "prometheus",
+      "uid": "prometheus"
+     },
+     "refId": "A",
+     "expr": "gman:gpu_memory_used_bytes:max / gman:gpu_memory_total_bytes:max * on (host_id) group_left () group by (host_id) (vllm:num_requests_running{gman_service=~\"$service\", model_name=~\"$model\"})",
+     "legendFormat": "{{host_id}} {{UUID}}"
+    }
+   ],
+   "gridPos": {
+    "x": 12,
+    "y": 65,
+    "w": 12,
+    "h": 8
+   },
+   "id": 28
+  },
+  {
+   "type": "timeseries",
+   "title": "Доступность серверов модели",
+   "description": "1 — Collector читает /metrics сервера, 0 — не отвечает.",
+   "datasource": {
+    "type": "prometheus",
+    "uid": "prometheus"
+   },
+   "fieldConfig": {
+    "defaults": {
+     "unit": "none",
+     "custom": {
+      "fillOpacity": 5,
+      "stacking": {
+       "mode": "none"
+      },
+      "showPoints": "never",
+      "lineWidth": 1,
+      "spanNulls": false
+     },
+     "min": 0,
+     "max": 1
+    },
+    "overrides": []
+   },
+   "options": {
+    "legend": {
+     "displayMode": "table",
+     "placement": "bottom",
+     "calcs": [
+      "lastNotNull",
+      "min"
+     ]
+    },
+    "tooltip": {
+     "mode": "multi",
+     "sort": "desc"
+    }
+   },
+   "targets": [
+    {
+     "datasource": {
+      "type": "prometheus",
+      "uid": "prometheus"
+     },
+     "refId": "A",
+     "expr": "up{exported_job=\"vllm\", gman_service=~\"$service\"}",
+     "legendFormat": "{{host_id}} {{exported_instance}}"
+    }
+   ],
+   "gridPos": {
+    "x": 0,
+    "y": 73,
+    "w": 24,
+    "h": 6
+   },
+   "id": 29
+  }
+ ]
+}

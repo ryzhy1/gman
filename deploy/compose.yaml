@@ -18,6 +18,8 @@ services:
     environment:
       DATABASE_URL: postgresql+psycopg://gman:${POSTGRES_PASSWORD}@db/gman
       # Shared Bearer tokens for automation and token-only mode; an empty value disables the token.
+      # true: portal opens without sign-in (local stand only); ignored when SSO is configured.
+      GMAN_AUTH_DISABLED: ${GMAN_AUTH_DISABLED:-false}
       GMAN_READ_TOKEN: ${GMAN_READ_TOKEN:-}
       GMAN_ADMIN_TOKEN: ${GMAN_ADMIN_TOKEN:-}
       GMAN_CI_TOKEN: ${GMAN_CI_TOKEN:?Set GMAN_CI_TOKEN}

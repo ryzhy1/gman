@@ -219,17 +219,17 @@ tests:
         exp_alerts:
           - exp_labels: {severity: critical, scope: gpu, host_id: gpu-host, UUID: GPU-1}
             exp_annotations:
-              description: "Рост double-bit ECC (DCGM или nvidia-smi) либо сбой переназначения строк памяти."
+              description: "Рост double-bit ECC (DCGM, nvidia_gpu_exporter или nvidia-smi) либо сбой переназначения строк памяти."
               runbook_url: "https://gman.example/#alerts/GManGpuEccUncorrectable"
               summary: "Неисправимые ошибки ECC на GPU GPU-1 (gpu-host)"
           - exp_labels: {severity: critical, scope: gpu, host_id: gpu-host, UUID: GPU-3}
             exp_annotations:
-              description: "Рост double-bit ECC (DCGM или nvidia-smi) либо сбой переназначения строк памяти."
+              description: "Рост double-bit ECC (DCGM, nvidia_gpu_exporter или nvidia-smi) либо сбой переназначения строк памяти."
               runbook_url: "https://gman.example/#alerts/GManGpuEccUncorrectable"
               summary: "Неисправимые ошибки ECC на GPU GPU-3 (gpu-host)"
           - exp_labels: {severity: critical, scope: gpu, host_id: srv, UUID: GPU-9}
             exp_annotations:
-              description: "Рост double-bit ECC (DCGM или nvidia-smi) либо сбой переназначения строк памяти."
+              description: "Рост double-bit ECC (DCGM, nvidia_gpu_exporter или nvidia-smi) либо сбой переназначения строк памяти."
               runbook_url: "https://gman.example/#alerts/GManGpuEccUncorrectable"
               summary: "Неисправимые ошибки ECC на GPU GPU-9 (srv)"
       - eval_time: 30m
@@ -1143,4 +1143,142 @@ tests:
               runbook_url: https://gman.example/#alerts/GManK8sNodeRebooted
       - eval_time: 16m
         alertname: GManK8sNodeRebooted
+        exp_alerts: []
+
+  - name: nvidia_gpu_exporter joins the GPU series of DCGM
+    external_labels: {gman_portal: https://gman.example}
+    interval: 1m
+    input_series:
+      # ai1: nvidia_gpu_exporter only (uuid without the GPU- prefix); dcgm1: DCGM only.
+      - series: 'nvidia_smi_utilization_gpu_ratio{host_id="ai1", uuid="ebefc576"}'
+        values: '0.5x20'
+      - series: 'nvidia_smi_memory_used_bytes{host_id="ai1", uuid="ebefc576"}'
+        values: '1000x20'
+      - series: 'nvidia_smi_temperature_gpu{host_id="ai1", uuid="ebefc576"}'
+        values: '70x20'
+      - series: 'nvidia_smi_gpu_info{host_id="ai1", uuid="ebefc576", name="NVIDIA H100 PCIe", driver_version="570"}'
+        values: '1x20'
+      - series: 'nvidia_smi_clocks_event_reasons_sw_power_cap{host_id="ai1", uuid="ebefc576"}'
+        values: '1x20'
+      - series: 'nvidia_smi_clocks_event_reasons_hw_thermal_slowdown{host_id="ai1", uuid="ebefc576"}'
+        values: '1x20'
+      - series: 'nvidia_smi_clocks_event_reasons_gpu_idle{host_id="ai1", uuid="ebefc576"}'
+        values: '0x20'
+      - series: 'nvidia_smi_ecc_errors_uncorrected_aggregate_total{host_id="ai1", uuid="ebefc576"}'
+        values: '0 0 0 2x17'
+      - series: 'DCGM_FI_DEV_GPU_UTIL{host_id="dcgm1", UUID="GPU-1", modelName="NVIDIA A100-SXM4-80GB"}'
+        values: '40x20'
+      - series: 'DCGM_FI_DEV_GPU_TEMP{host_id="dcgm1", UUID="GPU-1", modelName="NVIDIA A100-SXM4-80GB"}'
+        values: '60x20'
+    promql_expr_test:
+      - expr: gman:gpu_utilization:ratio
+        eval_time: 5m
+        exp_samples:
+          - labels: 'gman:gpu_utilization:ratio{host_id="ai1", UUID="GPU-ebefc576"}'
+            value: 0.5
+          - labels: 'gman:gpu_utilization:ratio{host_id="dcgm1", UUID="GPU-1"}'
+            value: 0.4
+      - expr: gman:gpu_memory_used_bytes:max
+        eval_time: 5m
+        exp_samples:
+          - labels: 'gman:gpu_memory_used_bytes:max{host_id="ai1", UUID="GPU-ebefc576"}'
+            value: 1000
+      # sw_power_cap (4) + hw_thermal_slowdown (64); reasons the driver omits count as inactive.
+      - expr: gman:gpu_clock_event_reasons:max
+        eval_time: 5m
+        exp_samples:
+          - labels: 'gman:gpu_clock_event_reasons:max{host_id="ai1", UUID="GPU-ebefc576"}'
+            value: 68
+      - expr: gman:gpu_model:info
+        eval_time: 5m
+        exp_samples:
+          - labels: 'gman:gpu_model:info{host_id="ai1", UUID="GPU-ebefc576", model="NVIDIA H100 PCIe"}'
+            value: 1
+          - labels: 'gman:gpu_model:info{host_id="dcgm1", UUID="GPU-1", model="NVIDIA A100-SXM4-80GB"}'
+            value: 1
+    alert_rule_test:
+      - eval_time: 10m
+        alertname: GManGpuThermalThrottling
+        exp_alerts:
+          - exp_labels: {severity: warning, scope: gpu, host_id: ai1, UUID: GPU-ebefc576}
+            exp_annotations:
+              summary: 'Тепловой троттлинг GPU GPU-ebefc576 (ai1)'
+              description: GPU снижает частоты из-за температуры (sw_thermal/hw_thermal) дольше пяти минут.
+              runbook_url: https://gman.example/#alerts/GManGpuThermalThrottling
+      - eval_time: 5m
+        alertname: GManGpuEccUncorrectable
+        exp_alerts:
+          - exp_labels: {severity: critical, scope: gpu, host_id: ai1, UUID: GPU-ebefc576}
+            exp_annotations:
+              summary: 'Неисправимые ошибки ECC на GPU GPU-ebefc576 (ai1)'
+              description: Рост double-bit ECC (DCGM, nvidia_gpu_exporter или nvidia-smi) либо сбой переназначения строк памяти.
+              runbook_url: https://gman.example/#alerts/GManGpuEccUncorrectable
+
+  - name: vLLM latency, queue, KV cache and endpoint
+    external_labels: {gman_portal: https://gman.example}
+    interval: 1m
+    input_series:
+      # One request per second, every first token between 5 and 10 s: p95 = 5 + 5 * 0.95.
+      - series: 'vllm:time_to_first_token_seconds_bucket{host_id="ai1", gman_service="chat", model_name="llama", le="1"}'
+        values: '0x30'
+      - series: 'vllm:time_to_first_token_seconds_bucket{host_id="ai1", gman_service="chat", model_name="llama", le="5"}'
+        values: '0x30'
+      - series: 'vllm:time_to_first_token_seconds_bucket{host_id="ai1", gman_service="chat", model_name="llama", le="10"}'
+        values: '0+60x30'
+      - series: 'vllm:time_to_first_token_seconds_bucket{host_id="ai1", gman_service="chat", model_name="llama", le="+Inf"}'
+        values: '0+60x30'
+      # Before vLLM 0.10 inter-token latency is time_per_output_token.
+      - series: 'vllm:time_per_output_token_seconds_bucket{host_id="ai1", gman_service="chat", model_name="llama", le="0.05"}'
+        values: '0+60x30'
+      - series: 'vllm:time_per_output_token_seconds_bucket{host_id="ai1", gman_service="chat", model_name="llama", le="+Inf"}'
+        values: '0+60x30'
+      - series: 'vllm:kv_cache_usage_perc{host_id="ai1", gman_service="chat", model_name="llama"}'
+        values: '0.97x30'
+      - series: 'vllm:num_requests_waiting{host_id="ai1", gman_service="chat", model_name="llama"}'
+        values: '3x30'
+      - series: 'up{job="otel", instance="otel:8889", exported_job="vllm", exported_instance="127.0.0.1:8000", host_id="ai1", gman_service="chat"}'
+        values: '1 0x30'
+    promql_expr_test:
+      - expr: gman:llm_ttft_seconds:p95
+        eval_time: 10m
+        exp_samples:
+          - labels: 'gman:llm_ttft_seconds:p95{gman_service="chat", model_name="llama"}'
+            value: 9.75
+      - expr: gman:llm_tpot_seconds:p50
+        eval_time: 10m
+        exp_samples:
+          - labels: 'gman:llm_tpot_seconds:p50{gman_service="chat", model_name="llama"}'
+            value: 0.025
+      - expr: gman:llm_requests_waiting:sum
+        eval_time: 10m
+        exp_samples:
+          - labels: 'gman:llm_requests_waiting:sum{gman_service="chat", model_name="llama"}'
+            value: 3
+    alert_rule_test:
+      - eval_time: 5m
+        alertname: GManLlmEndpointDown
+        exp_alerts:
+          - exp_labels: {severity: critical, scope: instance, host_id: ai1, gman_service: chat, exported_instance: '127.0.0.1:8000'}
+            exp_annotations:
+              summary: 'vLLM chat на ai1 не отвечает'
+              description: 'Collector не может прочитать 127.0.0.1:8000/metrics три минуты: сервер модели остановлен или завис.'
+              runbook_url: https://gman.example/#alerts/GManLlmEndpointDown
+      - eval_time: 15m
+        alertname: GManLlmSlowFirstToken
+        exp_alerts:
+          - exp_labels: {severity: warning, scope: instance, gman_service: chat, model_name: llama}
+            exp_annotations:
+              summary: 'TTFT p95 llama (chat): 9.75s'
+              description: Пользователи ждут первый токен дольше 5 секунд (95-й перцентиль) десять минут.
+              runbook_url: https://gman.example/#alerts/GManLlmSlowFirstToken
+      - eval_time: 20m
+        alertname: GManLlmKvCacheFull
+        exp_alerts:
+          - exp_labels: {severity: warning, scope: instance, gman_service: chat, model_name: llama}
+            exp_annotations:
+              summary: 'KV-кэш llama (chat) заполнен на 97%'
+              description: Кэш почти полон 15 минут; новые запросы ждут места, длинные контексты вытесняются.
+              runbook_url: https://gman.example/#alerts/GManLlmKvCacheFull
+      - eval_time: 20m
+        alertname: GManLlmQueueBacklog
         exp_alerts: []

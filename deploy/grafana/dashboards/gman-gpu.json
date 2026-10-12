@@ -1,0 +1,1452 @@
+{
+ "uid": "gman-gpu",
+ "title": "GMan · GPU",
+ "description": "Видеокарты хоста: загрузка, память, питание, температура, частоты, причины их снижения, процессы и энергия. Источник — DCGM Exporter или nvidia_gpu_exporter.",
+ "tags": [
+  "gman"
+ ],
+ "timezone": "browser",
+ "schemaVersion": 39,
+ "version": 1,
+ "editable": true,
+ "refresh": "30s",
+ "time": {
+  "from": "now-6h",
+  "to": "now"
+ },
+ "templating": {
+  "list": [
+   {
+    "name": "host",
+    "label": "Хост",
+    "type": "query",
+    "datasource": {
+     "type": "prometheus",
+     "uid": "prometheus"
+    },
+    "query": {
+     "query": "label_values(gman:gpu_utilization:ratio, host_id)",
+     "refId": "host"
+    },
+    "definition": "label_values(gman:gpu_utilization:ratio, host_id)",
+    "refresh": 2,
+    "sort": 1,
+    "includeAll": false,
+    "multi": false
+   },
+   {
+    "name": "gpu",
+    "label": "GPU",
+    "type": "query",
+    "datasource": {
+     "type": "prometheus",
+     "uid": "prometheus"
+    },
+    "query": {
+     "query": "label_values(gman:gpu_utilization:ratio{host_id=\"$host\"}, UUID)",
+     "refId": "gpu"
+    },
+    "definition": "label_values(gman:gpu_utilization:ratio{host_id=\"$host\"}, UUID)",
+    "refresh": 2,
+    "sort": 1,
+    "includeAll": true,
+    "multi": true,
+    "allValue": ".*",
+    "current": {
+     "text": "All",
+     "value": "$__all"
+    }
+   }
+  ]
+ },
+ "links": [
+  {
+   "title": "Дашборды GMan",
+   "type": "dashboards",
+   "tags": [
+    "gman"
+   ],
+   "asDropdown": false,
+   "keepTime": true,
+   "includeVars": false,
+   "targetBlank": false,
+   "icon": "external link"
+  }
+ ],
+ "panels": [
+  {
+   "type": "row",
+   "title": "Состояние",
+   "collapsed": false,
+   "gridPos": {
+    "x": 0,
+    "y": 0,
+    "w": 24,
+    "h": 1
+   },
+   "panels": []
+  },
+  {
+   "type": "stat",
+   "title": "Загрузка",
+   "description": "Доля времени, когда на GPU выполнялось ядро.",
+   "datasource": {
+    "type": "prometheus",
+    "uid": "prometheus"
+   },
+   "fieldConfig": {
+    "defaults": {
+     "unit": "percentunit",
+     "noValue": "—",
+     "mappings": [],
+     "thresholds": {
+      "mode": "absolute",
+      "steps": [
+       {
+        "color": "green",
+        "value": null
+       }
+      ]
+     },
+     "color": {
+      "mode": "thresholds"
+     }
+    },
+    "overrides": []
+   },
+   "options": {
+    "reduceOptions": {
+     "calcs": [
+      "lastNotNull"
+     ],
+     "fields": "",
+     "values": false
+    },
+    "colorMode": "value",
+    "graphMode": "area",
+    "textMode": "auto",
+    "justifyMode": "auto",
+    "orientation": "auto"
+   },
+   "targets": [
+    {
+     "datasource": {
+      "type": "prometheus",
+      "uid": "prometheus"
+     },
+     "refId": "A",
+     "expr": "gman:gpu_utilization:ratio{host_id=\"$host\", UUID=~\"$gpu\"}",
+     "legendFormat": "{{UUID}}"
+    }
+   ],
+   "gridPos": {
+    "x": 0,
+    "y": 1,
+    "w": 4,
+    "h": 4
+   },
+   "id": 2
+  },
+  {
+   "type": "stat",
+   "title": "VRAM занято",
+   "description": "Память, выделенная контекстами, от объема GPU.",
+   "datasource": {
+    "type": "prometheus",
+    "uid": "prometheus"
+   },
+   "fieldConfig": {
+    "defaults": {
+     "unit": "percentunit",
+     "noValue": "—",
+     "mappings": [],
+     "thresholds": {
+      "mode": "absolute",
+      "steps": [
+       {
+        "color": "green",
+        "value": null
+       },
+       {
+        "color": "orange",
+        "value": 0.85
+       },
+       {
+        "color": "red",
+        "value": 0.95
+       }
+      ]
+     },
+     "color": {
+      "mode": "thresholds"
+     }
+    },
+    "overrides": []
+   },
+   "options": {
+    "reduceOptions": {
+     "calcs": [
+      "lastNotNull"
+     ],
+     "fields": "",
+     "values": false
+    },
+    "colorMode": "value",
+    "graphMode": "area",
+    "textMode": "auto",
+    "justifyMode": "auto",
+    "orientation": "auto"
+   },
+   "targets": [
+    {
+     "datasource": {
+      "type": "prometheus",
+      "uid": "prometheus"
+     },
+     "refId": "A",
+     "expr": "gman:gpu_memory_used_bytes:max{host_id=\"$host\", UUID=~\"$gpu\"} / gman:gpu_memory_total_bytes:max{host_id=\"$host\", UUID=~\"$gpu\"}",
+     "legendFormat": "{{UUID}}"
+    }
+   ],
+   "gridPos": {
+    "x": 4,
+    "y": 1,
+    "w": 4,
+    "h": 4
+   },
+   "id": 3
+  },
+  {
+   "type": "stat",
+   "title": "Температура",
+   "description": "Температура ядра GPU; порог алерта зависит от модели (gman-gpu-thresholds).",
+   "datasource": {
+    "type": "prometheus",
+    "uid": "prometheus"
+   },
+   "fieldConfig": {
+    "defaults": {
+     "unit": "celsius",
+     "noValue": "—",
+     "mappings": [],
+     "thresholds": {
+      "mode": "absolute",
+      "steps": [
+       {
+        "color": "green",
+        "value": null
+       },
+       {
+        "color": "orange",
+        "value": 75
+       },
+       {
+        "color": "red",
+        "value": 85
+       }
+      ]
+     },
+     "color": {
+      "mode": "thresholds"
+     }
+    },
+    "overrides": []
+   },
+   "options": {
+    "reduceOptions": {
+     "calcs": [
+      "lastNotNull"
+     ],
+     "fields": "",
+     "values": false
+    },
+    "colorMode": "value",
+    "graphMode": "area",
+    "textMode": "auto",
+    "justifyMode": "auto",
+    "orientation": "auto"
+   },
+   "targets": [
+    {
+     "datasource": {
+      "type": "prometheus",
+      "uid": "prometheus"
+     },
+     "refId": "A",
+     "expr": "gman:gpu_temperature_celsius:max{host_id=\"$host\", UUID=~\"$gpu\"}",
+     "legendFormat": "{{UUID}}"
+    }
+   ],
+   "gridPos": {
+    "x": 8,
+    "y": 1,
+    "w": 4,
+    "h": 4
+   },
+   "id": 4
+  },
+  {
+   "type": "stat",
+   "title": "Мощность от лимита",
+   "description": "Потребление платы от действующего лимита мощности (nvidia_gpu_exporter).",
+   "datasource": {
+    "type": "prometheus",
+    "uid": "prometheus"
+   },
+   "fieldConfig": {
+    "defaults": {
+     "unit": "percentunit",
+     "noValue": "—",
+     "mappings": [],
+     "thresholds": {
+      "mode": "absolute",
+      "steps": [
+       {
+        "color": "green",
+        "value": null
+       },
+       {
+        "color": "orange",
+        "value": 0.9
+       }
+      ]
+     },
+     "color": {
+      "mode": "thresholds"
+     }
+    },
+    "overrides": []
+   },
+   "options": {
+    "reduceOptions": {
+     "calcs": [
+      "lastNotNull"
+     ],
+     "fields": "",
+     "values": false
+    },
+    "colorMode": "value",
+    "graphMode": "area",
+    "textMode": "auto",
+    "justifyMode": "auto",
+    "orientation": "auto"
+   },
+   "targets": [
+    {
+     "datasource": {
+      "type": "prometheus",
+      "uid": "prometheus"
+     },
+     "refId": "A",
+     "expr": "gman:gpu_power_watts:max{host_id=\"$host\", UUID=~\"$gpu\"} / gman:gpu_power_limit_watts:max{host_id=\"$host\", UUID=~\"$gpu\"}",
+     "legendFormat": "{{UUID}}"
+    }
+   ],
+   "gridPos": {
+    "x": 12,
+    "y": 1,
+    "w": 4,
+    "h": 4
+   },
+   "id": 5
+  },
+  {
+   "type": "stat",
+   "title": "Ограничение частот",
+   "description": "Сколько причин, снижающих производительность, активно сейчас: power cap, hw slowdown, тепловые, power brake. Простой и настройки частот не считаются.",
+   "datasource": {
+    "type": "prometheus",
+    "uid": "prometheus"
+   },
+   "fieldConfig": {
+    "defaults": {
+     "unit": "none",
+     "noValue": "—",
+     "mappings": [
+      {
+       "type": "value",
+       "options": {
+        "0": {
+         "text": "Нет",
+         "color": "green"
+        }
+       }
+      }
+     ],
+     "thresholds": {
+      "mode": "absolute",
+      "steps": [
+       {
+        "color": "green",
+        "value": null
+       },
+       {
+        "color": "orange",
+        "value": 1
+       },
+       {
+        "color": "red",
+        "value": 2
+       }
+      ]
+     },
+     "color": {
+      "mode": "thresholds"
+     },
+     "decimals": 0
+    },
+    "overrides": []
+   },
+   "options": {
+    "reduceOptions": {
+     "calcs": [
+      "lastNotNull"
+     ],
+     "fields": "",
+     "values": false
+    },
+    "colorMode": "value",
+    "graphMode": "area",
+    "textMode": "auto",
+    "justifyMode": "auto",
+    "orientation": "auto"
+   },
+   "targets": [
+    {
+     "datasource": {
+      "type": "prometheus",
+      "uid": "prometheus"
+     },
+     "refId": "A",
+     "expr": "floor(gman:gpu_clock_event_reasons:max{host_id=\"$host\", UUID=~\"$gpu\"} / 4) % 2 + floor(gman:gpu_clock_event_reasons:max{host_id=\"$host\", UUID=~\"$gpu\"} / 8) % 2 + floor(gman:gpu_clock_event_reasons:max{host_id=\"$host\", UUID=~\"$gpu\"} / 32) % 2 + floor(gman:gpu_clock_event_reasons:max{host_id=\"$host\", UUID=~\"$gpu\"} / 64) % 2 + floor(gman:gpu_clock_event_reasons:max{host_id=\"$host\", UUID=~\"$gpu\"} / 128) % 2",
+     "legendFormat": "{{UUID}}"
+    }
+   ],
+   "gridPos": {
+    "x": 16,
+    "y": 1,
+    "w": 4,
+    "h": 4
+   },
+   "id": 6
+  },
+  {
+   "type": "stat",
+   "title": "Ошибки",
+   "description": "Неисправимые ECC за 24 часа и последняя XID (DCGM — код, nvidia_gpu_exporter — время с последней).",
+   "datasource": {
+    "type": "prometheus",
+    "uid": "prometheus"
+   },
+   "fieldConfig": {
+    "defaults": {
+     "unit": "none",
+     "noValue": "—",
+     "mappings": [
+      {
+       "type": "value",
+       "options": {
+        "0": {
+         "text": "Нет",
+         "color": "green"
+        }
+       }
+      }
+     ],
+     "thresholds": {
+      "mode": "absolute",
+      "steps": [
+       {
+        "color": "green",
+        "value": null
+       },
+       {
+        "color": "red",
+        "value": 1
+       }
+      ]
+     },
+     "color": {
+      "mode": "thresholds"
+     },
+     "decimals": 0
+    },
+    "overrides": []
+   },
+   "options": {
+    "reduceOptions": {
+     "calcs": [
+      "lastNotNull"
+     ],
+     "fields": "",
+     "values": false
+    },
+    "colorMode": "value",
+    "graphMode": "area",
+    "textMode": "value_and_name",
+    "justifyMode": "auto",
+    "orientation": "auto"
+   },
+   "targets": [
+    {
+     "datasource": {
+      "type": "prometheus",
+      "uid": "prometheus"
+     },
+     "refId": "A",
+     "expr": "max by (UUID) (increase(DCGM_FI_DEV_ECC_DBE_AGG_TOTAL_total{host_id=\"$host\", UUID=~\"$gpu\"}[24h])) or max by (UUID) (label_replace(increase(nvidia_smi_ecc_errors_uncorrected_aggregate_total{host_id=\"$host\"}[24h]), \"UUID\", \"GPU-$1\", \"uuid\", \"(?:GPU-)?(.+)\"))",
+     "legendFormat": "ECC {{UUID}}"
+    },
+    {
+     "datasource": {
+      "type": "prometheus",
+      "uid": "prometheus"
+     },
+     "refId": "B",
+     "expr": "max by (UUID) (DCGM_FI_DEV_XID_ERRORS{host_id=\"$host\", UUID=~\"$gpu\"})",
+     "legendFormat": "XID {{UUID}}"
+    }
+   ],
+   "gridPos": {
+    "x": 20,
+    "y": 1,
+    "w": 4,
+    "h": 4
+   },
+   "id": 7
+  },
+  {
+   "type": "row",
+   "title": "Загрузка и память",
+   "collapsed": false,
+   "gridPos": {
+    "x": 0,
+    "y": 5,
+    "w": 24,
+    "h": 1
+   },
+   "panels": []
+  },
+  {
+   "type": "timeseries",
+   "title": "Загрузка GPU",
+   "description": "Доля времени с выполняющимся ядром. При совместном использовании это нагрузка всего устройства.",
+   "datasource": {
+    "type": "prometheus",
+    "uid": "prometheus"
+   },
+   "fieldConfig": {
+    "defaults": {
+     "unit": "percentunit",
+     "custom": {
+      "fillOpacity": 5,
+      "stacking": {
+       "mode": "none"
+      },
+      "showPoints": "never",
+      "lineWidth": 1,
+      "spanNulls": false
+     },
+     "min": 0,
+     "max": 1
+    },
+    "overrides": []
+   },
+   "options": {
+    "legend": {
+     "displayMode": "table",
+     "placement": "bottom",
+     "calcs": [
+      "lastNotNull",
+      "max"
+     ]
+    },
+    "tooltip": {
+     "mode": "multi",
+     "sort": "desc"
+    }
+   },
+   "targets": [
+    {
+     "datasource": {
+      "type": "prometheus",
+      "uid": "prometheus"
+     },
+     "refId": "A",
+     "expr": "gman:gpu_utilization:ratio{host_id=\"$host\", UUID=~\"$gpu\"}",
+     "legendFormat": "{{UUID}}"
+    }
+   ],
+   "gridPos": {
+    "x": 0,
+    "y": 6,
+    "w": 12,
+    "h": 8
+   },
+   "id": 9
+  },
+  {
+   "type": "timeseries",
+   "title": "Активность памяти",
+   "description": "Доля времени чтения или записи видеопамяти (не заполненность).",
+   "datasource": {
+    "type": "prometheus",
+    "uid": "prometheus"
+   },
+   "fieldConfig": {
+    "defaults": {
+     "unit": "percentunit",
+     "custom": {
+      "fillOpacity": 5,
+      "stacking": {
+       "mode": "none"
+      },
+      "showPoints": "never",
+      "lineWidth": 1,
+      "spanNulls": false
+     },
+     "min": 0,
+     "max": 1
+    },
+    "overrides": []
+   },
+   "options": {
+    "legend": {
+     "displayMode": "table",
+     "placement": "bottom",
+     "calcs": [
+      "lastNotNull",
+      "max"
+     ]
+    },
+    "tooltip": {
+     "mode": "multi",
+     "sort": "desc"
+    }
+   },
+   "targets": [
+    {
+     "datasource": {
+      "type": "prometheus",
+      "uid": "prometheus"
+     },
+     "refId": "A",
+     "expr": "gman:gpu_memory_activity:ratio{host_id=\"$host\", UUID=~\"$gpu\"}",
+     "legendFormat": "{{UUID}}"
+    }
+   ],
+   "gridPos": {
+    "x": 12,
+    "y": 6,
+    "w": 12,
+    "h": 8
+   },
+   "id": 10
+  },
+  {
+   "type": "timeseries",
+   "title": "VRAM",
+   "description": "Выделенная видеопамять и объем GPU.",
+   "datasource": {
+    "type": "prometheus",
+    "uid": "prometheus"
+   },
+   "fieldConfig": {
+    "defaults": {
+     "unit": "bytes",
+     "custom": {
+      "fillOpacity": 5,
+      "stacking": {
+       "mode": "none"
+      },
+      "showPoints": "never",
+      "lineWidth": 1,
+      "spanNulls": false
+     },
+     "min": 0
+    },
+    "overrides": []
+   },
+   "options": {
+    "legend": {
+     "displayMode": "table",
+     "placement": "bottom",
+     "calcs": [
+      "lastNotNull",
+      "max"
+     ]
+    },
+    "tooltip": {
+     "mode": "multi",
+     "sort": "desc"
+    }
+   },
+   "targets": [
+    {
+     "datasource": {
+      "type": "prometheus",
+      "uid": "prometheus"
+     },
+     "refId": "A",
+     "expr": "gman:gpu_memory_used_bytes:max{host_id=\"$host\", UUID=~\"$gpu\"}",
+     "legendFormat": "занято {{UUID}}"
+    },
+    {
+     "datasource": {
+      "type": "prometheus",
+      "uid": "prometheus"
+     },
+     "refId": "B",
+     "expr": "gman:gpu_memory_total_bytes:max{host_id=\"$host\", UUID=~\"$gpu\"}",
+     "legendFormat": "всего {{UUID}}"
+    }
+   ],
+   "gridPos": {
+    "x": 0,
+    "y": 14,
+    "w": 12,
+    "h": 8
+   },
+   "id": 11
+  },
+  {
+   "type": "timeseries",
+   "title": "Процессы: VRAM",
+   "description": "Видеопамять процессов с вычислительным контекстом (nvidia_gpu_exporter с --collect.compute-apps). Контейнер процесса — в карточке хоста портала.",
+   "datasource": {
+    "type": "prometheus",
+    "uid": "prometheus"
+   },
+   "fieldConfig": {
+    "defaults": {
+     "unit": "bytes",
+     "custom": {
+      "fillOpacity": 35,
+      "stacking": {
+       "mode": "normal"
+      },
+      "showPoints": "never",
+      "lineWidth": 1,
+      "spanNulls": false
+     },
+     "min": 0
+    },
+    "overrides": []
+   },
+   "options": {
+    "legend": {
+     "displayMode": "table",
+     "placement": "bottom",
+     "calcs": [
+      "lastNotNull",
+      "max"
+     ]
+    },
+    "tooltip": {
+     "mode": "multi",
+     "sort": "desc"
+    }
+   },
+   "targets": [
+    {
+     "datasource": {
+      "type": "prometheus",
+      "uid": "prometheus"
+     },
+     "refId": "A",
+     "expr": "max by (process_name, pid) (nvidia_smi_compute_app_used_memory_bytes{host_id=\"$host\"})",
+     "legendFormat": "{{process_name}} ({{pid}})"
+    }
+   ],
+   "gridPos": {
+    "x": 12,
+    "y": 14,
+    "w": 12,
+    "h": 8
+   },
+   "id": 12
+  },
+  {
+   "type": "row",
+   "title": "Питание, температура, частоты",
+   "collapsed": false,
+   "gridPos": {
+    "x": 0,
+    "y": 22,
+    "w": 24,
+    "h": 1
+   },
+   "panels": []
+  },
+  {
+   "type": "timeseries",
+   "title": "Мощность",
+   "description": "Потребление платы и действующий лимит.",
+   "datasource": {
+    "type": "prometheus",
+    "uid": "prometheus"
+   },
+   "fieldConfig": {
+    "defaults": {
+     "unit": "watt",
+     "custom": {
+      "fillOpacity": 5,
+      "stacking": {
+       "mode": "none"
+      },
+      "showPoints": "never",
+      "lineWidth": 1,
+      "spanNulls": false
+     },
+     "min": 0
+    },
+    "overrides": []
+   },
+   "options": {
+    "legend": {
+     "displayMode": "table",
+     "placement": "bottom",
+     "calcs": [
+      "lastNotNull",
+      "max"
+     ]
+    },
+    "tooltip": {
+     "mode": "multi",
+     "sort": "desc"
+    }
+   },
+   "targets": [
+    {
+     "datasource": {
+      "type": "prometheus",
+      "uid": "prometheus"
+     },
+     "refId": "A",
+     "expr": "gman:gpu_power_watts:max{host_id=\"$host\", UUID=~\"$gpu\"}",
+     "legendFormat": "{{UUID}}"
+    },
+    {
+     "datasource": {
+      "type": "prometheus",
+      "uid": "prometheus"
+     },
+     "refId": "B",
+     "expr": "gman:gpu_power_limit_watts:max{host_id=\"$host\", UUID=~\"$gpu\"}",
+     "legendFormat": "лимит {{UUID}}"
+    }
+   ],
+   "gridPos": {
+    "x": 0,
+    "y": 23,
+    "w": 8,
+    "h": 8
+   },
+   "id": 14
+  },
+  {
+   "type": "timeseries",
+   "title": "Температура",
+   "description": "Температура ядра; линия — порог предупреждения по модели.",
+   "datasource": {
+    "type": "prometheus",
+    "uid": "prometheus"
+   },
+   "fieldConfig": {
+    "defaults": {
+     "unit": "celsius",
+     "custom": {
+      "fillOpacity": 5,
+      "stacking": {
+       "mode": "none"
+      },
+      "showPoints": "never",
+      "lineWidth": 1,
+      "spanNulls": false
+     },
+     "min": 0
+    },
+    "overrides": []
+   },
+   "options": {
+    "legend": {
+     "displayMode": "table",
+     "placement": "bottom",
+     "calcs": [
+      "lastNotNull",
+      "max"
+     ]
+    },
+    "tooltip": {
+     "mode": "multi",
+     "sort": "desc"
+    }
+   },
+   "targets": [
+    {
+     "datasource": {
+      "type": "prometheus",
+      "uid": "prometheus"
+     },
+     "refId": "A",
+     "expr": "gman:gpu_temperature_celsius:max{host_id=\"$host\", UUID=~\"$gpu\"}",
+     "legendFormat": "{{UUID}}"
+    },
+    {
+     "datasource": {
+      "type": "prometheus",
+      "uid": "prometheus"
+     },
+     "refId": "B",
+     "expr": "gman:gpu_temperature_threshold_celsius{severity=\"warning\", host_id=\"$host\", UUID=~\"$gpu\"}",
+     "legendFormat": "порог {{UUID}}"
+    }
+   ],
+   "gridPos": {
+    "x": 8,
+    "y": 23,
+    "w": 8,
+    "h": 8
+   },
+   "id": 15
+  },
+  {
+   "type": "timeseries",
+   "title": "Вентилятор",
+   "description": "Заданная скорость от максимальной (nvidia_gpu_exporter). Пусто у пассивных серверных GPU.",
+   "datasource": {
+    "type": "prometheus",
+    "uid": "prometheus"
+   },
+   "fieldConfig": {
+    "defaults": {
+     "unit": "percentunit",
+     "custom": {
+      "fillOpacity": 5,
+      "stacking": {
+       "mode": "none"
+      },
+      "showPoints": "never",
+      "lineWidth": 1,
+      "spanNulls": false
+     },
+     "min": 0
+    },
+    "overrides": []
+   },
+   "options": {
+    "legend": {
+     "displayMode": "table",
+     "placement": "bottom",
+     "calcs": [
+      "lastNotNull",
+      "max"
+     ]
+    },
+    "tooltip": {
+     "mode": "multi",
+     "sort": "desc"
+    }
+   },
+   "targets": [
+    {
+     "datasource": {
+      "type": "prometheus",
+      "uid": "prometheus"
+     },
+     "refId": "A",
+     "expr": "gman:gpu_fan:ratio{host_id=\"$host\", UUID=~\"$gpu\"}",
+     "legendFormat": "{{UUID}}"
+    }
+   ],
+   "gridPos": {
+    "x": 16,
+    "y": 23,
+    "w": 8,
+    "h": 8
+   },
+   "id": 16
+  },
+  {
+   "type": "timeseries",
+   "title": "Частота SM",
+   "description": "Текущая и максимальная частота вычислительных блоков.",
+   "datasource": {
+    "type": "prometheus",
+    "uid": "prometheus"
+   },
+   "fieldConfig": {
+    "defaults": {
+     "unit": "hertz",
+     "custom": {
+      "fillOpacity": 5,
+      "stacking": {
+       "mode": "none"
+      },
+      "showPoints": "never",
+      "lineWidth": 1,
+      "spanNulls": false
+     },
+     "min": 0
+    },
+    "overrides": []
+   },
+   "options": {
+    "legend": {
+     "displayMode": "table",
+     "placement": "bottom",
+     "calcs": [
+      "lastNotNull",
+      "max"
+     ]
+    },
+    "tooltip": {
+     "mode": "multi",
+     "sort": "desc"
+    }
+   },
+   "targets": [
+    {
+     "datasource": {
+      "type": "prometheus",
+      "uid": "prometheus"
+     },
+     "refId": "A",
+     "expr": "gman:gpu_sm_clock_hertz:max{host_id=\"$host\", UUID=~\"$gpu\"}",
+     "legendFormat": "{{UUID}}"
+    },
+    {
+     "datasource": {
+      "type": "prometheus",
+      "uid": "prometheus"
+     },
+     "refId": "B",
+     "expr": "gman:gpu_max_sm_clock_hertz:max{host_id=\"$host\", UUID=~\"$gpu\"}",
+     "legendFormat": "максимум {{UUID}}"
+    }
+   ],
+   "gridPos": {
+    "x": 0,
+    "y": 31,
+    "w": 12,
+    "h": 8
+   },
+   "id": 17
+  },
+  {
+   "type": "timeseries",
+   "title": "Частота памяти",
+   "description": "Текущая частота видеопамяти.",
+   "datasource": {
+    "type": "prometheus",
+    "uid": "prometheus"
+   },
+   "fieldConfig": {
+    "defaults": {
+     "unit": "hertz",
+     "custom": {
+      "fillOpacity": 5,
+      "stacking": {
+       "mode": "none"
+      },
+      "showPoints": "never",
+      "lineWidth": 1,
+      "spanNulls": false
+     },
+     "min": 0
+    },
+    "overrides": []
+   },
+   "options": {
+    "legend": {
+     "displayMode": "table",
+     "placement": "bottom",
+     "calcs": [
+      "lastNotNull",
+      "max"
+     ]
+    },
+    "tooltip": {
+     "mode": "multi",
+     "sort": "desc"
+    }
+   },
+   "targets": [
+    {
+     "datasource": {
+      "type": "prometheus",
+      "uid": "prometheus"
+     },
+     "refId": "A",
+     "expr": "gman:gpu_memory_clock_hertz:max{host_id=\"$host\", UUID=~\"$gpu\"}",
+     "legendFormat": "{{UUID}}"
+    }
+   ],
+   "gridPos": {
+    "x": 12,
+    "y": 31,
+    "w": 12,
+    "h": 8
+   },
+   "id": 18
+  },
+  {
+   "type": "row",
+   "title": "История состояний",
+   "collapsed": false,
+   "gridPos": {
+    "x": 0,
+    "y": 39,
+    "w": 24,
+    "h": 1
+   },
+   "panels": []
+  },
+  {
+   "type": "state-timeline",
+   "title": "Причины снижения частот",
+   "description": "Полоса — причина была активна. Аппаратные (HW slowdown, тепловое HW, power brake) требуют внимания, power cap — обычное дело под нагрузкой, простой — GPU без работы.",
+   "datasource": {
+    "type": "prometheus",
+    "uid": "prometheus"
+   },
+   "fieldConfig": {
+    "defaults": {
+     "mappings": [
+      {
+       "type": "value",
+       "options": {
+        "0": {
+         "text": "нет",
+         "color": "transparent"
+        },
+        "1": {
+         "text": "активно",
+         "color": "orange"
+        }
+       }
+      }
+     ],
+     "custom": {
+      "fillOpacity": 80,
+      "lineWidth": 0
+     },
+     "color": {
+      "mode": "thresholds"
+     },
+     "thresholds": {
+      "mode": "absolute",
+      "steps": [
+       {
+        "color": "transparent",
+        "value": null
+       }
+      ]
+     }
+    },
+    "overrides": []
+   },
+   "options": {
+    "mergeValues": true,
+    "showValue": "never",
+    "rowHeight": 0.85,
+    "alignValue": "left",
+    "legend": {
+     "showLegend": false
+    },
+    "tooltip": {
+     "mode": "single"
+    }
+   },
+   "targets": [
+    {
+     "datasource": {
+      "type": "prometheus",
+      "uid": "prometheus"
+     },
+     "refId": "A",
+     "expr": "max(floor(gman:gpu_clock_event_reasons:max{host_id=\"$host\", UUID=~\"$gpu\"} / 1) % 2)",
+     "legendFormat": "Простой"
+    },
+    {
+     "datasource": {
+      "type": "prometheus",
+      "uid": "prometheus"
+     },
+     "refId": "B",
+     "expr": "max(floor(gman:gpu_clock_event_reasons:max{host_id=\"$host\", UUID=~\"$gpu\"} / 4) % 2)",
+     "legendFormat": "Power cap"
+    },
+    {
+     "datasource": {
+      "type": "prometheus",
+      "uid": "prometheus"
+     },
+     "refId": "C",
+     "expr": "max(floor(gman:gpu_clock_event_reasons:max{host_id=\"$host\", UUID=~\"$gpu\"} / 8) % 2)",
+     "legendFormat": "HW slowdown"
+    },
+    {
+     "datasource": {
+      "type": "prometheus",
+      "uid": "prometheus"
+     },
+     "refId": "D",
+     "expr": "max(floor(gman:gpu_clock_event_reasons:max{host_id=\"$host\", UUID=~\"$gpu\"} / 32) % 2)",
+     "legendFormat": "Тепловое (SW)"
+    },
+    {
+     "datasource": {
+      "type": "prometheus",
+      "uid": "prometheus"
+     },
+     "refId": "E",
+     "expr": "max(floor(gman:gpu_clock_event_reasons:max{host_id=\"$host\", UUID=~\"$gpu\"} / 64) % 2)",
+     "legendFormat": "Тепловое (HW)"
+    },
+    {
+     "datasource": {
+      "type": "prometheus",
+      "uid": "prometheus"
+     },
+     "refId": "F",
+     "expr": "max(floor(gman:gpu_clock_event_reasons:max{host_id=\"$host\", UUID=~\"$gpu\"} / 128) % 2)",
+     "legendFormat": "Power brake"
+    }
+   ],
+   "gridPos": {
+    "x": 0,
+    "y": 40,
+    "w": 12,
+    "h": 8
+   },
+   "id": 20
+  },
+  {
+   "type": "state-timeline",
+   "title": "P-state",
+   "description": "0 — максимальная производительность, 8 и выше — простой (nvidia_gpu_exporter).",
+   "datasource": {
+    "type": "prometheus",
+    "uid": "prometheus"
+   },
+   "fieldConfig": {
+    "defaults": {
+     "mappings": [
+      {
+       "type": "range",
+       "options": {
+        "from": 0,
+        "to": 2,
+        "result": {
+         "text": "P0–P2 · нагрузка",
+         "color": "blue"
+        }
+       }
+      },
+      {
+       "type": "range",
+       "options": {
+        "from": 3,
+        "to": 7,
+        "result": {
+         "text": "P3–P7",
+         "color": "light-blue"
+        }
+       }
+      },
+      {
+       "type": "range",
+       "options": {
+        "from": 8,
+        "to": 15,
+        "result": {
+         "text": "P8+ · простой",
+         "color": "super-light-blue"
+        }
+       }
+      }
+     ],
+     "custom": {
+      "fillOpacity": 80,
+      "lineWidth": 0
+     },
+     "color": {
+      "mode": "thresholds"
+     },
+     "thresholds": {
+      "mode": "absolute",
+      "steps": [
+       {
+        "color": "transparent",
+        "value": null
+       }
+      ]
+     }
+    },
+    "overrides": []
+   },
+   "options": {
+    "mergeValues": true,
+    "showValue": "never",
+    "rowHeight": 0.85,
+    "alignValue": "left",
+    "legend": {
+     "showLegend": false
+    },
+    "tooltip": {
+     "mode": "single"
+    }
+   },
+   "targets": [
+    {
+     "datasource": {
+      "type": "prometheus",
+      "uid": "prometheus"
+     },
+     "refId": "A",
+     "expr": "gman:gpu_pstate:max{host_id=\"$host\", UUID=~\"$gpu\"}",
+     "legendFormat": "{{UUID}}"
+    }
+   ],
+   "gridPos": {
+    "x": 12,
+    "y": 40,
+    "w": 12,
+    "h": 8
+   },
+   "id": 21
+  },
+  {
+   "type": "row",
+   "title": "Энергия",
+   "collapsed": false,
+   "gridPos": {
+    "x": 0,
+    "y": 48,
+    "w": 24,
+    "h": 1
+   },
+   "panels": []
+  },
+  {
+   "type": "stat",
+   "title": "Энергия за 24 часа",
+   "description": "Измеренное потребление по счетчику драйвера (DCGM или nvidia_gpu_exporter в режиме nvml).",
+   "datasource": {
+    "type": "prometheus",
+    "uid": "prometheus"
+   },
+   "fieldConfig": {
+    "defaults": {
+     "unit": "kwatth",
+     "noValue": "—",
+     "mappings": [],
+     "thresholds": {
+      "mode": "absolute",
+      "steps": [
+       {
+        "color": "green",
+        "value": null
+       }
+      ]
+     },
+     "color": {
+      "mode": "thresholds"
+     },
+     "decimals": 2
+    },
+    "overrides": []
+   },
+   "options": {
+    "reduceOptions": {
+     "calcs": [
+      "lastNotNull"
+     ],
+     "fields": "",
+     "values": false
+    },
+    "colorMode": "none",
+    "graphMode": "area",
+    "textMode": "auto",
+    "justifyMode": "auto",
+    "orientation": "auto"
+   },
+   "targets": [
+    {
+     "datasource": {
+      "type": "prometheus",
+      "uid": "prometheus"
+     },
+     "refId": "A",
+     "expr": "increase(gman:gpu_energy_joules:total{host_id=\"$host\", UUID=~\"$gpu\"}[24h]) / 3.6e6",
+     "legendFormat": "{{UUID}}"
+    }
+   ],
+   "gridPos": {
+    "x": 0,
+    "y": 49,
+    "w": 8,
+    "h": 6
+   },
+   "id": 23
+  },
+  {
+   "type": "timeseries",
+   "title": "Энергия по часам",
+   "description": "Потребление за каждый час.",
+   "datasource": {
+    "type": "prometheus",
+    "uid": "prometheus"
+   },
+   "fieldConfig": {
+    "defaults": {
+     "unit": "kwatth",
+     "custom": {
+      "fillOpacity": 5,
+      "stacking": {
+       "mode": "none"
+      },
+      "showPoints": "never",
+      "lineWidth": 1,
+      "spanNulls": false
+     },
+     "min": 0
+    },
+    "overrides": []
+   },
+   "options": {
+    "legend": {
+     "displayMode": "table",
+     "placement": "bottom",
+     "calcs": [
+      "lastNotNull",
+      "max"
+     ]
+    },
+    "tooltip": {
+     "mode": "multi",
+     "sort": "desc"
+    }
+   },
+   "targets": [
+    {
+     "datasource": {
+      "type": "prometheus",
+      "uid": "prometheus"
+     },
+     "refId": "A",
+     "expr": "increase(gman:gpu_energy_joules:total{host_id=\"$host\", UUID=~\"$gpu\"}[1h]) / 3.6e6",
+     "legendFormat": "{{UUID}}"
+    }
+   ],
+   "gridPos": {
+    "x": 8,
+    "y": 49,
+    "w": 16,
+    "h": 6
+   },
+   "id": 24
+  }
+ ]
+}

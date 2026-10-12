@@ -112,6 +112,43 @@ data:
                 - source_labels: [__meta_kubernetes_pod_container_port_number]
                   regex: '9400'
                   action: keep
+      # vLLM pods of this node (README, «Метрики LLM»): annotations gman.io/metrics: vllm and
+      # gman.io/metrics-port: "<container port of the OpenAI API>"; label gman.service binds them to the catalog.
+      prometheus/llm:
+        config:
+          scrape_configs:
+            - job_name: vllm
+              scrape_interval: 15s
+              kubernetes_sd_configs:
+                - role: pod
+                  selectors:
+                    - role: pod
+                      field: spec.nodeName=${env:K8S_NODE_NAME}
+              relabel_configs:
+                - source_labels: [__meta_kubernetes_pod_annotation_gman_io_metrics]
+                  regex: vllm
+                  action: keep
+                - source_labels: [__meta_kubernetes_pod_phase]
+                  regex: Running
+                  action: keep
+                - source_labels: [__meta_kubernetes_pod_annotation_gman_io_metrics_port]
+                  regex: '\d+'
+                  action: keep
+                # One target per pod (pod SD yields one per container port; equal targets are merged).
+                # $$ is a literal $ (regex group): the Collector expands $ as environment variables.
+                - source_labels: [__meta_kubernetes_pod_ip, __meta_kubernetes_pod_annotation_gman_io_metrics_port]
+                  regex: '(.+);(\d+)'
+                  target_label: __address__
+                  replacement: '$$1:$$2'
+                  action: replace
+                - source_labels: [__meta_kubernetes_pod_label_gman_service]
+                  target_label: gman_service
+                - source_labels: [__meta_kubernetes_pod_label_gman_environment]
+                  target_label: gman_environment
+                - source_labels: [__meta_kubernetes_namespace]
+                  target_label: namespace
+                - source_labels: [__meta_kubernetes_pod_name]
+                  target_label: pod
       # kube-state-metrics (deploy/kube-state-metrics.yaml): only the Collector of the node running its pod
       # scrapes it, so every series arrives once. Cluster-level series: separate pipeline metrics/ksm below.
       prometheus/ksm:
@@ -203,7 +240,7 @@ data:
       extensions: [file_storage]
       pipelines:
         metrics:
-          receivers: [host_metrics, kubelet_stats, prometheus/gpu]
+          receivers: [host_metrics, kubelet_stats, prometheus/gpu, prometheus/llm]
           processors: [memory_limiter, k8s_attributes, resource, batch]
           exporters: [otlp_grpc]
         metrics/ksm:
