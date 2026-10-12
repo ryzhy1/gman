@@ -17,6 +17,8 @@ services:
     <<: *nvidia
     build: {context: deploy, dockerfile: images/dcgm.Dockerfile}
     cap_add: [SYS_ADMIN]
+    environment:
+      GMAN_METRICS_INTERVAL: ${GMAN_METRICS_INTERVAL:-5}
     restart: unless-stopped
   node-otel:
     command: ["--config=/etc/otelcol/node.yaml", "--config=/etc/otelcol/node-gpu.yaml"]

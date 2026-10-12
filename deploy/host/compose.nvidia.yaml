@@ -19,6 +19,7 @@ services:
     build: {context: .., dockerfile: images/dcgm.Dockerfile}
     environment:
       DCGM_EXPORTER_LISTEN: 127.0.0.1:9400
+      GMAN_METRICS_INTERVAL: ${GMAN_METRICS_INTERVAL:-5}
     network_mode: host
     cap_add: [SYS_ADMIN]
     restart: unless-stopped

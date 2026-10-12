@@ -5,6 +5,7 @@ name: gman
 # The portal and API have no sign-in: publish them only on a network you trust.
 # Published ports (host side): GMAN_PORT (portal, 8080), GMAN_OTLP_PORT (4317), GMAN_OTLP_HTTP_PORT (4318);
 # on 127.0.0.1 only: GMAN_PROMETHEUS_PORT (9090), GMAN_ALERTMANAGER_PORT (9093), GMAN_GRAFANA_PORT (3000).
+# GMAN_METRICS_INTERVAL (seconds, default 5): metrics collection, Prometheus scraping and rules, portal refresh.
 services:
   db:
     image: postgres:17-alpine
@@ -33,6 +34,8 @@ services:
       GMAN_SPLUNK_INDEXES: ${GMAN_SPLUNK_INDEXES:-}
       # Active alerts for the portal's alerts page.
       ALERTMANAGER_URL: http://alertmanager:9093
+      # The portal refreshes at the metrics pace.
+      GMAN_METRICS_INTERVAL: ${GMAN_METRICS_INTERVAL:-5}
     depends_on:
       db: {condition: service_healthy}
     healthcheck:
@@ -78,6 +81,7 @@ services:
     command: ["--config=/etc/otelcol/node.yaml"]
     environment:
       GMAN_HOST_ID: ${GMAN_SOURCE_ID:-gman-server}
+      GMAN_METRICS_INTERVAL: ${GMAN_METRICS_INTERVAL:-5}
     # Root for the Docker socket; everything from the host is mounted read-only.
     user: "0:0"
     volumes:
@@ -99,8 +103,9 @@ services:
     environment:
       # Browser-facing portal address for runbook links in alert annotations.
       GMAN_PORTAL_URL: ${GMAN_PORTAL_URL:-http://127.0.0.1:${GMAN_PORT:-8080}}
+      GMAN_METRICS_INTERVAL: ${GMAN_METRICS_INTERVAL:-5}
     volumes: ["prometheus:/prometheus"]
-    command: ["--config.file=/etc/prometheus/prometheus.yml", "--storage.tsdb.retention.time=30d",
+    command: ["--config.file=/prometheus/prometheus.yml", "--storage.tsdb.retention.time=30d",
               "--enable-feature=expand-external-labels"]
     ports: ["127.0.0.1:${GMAN_PROMETHEUS_PORT:-9090}:9090"]
     healthcheck:
@@ -139,6 +144,7 @@ services:
       GF_AUTH_ANONYMOUS_ENABLED: "true"
       GF_AUTH_ANONYMOUS_ORG_ROLE: Viewer
       GF_SECURITY_ADMIN_PASSWORD: ${GRAFANA_ADMIN_PASSWORD:-admin}
+      GMAN_METRICS_INTERVAL: ${GMAN_METRICS_INTERVAL:-5}
       GF_ANALYTICS_REPORTING_ENABLED: "false"
       GF_ANALYTICS_CHECK_FOR_UPDATES: "false"
       GF_USERS_ALLOW_SIGN_UP: "false"

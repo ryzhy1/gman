@@ -457,6 +457,13 @@ def put_service(service_id: str, value: Service, session: Session = Depends(db))
     return after
 
 
+def refresh_seconds():
+    try:
+        return max(1, int(float(os.getenv("GMAN_METRICS_INTERVAL", "5"))))
+    except ValueError:
+        return 5
+
+
 # Node Events summarized on the node card of «Серверы и GPU»; the full list is in the audit.
 NODE_EVENTS_WINDOW = timedelta(hours=24)
 
@@ -471,6 +478,8 @@ def overview(session: Session = Depends(db)):
     return {"services": store.services(session), "sources": sources, "server_time": now(),
             # Browser-facing base URL of the bundled Grafana, for default dashboard links.
             "grafana_url": os.getenv("GMAN_GRAFANA_URL", "").rstrip("/"),
+            # Seconds between metric points; the portal refreshes at the same pace.
+            "refresh_seconds": refresh_seconds(),
             "events": store.events(session, 200)["events"]}
 
 

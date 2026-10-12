@@ -10,7 +10,7 @@
 #                  deploy/systemd/gman-otelcol.service): the persistent sending queue.
 receivers:
   host_metrics:
-    collection_interval: 15s
+    collection_interval: 5s
     scrapers:
       cpu:
         metrics:
@@ -35,7 +35,7 @@ receivers:
       processes: {}
   docker_stats:
     endpoint: ${env:DOCKER_SOCKET:-unix:///var/run/docker.sock}
-    collection_interval: 15s
+    collection_interval: 5s
     # Catalog binding labels become metric labels so dashboards can filter by service.
     container_labels_to_metric_labels:
       gman.service: gman_service
@@ -52,12 +52,14 @@ receivers:
     config:
       scrape_configs:
         - job_name: dcgm
-          scrape_interval: 15s
+          scrape_interval: 5s
+          scrape_timeout: 5s
           static_configs:
             - targets: ['127.0.0.1:9400']
         # github.com/utkuozdemir/nvidia_gpu_exporter (nvidia_smi_* series).
         - job_name: nvidia_smi
-          scrape_interval: 15s
+          scrape_interval: 5s
+          scrape_timeout: 5s
           static_configs:
             - targets: ['127.0.0.1:9835']
   # vLLM servers in Docker containers on this host, found by labels (README, «Метрики LLM»):
@@ -67,7 +69,8 @@ receivers:
     config:
       scrape_configs:
         - job_name: vllm
-          scrape_interval: 15s
+          scrape_interval: 5s
+          scrape_timeout: 5s
           docker_sd_configs:
             - host: ${env:DOCKER_SOCKET:-unix:///var/run/docker.sock}
               filters:

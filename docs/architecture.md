@@ -101,7 +101,7 @@ flowchart LR
    runtime-event; молчание источника дольше GMAN_HISTORY_GAP_SECONDS (300 с) или отброшенные
    агентом снимки — событием history-gap.
 5. Портал получает `GET /api/overview` (каталог, источники с экземплярами, сводка событий
-   узлов кластера за 24 часа, последние 200 событий) раз в 30 секунд.
+   узлов кластера за 24 часа, последние 200 событий) раз в GMAN_METRICS_INTERVAL (5 с).
 
 Сбор — периодический опрос (systemd timer раз в минуту) либо режим `--watch`: `docker events`
 или watch API Kubernetes. Снимок через 2 с тишины, не позже 10 с от первого события и не реже
@@ -176,7 +176,7 @@ OOM kill. В Kubernetes last_oom_at берется из termination state (curre
 3. Узловые Collector отправляют OTLP gRPC в gateway (в production — mTLS, порт 4317).
 4. Gateway (memory_limiter, batch) отдает метрики через prometheus exporter
    (resource_to_telemetry_conversion; ряды молчащих источников удаляются через 90 с).
-   Prometheus читает его каждые 30 с.
+   Prometheus читает его раз в GMAN_METRICS_INTERVAL (5 с), с тем же интервалом считает правила.
 5. API читает Prometheus фиксированными шаблонами PromQL (`/api/metrics/current`,
    `/api/metrics/range`, `/api/workloads`); произвольный PromQL от клиента не принимается.
    Grafana читает тот же Prometheus.
@@ -199,7 +199,7 @@ workload) и соединяются с gman:kube_workload_service:info, в се�
 классифицирует workload: «застрял» (GManWorkloadRolloutStuck или Progressing=False),
 «деградирован», «раскатывается», «ок»; длительности берутся из `for` правил, а не из
 мгновенного снимка. Портал показывает таблицу на вкладке «Обзор» сервиса и в карточке
-кластера (frontend/src/workloads.tsx), обновляет ее вместе с overview раз в 30 секунд и ведет
+кластера (frontend/src/workloads.tsx), обновляет ее вместе с overview раз в GMAN_METRICS_INTERVAL (5 с) и ведет
 на дашборд «GMan · Kubernetes» с кластером, namespace и периодом. Недоступный Prometheus
 дает `error`, как `/api/metrics/current`; каталог продолжает работать.
 
@@ -433,7 +433,7 @@ advisory lock `release:<service>|<env>` на PostgreSQL; тайм-ауты — �
 (карточки Docker-хостов и кластеров с узлами, GPU и процессами), «Алерты» (активные алерты
 и runbook), «Аудит» (постраничный журнал). Над экранами — сводка: сервисы, источники
 (устаревшие и с ошибками сбора), видеокарты, непривязанные экземпляры; фильтр окружения.
-Обновление раз в 30 секунд; источник, последний снимок которого принят сервером (received_at)
+Обновление раз в GMAN_METRICS_INTERVAL (5 с); источник, последний снимок которого принят сервером (received_at)
 более 3 минут назад по часам сервера, помечается «Данные устарели».
 
 Карточка сервиса: название, описание, кнопки Репозиторий, Grafana (по умолчанию дашборд
@@ -492,7 +492,7 @@ BMC/IPMI/Redfish, NVLink-счетчики, retired pages, SM/tensor profiling, �
 
 | Параметр | Значение |
 | --- | --- |
-| Метрики узлов | раз в 15 с (Collector), Prometheus читает gateway раз в 30 с |
+| Метрики узлов | раз в GMAN_METRICS_INTERVAL (5 с): Collector, DCGM, Prometheus читает gateway, правила, обновление портала |
 | Inventory | раз в минуту (timer, случайная задержка до 15 с) или по событиям `--watch` |
 | Устаревание | от received_at (часы сервера): портал — 3 минуты; алерт GManSourceSilent — 5 минут |
 | Метрики | Prometheus, 30 дней; ряды молчащих источников удаляются из gateway через 90 с |

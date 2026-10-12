@@ -2,10 +2,11 @@
 # Docker socket. Service `node-otel` of the GMan server (deploy/compose.yaml) and of every other host
 # (deploy/host/compose.yaml).
 #   GMAN_HOST_ID  must equal the inventory agent's --source-id (compose: GMAN_SOURCE_ID).
+#   GMAN_METRICS_INTERVAL  seconds between collections, default 5 (same value for Prometheus and DCGM).
 #   OTEL_GATEWAY  host:port of the gateway's OTLP gRPC receiver, default otel:4317 (the GMan server itself).
 receivers:
   host_metrics:
-    collection_interval: 15s
+    collection_interval: ${env:GMAN_METRICS_INTERVAL:-5}s
     root_path: /hostfs
     scrapers:
       cpu:
@@ -31,7 +32,7 @@ receivers:
       processes: {}
   docker_stats:
     endpoint: unix:///var/run/docker.sock
-    collection_interval: 15s
+    collection_interval: ${env:GMAN_METRICS_INTERVAL:-5}s
     container_labels_to_metric_labels:
       gman.service: gman_service
       gman.environment: gman_environment

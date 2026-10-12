@@ -1,6 +1,9 @@
+# __METRICS_INTERVAL__ is replaced with GMAN_METRICS_INTERVAL seconds (default 5) when the container starts
+# (deploy/images/prometheus.Dockerfile): scraping and rule evaluation run at the Collectors' pace.
 global:
-  scrape_interval: 30s
-  evaluation_interval: 30s
+  scrape_interval: __METRICS_INTERVAL__
+  scrape_timeout: __METRICS_INTERVAL__
+  evaluation_interval: __METRICS_INTERVAL__
   external_labels:
     # Portal address for runbook links in alerts; expanded from the environment
     # (--enable-feature=expand-external-labels in deploy/compose.yaml).

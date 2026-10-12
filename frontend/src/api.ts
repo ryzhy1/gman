@@ -107,7 +107,9 @@ export type ReleaseInstance = {
 export type ReleasePage = { releases: Release[]; next: string | null };
 export type ReleaseDetail = { release: Release; events: Audit[]; instances: ReleaseInstance[] };
 
-export type Overview = { services: Service[]; sources: Source[]; events: Audit[]; server_time: string; grafana_url: string };
+export type Overview = { services: Service[]; sources: Source[]; events: Audit[]; server_time: string; grafana_url: string;
+  /** Seconds between metric points (GMAN_METRICS_INTERVAL); the portal refreshes at this pace. */
+  refresh_seconds?: number };
 /** Splunk search links built by the API; instances are keyed "<source_id>/<instance_id>". */
 export type SplunkLinks = { enabled: boolean; error: string | null; service: string | null; instances: Record<string, string> };
 export type EventPage = { events: Audit[]; next: string | null };

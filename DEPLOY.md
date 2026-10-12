@@ -36,6 +36,9 @@ GMAN_PROMETHEUS_PORT=9090    # только 127.0.0.1
 GMAN_ALERTMANAGER_PORT=9093  # только 127.0.0.1
 GMAN_GRAFANA_PORT=3000       # только 127.0.0.1 (снаружи Grafana доступна через портал)
 
+# Интервал метрик в секундах: сбор, Prometheus, алерты, обновление портала
+GMAN_METRICS_INTERVAL=5
+
 # Имя и адрес самого сервера GMan в портале
 GMAN_SOURCE_ID=gman-server
 GMAN_HOST_IP=10.0.0.5        # иначе показывается адрес контейнера агента
@@ -131,6 +134,7 @@ GMAN_SOURCE_ID=server-02
 | `GMAN_PORT` | порт портала сервера GMan, если менялся (8080) |
 | `GMAN_OTLP_PORT` | OTLP-порт сервера GMan, если менялся (4317) |
 | `GMAN_HOST_IP` | адрес для портала, если нужен не адрес маршрута по умолчанию |
+| `GMAN_METRICS_INTERVAL` | интервал метрик в секундах, как на сервере GMan (5) |
 | `COMPOSE_FILE` | `compose.yaml:compose.nvidia.yaml` — включить видеокарты NVIDIA |
 
 С сервера должны быть доступны `GMAN_PORT` и `GMAN_OTLP_PORT` сервера GMan. Сервер появится в

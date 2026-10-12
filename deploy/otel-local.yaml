@@ -2,7 +2,7 @@
 # GMAN_HOST_ID must match inventory source_id; DOCKER_SOCKET is the local Docker socket.
 receivers:
   host_metrics:
-    collection_interval: 15s
+    collection_interval: 5s
     scrapers:
       cpu:
         metrics:
@@ -19,7 +19,7 @@ receivers:
       network: {}
   docker_stats:
     endpoint: ${env:DOCKER_SOCKET}
-    collection_interval: 15s
+    collection_interval: 5s
     container_labels_to_metric_labels:
       gman.service: gman_service
       gman.environment: gman_environment

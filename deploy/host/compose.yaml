@@ -29,6 +29,7 @@ services:
     command: ["--config=/etc/otelcol/node.yaml"]
     environment:
       GMAN_HOST_ID: ${GMAN_SOURCE_ID:?Set GMAN_SOURCE_ID (name of this host in GMan)}
+      GMAN_METRICS_INTERVAL: ${GMAN_METRICS_INTERVAL:-5}
       OTEL_GATEWAY: ${GMAN_SERVER:?Set GMAN_SERVER (address of the GMan server)}:${GMAN_OTLP_PORT:-4317}
     network_mode: host
     user: "0:0"

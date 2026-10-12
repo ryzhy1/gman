@@ -6,7 +6,8 @@ receivers:
     config:
       scrape_configs:
         - job_name: dcgm
-          scrape_interval: 15s
+          scrape_interval: ${env:GMAN_METRICS_INTERVAL:-5}s
+          scrape_timeout: ${env:GMAN_METRICS_INTERVAL:-5}s
           static_configs:
             - targets: ['${env:GMAN_DCGM_TARGET}']
 service:

@@ -6,4 +6,6 @@ datasources:
     access: proxy
     url: http://prometheus:9090
     isDefault: true
-    jsonData: {timeInterval: 15s}
+    # Minimum step of panels: the scrape interval (GMAN_METRICS_INTERVAL seconds, set by compose).
+    jsonData:
+      timeInterval: ${GMAN_METRICS_INTERVAL}s

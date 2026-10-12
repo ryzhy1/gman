@@ -61,6 +61,7 @@ function Brand() {
 function App() {
   const [reload, setReload] = useState(0);
   const [data, setData] = useState<Overview | null>(null);
+  const refreshSeconds = data?.refresh_seconds ?? 5;
   const [metrics, setMetrics] = useState<CurrentMetrics | null>(null);
   const [error, setError] = useState('');
   // Runbook links from alert notifications open <portal>/#alerts/<name>.
@@ -109,9 +110,9 @@ function App() {
       }
     }
     void refresh();
-    const timer = setInterval(refresh, 30_000);
+    const timer = setInterval(refresh, refreshSeconds * 1000);
     return () => { ctrl.abort(); clearInterval(timer); };
-  }, [reload]);
+  }, [reload, refreshSeconds]);
 
   // Links are built by the API (SPL escaping); refreshed with the overview so new instances get one.
   useEffect(() => setSplunk(null), [selected, environment, range]);
@@ -365,7 +366,7 @@ function App() {
 
           {page === 'Аудит' && <section><h2>Журнал событий</h2><History refreshKey={data.server_time} onRelease={openRelease} /></section>}
 
-          <footer className="pb-4 text-xs text-muted-foreground">Обновление каждые 30 секунд · Получено: {date(data.server_time)} · Время браузера: {Intl.DateTimeFormat().resolvedOptions().timeZone}</footer>
+          <footer className="pb-4 text-xs text-muted-foreground">Обновление каждые {refreshSeconds} с · Получено: {date(data.server_time)} · Время браузера: {Intl.DateTimeFormat().resolvedOptions().timeZone}</footer>
         </>}
       </main>
     </div>
