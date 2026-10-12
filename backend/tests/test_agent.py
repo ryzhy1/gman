@@ -1,36 +1,10 @@
+import io
 import json
 import subprocess
+import tarfile
 
 from agent import bamboo_event, collect
 from agent.collect import docker_instance, pod_instances, quantity
-
-
-def test_macos_host_info(monkeypatch):
-    monkeypatch.setattr(collect.sys, 'platform', 'darwin')
-    monkeypatch.setattr(collect.time, 'time', lambda: 2000)
-    outputs = {
-        ('sysctl', '-n', 'hw.memsize'): '17179869184\n',
-        ('sysctl', '-n', 'machdep.cpu.brand_string'): 'Apple M1\n',
-        ('sysctl', '-n', 'kern.boottime'): '{ sec = 1000, usec = 0 }\n',
-        ('sw_vers', '-productVersion'): '15.0\n',
-        ('docker', 'version', '--format', '{{.Server.Version}}'): '25.0.2\n',
-    }
-    monkeypatch.setattr(collect, 'command', lambda args: outputs[tuple(args)])
-    info = collect.host_info()
-    assert info['memory_total_bytes'] == 17179869184
-    assert info['cpu_model'] == 'Apple M1'
-    assert info['os'] == 'macOS 15.0'
-    assert info['uptime_seconds'] == 1000
-
-
-def test_macos_missing_cpu_model_preserves_memory(monkeypatch):
-    monkeypatch.setattr(collect.sys, 'platform', 'darwin')
-    def command(args):
-        if args == ['sysctl', '-n', 'hw.memsize']:
-            return '17179869184'
-        raise OSError('unavailable')
-    monkeypatch.setattr(collect, 'command', command)
-    assert collect.host_info()['memory_total_bytes'] == 17179869184
 
 
 def test_docker_allowlist_and_cpu_quota():
@@ -41,7 +15,9 @@ def test_docker_allowlist_and_cpu_quota():
                                         "com.docker.compose.project":"shop", "com.docker.compose.service":"api"}},
                               "HostConfig":{"CpuQuota":200000,"CpuPeriod":100000,"Memory":0},
                               "State":{"Status":"running"}})
-    assert "abc" not in str(result)
+    # Environment is reported in full; commands, healthcheck commands and other labels still are not.
+    assert result["config"]["env"] == ["SECRET=abc", "NVIDIA_VISIBLE_DEVICES=0,1"]
+    assert "abc" not in str({**result, "config": {**result["config"], "env": []}})
     assert result["config"]["cpu_limit"] == 2
     assert result["config"]["memory_limit_bytes"] is None
     assert result["config"]["gpu_requests"] == ["NVIDIA_VISIBLE_DEVICES=0,1"]
@@ -95,12 +71,15 @@ def test_nvidia_failure_is_reported(monkeypatch):
     assert errors == ["nvidia-smi failed with exit code 9"]
 
 
-def test_pod_identity_limits_and_no_env():
+def test_pod_identity_limits_and_env():
     pod = {"metadata":{"uid":"uid", "name":"pod", "labels":{"gman.service":"svc"}, "creationTimestamp":"2026-10-10T10:00:00Z",
                        "ownerReferences":[{"kind":"ReplicaSet", "name":"pod-7d9", "uid":"rs", "controller":True}],
                        "managedFields":[{"manager":"kube-controller-manager"}]},
            "spec":{"nodeName":"node", "containers":[{"name":"app", "image":"img",
-                    "env":[{"name":"SECRET","value":"abc"}],
+                    "env":[{"name":"SECRET","value":"abc"},
+                           {"name":"DB_PASSWORD","valueFrom":{"secretKeyRef":{"name":"db","key":"password"}}},
+                           {"name":"NODE","valueFrom":{"fieldRef":{"fieldPath":"spec.nodeName"}}}],
+                    "envFrom":[{"configMapRef":{"name":"app-config"}}, {"secretRef":{"name":"app-secrets"}, "prefix":"APP_"}],
                     "livenessProbe":{"exec":{"command":["sh", "-c", "abc"]}},
                     "readinessProbe":{"httpGet":{"path":"/abc", "port":8080}, "periodSeconds":5},
                     "resources":{"limits":{"cpu":"500m","memory":"2Gi","nvidia.com/gpu":"1"},
@@ -120,7 +99,10 @@ def test_pod_identity_limits_and_no_env():
     assert result["config"]["cpu_request"] == .25
     assert result["config"]["gpu_requests"] == ["nvidia.com/gpu=1"]
     assert result["config"]["probes"] == ["liveness exec period=10s failure=3", "readiness http :8080 period=5s failure=3"]
-    assert "abc" not in str(result)
+    assert result["config"]["env"] == ["SECRET=abc", "DB_PASSWORD=<secretKeyRef db/password>",
+                                       "NODE=<fieldRef spec.nodeName>", "<envFrom>=<configMapRef app-config>",
+                                       "<envFrom>=<secretRef app-secrets prefix=APP_>"]
+    assert "abc" not in str({**result, "config": {**result["config"], "env": []}})
     assert quantity("unsupported") is None
 
 
@@ -232,3 +214,51 @@ def test_node_internal_ip():
     node = {'metadata': {'name': 'n1'}, 'status': {'addresses': [
         {'type': 'Hostname', 'address': 'n1'}, {'type': 'InternalIP', 'address': '10.0.0.5'}]}}
     assert collect.nodes([node], [])[0]['internal_ip'] == '10.0.0.5'
+
+
+def test_parse_dotenv():
+    text = "# comment\n\nENV=local\nexport TIMEOUT=5s\nREDIS_PASSWORD=\nQUOTED=\"a b # c\"\nSINGLE='x'\n" \
+           "POSTGRES_CONN=postgres://u:p@db:5432/db?sslmode=disable\nNOTE=value # trailing\nnot a variable\n"
+    assert collect.parse_dotenv(text) == [
+        "ENV=local", "TIMEOUT=5s", "REDIS_PASSWORD=", "QUOTED=a b # c", "SINGLE=x",
+        "POSTGRES_CONN=postgres://u:p@db:5432/db?sslmode=disable", "NOTE=value"]
+
+
+def tar_of(name, data):
+    buffer = io.BytesIO()
+    with tarfile.open(fileobj=buffer, mode="w") as archive:
+        info = tarfile.TarInfo(name)
+        info.size = len(data)
+        archive.addfile(info, io.BytesIO(data))
+    return buffer.getvalue()
+
+
+def test_read_container_file_uses_docker_cp():
+    calls = []
+
+    def run(args, capture_output, timeout):
+        calls.append(args)
+        found = args[2] == "abc:/app/.env.local"
+        return subprocess.CompletedProcess(args, 0 if found else 1, tar_of(".env.local", b"A=1\n") if found else b"")
+
+    assert collect.read_container_file("abc", "/app/.env.local", run=run) == "A=1\n"
+    assert collect.read_container_file("abc", "/app/.env", run=run) is None
+    assert calls[0] == ["docker", "cp", "abc:/app/.env.local", "-"]
+
+
+def test_env_files_from_working_dir_read_once_per_start(monkeypatch):
+    monkeypatch.setattr(collect, "env_file_cache", {})
+    reads = []
+
+    def read(cid, path):
+        reads.append(path)
+        return "JWT_SECRET=s\nKAFKA=kafka:9092\n" if path == "/app/.env.local" else None
+
+    c = {"Id": "abc", "Config": {"WorkingDir": "/app/"}, "State": {"StartedAt": "t1"}}
+    assert collect.env_files(c, read=read) == {"/app/.env.local": ["JWT_SECRET=s", "KAFKA=kafka:9092"]}
+    assert len(reads) == len(collect.ENV_FILES) and reads[0] == "/app/.env"
+    collect.env_files(c, read=read)
+    assert len(reads) == len(collect.ENV_FILES)  # cached while the container keeps running
+    collect.env_files({**c, "State": {"StartedAt": "t2"}}, read=read)
+    assert len(reads) == 2 * len(collect.ENV_FILES)  # restarted: read again
+    assert collect.env_files({"Id": "x", "Config": {}, "State": {}}, read=lambda cid, path: None) == {}

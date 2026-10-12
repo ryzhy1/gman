@@ -70,7 +70,26 @@ function splitGpu(items: string[], docker: boolean) {
 const KNOWN = new Set(['image', 'image_id', 'runtime', 'cpu_request', 'cpu_limit', 'cpuset', 'memory_request_bytes',
   'memory_limit_bytes', 'shm_size_bytes', 'gpu_requests', 'ports', 'networks', 'network_mode', 'mounts',
   'restart_policy', 'probes', 'user', 'log_driver', 'privileged', 'readonly_rootfs', 'cap_add', 'cap_drop',
-  'pid_mode', 'ipc_mode', 'ulimits']);
+  'pid_mode', 'ipc_mode', 'ulimits', 'env', 'env_files']);
+
+/** "NAME=value" split at the first "="; Kubernetes references (valueFrom, envFrom) arrive as "<...>" values. */
+function parseEnv(items: string[]): [string, string][] {
+  return items.map(item => {
+    const at = item.indexOf('=');
+    return at < 0 ? [item, ''] : [item.slice(0, at), item.slice(at + 1)];
+  });
+}
+
+function EnvTable({ rows }: { rows: [string, string][] }) {
+  if (!rows.length) return null;
+  return <div className="table-wrap"><Table className="dense">
+    <TableHeader><TableRow><TableHead>Переменная</TableHead><TableHead>Значение</TableHead></TableRow></TableHeader>
+    <TableBody>{rows.map(([k, v], n) => <TableRow key={n}>
+      <TableCell className="align-top"><code className="break-all">{k}</code></TableCell>
+      <TableCell className="whitespace-normal"><code className={v.startsWith('<') && v.endsWith('>') ? 'break-all text-muted-foreground' : 'break-all'}>{v || '""'}</code></TableCell>
+    </TableRow>)}</TableBody>
+  </Table></div>;
+}
 
 /** The observed config split into labelled groups instead of one JSON dump. */
 export function ConfigSections({ instance }: { instance: Placed }) {
@@ -79,6 +98,12 @@ export function ConfigSections({ instance }: { instance: Placed }) {
   const ports = list(c.ports).map(parsePort);
   const mounts = list(c.mounts).map(m => parseMount(m, docker));
   const gpu = splitGpu(list(c.gpu_requests), docker);
+  // Snapshots from agents before 0.7 carry only the GPU selection variables (in gpu_requests).
+  const collected = Array.isArray(c.env);
+  const env = collected ? parseEnv(list(c.env)) : gpu.env;
+  // Dotenv files the application loads itself (Docker), read by the agent from the working directory.
+  const files = c.env_files && typeof c.env_files === 'object' && !Array.isArray(c.env_files)
+    ? Object.entries(c.env_files as Record<string, unknown>).map(([path, items]) => [path, parseEnv(list(items))] as const) : [];
   const ulimits = list(c.ulimits).map(u => {
     const [name, range = ''] = u.split('=');
     const [soft, hard] = range.split(':');
@@ -110,17 +135,19 @@ export function ConfigSections({ instance }: { instance: Placed }) {
       ]} />
     </Group>
 
-    <Group title="Переменные окружения" count={gpu.env.length || undefined}>
-      {gpu.env.length > 0 && <div className="table-wrap"><Table className="dense">
-        <TableHeader><TableRow><TableHead>Переменная</TableHead><TableHead>Значение</TableHead></TableRow></TableHeader>
-        <TableBody>{gpu.env.map(([k, v]) => <TableRow key={k}>
-          <TableCell><code>{k}</code></TableCell><TableCell><code className="break-all">{v || '""'}</code></TableCell>
-        </TableRow>)}</TableBody>
-      </Table></div>}
-      <p className="note">{docker
-        ? 'Агент собирает только переменные выбора GPU (NVIDIA_VISIBLE_DEVICES, CUDA_VISIBLE_DEVICES). Остальные значения могут содержать секреты и не передаются.'
-        : 'Переменные окружения Pod не собираются: значения могут содержать секреты.'}</p>
+    <Group title="Переменные окружения" count={env.length || undefined}>
+      <EnvTable rows={env} />
+      {collected && !env.length && <p className="muted">Переменные окружения не заданы.</p>}
+      {!collected && <p className="note">Снимок от агента старой версии: показаны только переменные выбора GPU.</p>}
+      {collected && !docker && env.length > 0 && <p className="note">Значения из Secret, ConfigMap и полей Pod в спецификации не хранятся — показан их источник.</p>}
     </Group>
+
+    {files.map(([path, rows]) => <Group key={path} title={`Из файла ${path}`} count={rows.length || undefined}>
+      <EnvTable rows={rows} />
+      {!rows.length && <p className="muted">Файл есть, переменных в нем нет.</p>}
+      <p className="note">Приложение читает этот файл само (например, godotenv), поэтому его переменных нет в окружении контейнера.
+        Переменная из окружения контейнера обычно имеет приоритет над одноименной из файла.</p>
+    </Group>)}
 
     <Group title="Порты и сети" count={ports.length || undefined}>
       {ports.length > 0 && <div className="table-wrap"><Table className="dense">

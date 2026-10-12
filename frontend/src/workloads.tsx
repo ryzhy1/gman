@@ -47,9 +47,9 @@ function Rollout({ w }: { w: Workload }) {
     </small></>;
 }
 
-/** Workloads of a service (service card) or of a cluster (cluster card). An empty token means the SSO cookie. */
-export function Workloads({ token, serviceId, environment, cluster, grafanaUrl, range, refreshKey }: {
-  token: string; serviceId?: string; environment?: string; cluster?: string; grafanaUrl: string; range: string; refreshKey: string;
+/** Workloads of a service (service card) or of a cluster (cluster card). */
+export function Workloads({ serviceId, environment, cluster, grafanaUrl, range, refreshKey }: {
+  serviceId?: string; environment?: string; cluster?: string; grafanaUrl: string; range: string; refreshKey: string;
 }) {
   const [data, setData] = useState<WorkloadList | null>(null);
   const [error, setError] = useState('');
@@ -59,11 +59,11 @@ export function Workloads({ token, serviceId, environment, cluster, grafanaUrl, 
     const params = new URLSearchParams({
       ...(serviceId ? { service_id: serviceId } : {}), ...(environment ? { environment } : {}), ...(cluster ? { cluster } : {}),
     });
-    get<WorkloadList>(token, `/api/workloads?${params}`, ctrl.signal)
+    get<WorkloadList>(`/api/workloads?${params}`, ctrl.signal)
       .then(result => { setData(result); setError(''); })
       .catch(e => { if (!ctrl.signal.aborted) setError((e as Error).message); });
     return () => ctrl.abort();
-  }, [token, serviceId, environment, cluster, refreshKey]);
+  }, [serviceId, environment, cluster, refreshKey]);
 
   const rows = data?.workloads ?? [];
   // A service without Kubernetes workloads (Docker only) gets no empty section on its card.

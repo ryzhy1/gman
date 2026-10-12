@@ -1,7 +1,7 @@
 import httpx
 
 from backend.app import workloads
-from backend.tests.test_api import auth, client  # noqa: F401  (fixture)
+from backend.tests.test_api import client  # noqa: F401  (fixture)
 from backend.tests.test_metrics import configured, prometheus, vector  # noqa: F401  (fixture)
 
 KEY = {"source_id": "cluster-01", "namespace": "shop"}
@@ -57,7 +57,7 @@ def test_workloads_state_per_service(client, configured):
         return httpx.Response(200, json=vector())
     prometheus(handler)
     params = {"service_id": "api", "environment": "prod"}
-    data = client.get("/api/workloads", headers=auth("read"), params=params).json()
+    data = client.get("/api/workloads", params=params).json()
     assert data["enabled"] and data["error"] is None
     assert len(seen) == len(workloads.TEMPLATES) + 1
     # Every query is filtered through the join table, never by client-supplied PromQL.
@@ -94,19 +94,18 @@ def test_workloads_filters_and_errors(client, configured, monkeypatch):
         seen.append(request.url.params["query"])
         return httpx.Response(200, json=vector())
     prometheus(handler)
-    data = client.get("/api/workloads", headers=auth("read"), params={"cluster": "cluster-01"}).json()
+    data = client.get("/api/workloads", params={"cluster": "cluster-01"}).json()
     assert data == {"enabled": True, "error": None, "workloads": []}
     assert all('source_id="cluster-01"}' in q and "service_id=" not in q for q in seen)
-    assert client.get("/api/workloads").status_code == 401
     for bad in [{}, {"environment": "prod"}, {"service_id": 'a"} or vector(1)'}, {"cluster": "a b"}]:
-        assert client.get("/api/workloads", headers=auth("read"), params=bad).status_code == 422, bad
+        assert client.get("/api/workloads", params=bad).status_code == 422, bad
     def down(request):
         raise httpx.ConnectError("refused")
     prometheus(down)
-    data = client.get("/api/workloads", headers=auth("read"), params={"service_id": "api"}).json()
+    data = client.get("/api/workloads", params={"service_id": "api"}).json()
     assert data["enabled"] and data["error"].startswith("Metrics store unavailable") and data["workloads"] == []
     monkeypatch.delenv("PROMETHEUS_URL")
-    assert client.get("/api/workloads", headers=auth("read"), params={"service_id": "api"}).json() == {
+    assert client.get("/api/workloads", params={"service_id": "api"}).json() == {
         "enabled": False, "error": "PROMETHEUS_URL is not configured", "workloads": []}
 
 

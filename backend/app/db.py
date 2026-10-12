@@ -206,21 +206,6 @@ class Release(Base):
                       Index("ix_releases_status", "status", "started_at"))
 
 
-class UserSession(Base):
-    """Signed-in SSO users. Only a hash of the cookie value is stored, so a database dump yields no sessions."""
-    __tablename__ = "sessions"
-    id: Mapped[str] = mapped_column(String(64), primary_key=True)  # sha256 hex of the cookie value
-    subject: Mapped[str] = mapped_column(String)
-    role: Mapped[str] = mapped_column(String)
-    # email, name, username and groups as seen at sign-in; roles are not re-read from the IdP mid-session.
-    data: Mapped[dict] = mapped_column(Json)
-    csrf_token: Mapped[str] = mapped_column(String)
-    created_at: Mapped[datetime] = mapped_column(UTC)
-    expires_at: Mapped[datetime] = mapped_column(UTC)
-
-    __table_args__ = (Index("ix_sessions_expires_at", "expires_at"),)
-
-
 def connect(url):
     return create_engine(url, pool_pre_ping=url.startswith("postgresql"))
 
@@ -454,10 +439,6 @@ class Retention:
         if self.last is not None and now - self.last < self.interval:
             return False
         self.last = now
-        # Expired SSO sessions are useless whatever the history retention; sign-in purges them too, but
-        # without new sign-ins they would otherwise stay.
-        with engine.begin() as connection:
-            connection.execute(delete(UserSession).where(UserSession.expires_at < now))
         days = int(os.getenv("GMAN_RETENTION_DAYS", "180"))
         if days <= 0:
             return False

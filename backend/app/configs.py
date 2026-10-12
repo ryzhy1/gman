@@ -1,7 +1,6 @@
 """Structured diff between two stored configurations, for rendering in the portal.
 
-Configurations hold no secret values: the agent never sends environment values or commands, and
-the API schema (extra="forbid") rejects them, so values are returned as stored.
+Values are returned as stored, environment variables included (they may hold secrets).
 """
 from collections import Counter
 

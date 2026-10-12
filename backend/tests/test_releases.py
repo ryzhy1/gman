@@ -4,8 +4,7 @@ from sqlalchemy import select, update
 from sqlalchemy.orm import Session
 
 from backend.app import db as store
-from backend.tests.test_api import auth, client, post  # noqa: F401  (fixture)
-from backend.tests.test_auth import idp, sign_in, sso  # noqa: F401  (fixtures)
+from backend.tests.test_api import client, post  # noqa: F401  (fixture)
 
 OLD = "sha256:" + "a" * 64
 NEW = "sha256:" + "b" * 64
@@ -42,25 +41,25 @@ def deploy(client, status="started", run="bamboo-deploy-1", **extra):
     value = {"event_id": f"bamboo:{run}:{status}", "deployment_id": run, "service_id": "api",
              "environment": "prod", "status": status, "build_id": "API-PLAN-7", "release": "release-7",
              "actor": "ivanov", "actor_kind": "human", **extra}
-    response = client.post("/api/deployments", headers=auth("ci"), json=value)
+    response = client.post("/api/deployments", json=value)
     assert response.status_code == 200, response.text
     return response.json()
 
 
 def releases(client, **params):
-    response = client.get("/api/releases", headers=auth("read"), params={"service_id": "api", **params})
+    response = client.get("/api/releases", params={"service_id": "api", **params})
     assert response.status_code == 200, response.text
     return response.json()["releases"]
 
 
 def detail(client, release_id):
-    response = client.get(f"/api/releases/{release_id}", headers=auth("read"))
+    response = client.get(f"/api/releases/{release_id}")
     assert response.status_code == 200, response.text
     return response.json()
 
 
 def events(client):
-    return client.get("/api/events", headers=auth("read"), params={"service_id": "api"}).json()["events"]
+    return client.get("/api/events", params={"service_id": "api"}).json()["events"]
 
 
 def test_correlation_by_digest_attributes_runtime_changes(client):
@@ -203,21 +202,21 @@ def test_replays_are_idempotent(client):
     # Without a deployment ID, a new run of the same build/release is a redeploy, not a replay.
     legacy = {"service_id": "api", "environment": "prod", "build_id": "API-PLAN-7", "release": "release-7"}
     for event_id, status in (("a:started", "started"), ("a:ok", "succeeded"), ("b:started", "started")):
-        client.post("/api/deployments", headers=auth("ci"), json={**legacy, "event_id": event_id, "status": status})
+        client.post("/api/deployments", json={**legacy, "event_id": event_id, "status": status})
     assert len(releases(client)) == 3
 
 
 def test_stored_request_without_new_fields_is_still_a_duplicate(client):
     value = {"event_id": "legacy:1", "service_id": "api", "environment": "prod", "status": "started",
              "build_id": "B-1"}
-    deploy_response = client.post("/api/deployments", headers=auth("ci"), json=value)
+    deploy_response = client.post("/api/deployments", json=value)
     assert deploy_response.json()["accepted"]
     from backend.app import main
     with Session(main.engine) as session:
         row = session.get(store.Deployment, "legacy:1")
         row.request = {k: v for k, v in row.request.items() if k not in ("image", "version", "deployment_id")}
         session.commit()
-    assert client.post("/api/deployments", headers=auth("ci"), json=value).json()["reason"] == "duplicate"
+    assert client.post("/api/deployments", json=value).json()["reason"] == "duplicate"
 
 
 def test_manual_change_without_release_stays_unknown(client):
@@ -231,16 +230,12 @@ def test_manual_change_without_release_stays_unknown(client):
 def test_reader_access_and_paging(client):
     for i in range(3):
         deploy(client, run=f"bamboo-deploy-{i}", occurred_at=ago(minutes=10 - i))
-    assert client.get("/api/releases").status_code == 401
-    assert client.get("/api/releases", headers=auth("ci")).status_code == 401
-    assert client.get("/api/releases", headers=auth("agent")).status_code == 401
-    assert client.get("/api/releases/1", headers=auth("ci")).status_code == 401
-    assert client.get("/api/releases/999", headers=auth("read")).status_code == 404
-    assert client.get("/api/releases", headers=auth("read"), params={"status": "bogus"}).status_code == 422
-    assert client.get("/api/releases", headers=auth("read"), params={"before": "garbage"}).status_code == 422
-    page = client.get("/api/releases", headers=auth("read"), params={"limit": 2, "environment": "prod"}).json()
+    assert client.get("/api/releases/999").status_code == 404
+    assert client.get("/api/releases", params={"status": "bogus"}).status_code == 422
+    assert client.get("/api/releases", params={"before": "garbage"}).status_code == 422
+    page = client.get("/api/releases", params={"limit": 2, "environment": "prod"}).json()
     assert [r["release"] for r in page["releases"]] == ["release-7", "release-7"] and page["next"]
-    rest = client.get("/api/releases", headers=auth("read"), params={"limit": 2, "before": page["next"]}).json()
+    rest = client.get("/api/releases", params={"limit": 2, "before": page["next"]}).json()
     assert len(rest["releases"]) == 1 and rest["next"] is None
     ids = [r["id"] for r in page["releases"] + rest["releases"]]
     assert ids == sorted(ids, reverse=True)
@@ -273,17 +268,3 @@ def test_metrics_expose_latest_release_status(client):
     assert status == ['gman_release_status{service_id="api",environment="prod",status="failed"} 1.0',
                       'gman_release_status{service_id="api",environment="stage",status="started"} 1.0']
     assert text.count("gman_release_started_timestamp_seconds{") == 2
-
-
-def test_sso_viewer_reads_releases_and_ci_token_still_deploys(sso, idp):
-    value = {"event_id": "bamboo:run-9:started", "deployment_id": "run-9", "service_id": "api",
-             "environment": "prod", "status": "started", "build_id": "B-9"}
-    response = sso.post("/api/deployments", headers=auth("ci"), json=value)
-    assert response.status_code == 200 and response.json()["release_id"]
-    assert sso.get("/api/releases").status_code == 401
-    sign_in(sso, idp)  # viewer group, cookie session; reads need no CSRF token
-    [release] = sso.get("/api/releases", params={"service_id": "api"}).json()["releases"]
-    assert release["status"] == "started"
-    assert sso.get(f"/api/releases/{release['id']}").json()["release"]["build_id"] == "B-9"
-    # A viewer session cannot post deployments: that stays CI-only.
-    assert sso.post("/api/deployments", json={**value, "event_id": "x"}).status_code == 401

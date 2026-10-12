@@ -12,7 +12,7 @@ const RUNBOOKS: [string, string, string[]][] = [
     'Пока алерт активен, остальные алерты этого хоста (GPU, контейнеры, отдельные каналы) подавлены.']],
   ['GManSourceSilent', 'Источник inventory молчит', [
     'Проверить на хосте таймер агента: systemctl status gman-collect.timer, journalctl -u gman-collect.',
-    'Проверить доступность портала с хоста (HTTPS, сертификат) и токен источника в GMAN_AGENT_TOKENS.',
+    'Проверить доступность портала с хоста (сеть, HTTPS-сертификат) и GMAN_URL агента.',
     'Пока источник молчит, алерты его контейнеров и узлов подавлены — их данные устарели.']],
   ['GManHostTelemetryAbsent', 'Нет метрик хоста', [
     'Хост, вероятно, жив (иначе был бы GManNodeDown или NotReady): проверить Collector — systemctl status gman-otelcol на Docker-хосте или pod DaemonSet gman-otel на узле Kubernetes.',
@@ -159,7 +159,7 @@ const OBJECT_LABELS = [['host_id', 'Хост'], ['source_id', 'Источник'
   ['environment', 'Окружение'], ['reason', 'Причина'], ['file', 'Файл'], ['subject', 'Сертификат'],
   ['issuer', 'Издатель CRL']] as const;
 
-export function Alerts({ token, refreshKey }: { token: string; refreshKey: string }) {
+export function Alerts({ refreshKey }: { refreshKey: string }) {
   const [data, setData] = useState<AlertList | null>(null);
   const [error, setError] = useState('');
   const [hash, setHash] = useState(location.hash);
@@ -173,11 +173,11 @@ export function Alerts({ token, refreshKey }: { token: string; refreshKey: strin
 
   useEffect(() => {
     const ctrl = new AbortController();
-    get<AlertList>(token, '/api/alerts', ctrl.signal)
+    get<AlertList>('/api/alerts', ctrl.signal)
       .then(value => { setData(value); setError(''); })
       .catch(e => { if (!ctrl.signal.aborted) setError((e as Error).message); });
     return () => ctrl.abort();
-  }, [token, refreshKey]);
+  }, [refreshKey]);
 
   useEffect(() => {
     if (focus) document.getElementById(`runbook-${focus}`)?.scrollIntoView();

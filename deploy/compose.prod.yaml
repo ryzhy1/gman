@@ -19,9 +19,6 @@ services:
   api:
     environment:
       GMAN_GRAFANA_URL: https://${GMAN_PUBLIC_HOST:?Set GMAN_PUBLIC_HOST}/grafana
-      # SSO callback on the public HTTPS name: the login cookie is set on this host and must come back to it,
-      # and its https scheme makes the session cookie Secure (__Host-). Unused while GMAN_OIDC_ISSUER is empty.
-      GMAN_OIDC_REDIRECT_URI: ${GMAN_OIDC_REDIRECT_URI:-https://${GMAN_PUBLIC_HOST}/api/auth/callback}
       # Expiry of nginx's certificates and CRL on /metrics (GManTls* alerts): an expired crl.pem makes nginx
       # reject every OTLP client. Only public files are mounted (no keys); they must be world-readable (0644),
       # the API runs as 65534.
@@ -56,8 +53,7 @@ services:
       otel: {condition: service_started}
     logging: *logging
   otel:
-    volumes: !override
-      - ./otel-gateway.prod.yaml:/etc/otelcol/config.yaml:ro
+    command: ["--config=/etc/otelcol/gateway.prod.yaml"]
     # Reachable only from the Compose network (nginx); the data of a sender without nginx's identity
     # headers is dropped by the gateway.
     ports: !reset []
@@ -87,7 +83,7 @@ services:
       PGHOST: db
       PGUSER: gman
       PGDATABASE: gman
-      PGPASSWORD: ${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD}
+      PGPASSWORD: ${POSTGRES_PASSWORD:-gman}
       BACKUP_KEEP: ${GMAN_BACKUP_KEEP:-14}
       BACKUP_INTERVAL_SECONDS: ${GMAN_BACKUP_INTERVAL_SECONDS:-86400}
       # Off-site copy after each dump, archive path as $1 (README, «Резервное копирование»); empty = off.

@@ -6,13 +6,6 @@ from pathlib import Path
 DEPLOY = Path(__file__).resolve().parents[2] / "deploy"
 
 
-def test_prod_sso_callback_defaults_to_public_host():
-    # The login cookie is set on the portal's host and must return to it; https makes the session cookie Secure.
-    prod = (DEPLOY / "compose.prod.yaml").read_text()
-    assert ("GMAN_OIDC_REDIRECT_URI: ${GMAN_OIDC_REDIRECT_URI:-https://${GMAN_PUBLIC_HOST}/api/auth/callback}"
-            in prod)
-
-
 def test_stand_accepts_inventory_as_large_as_production():
     stand = (DEPLOY.parent / "frontend/nginx.conf").read_text()
     prod = (DEPLOY / "nginx/gman.conf").read_text()

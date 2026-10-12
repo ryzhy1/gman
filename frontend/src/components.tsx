@@ -27,6 +27,10 @@ export function serverAddress(i: Placed): string {
   return i.source.nodes?.find(n => n.name === i.node)?.internal_ip || i.node;
 }
 
+/** Services page filtered to one server: a Docker host, or a Kubernetes node of a cluster source. */
+export const serverHref = (sourceId: string, node?: string) =>
+  `#server/${encodeURIComponent(sourceId)}${node ? `/${encodeURIComponent(node)}` : ''}`;
+
 /** Published ports: the host side of Docker bindings ("0.0.0.0:8080->80/tcp" → 8080), container ports of a pod. */
 export function servicePorts(i: Placed): string[] {
   const ports = Array.isArray(i.config.ports) ? i.config.ports.map(String) : [];
@@ -120,7 +124,7 @@ export const CONFIG_LABELS: [string, string, ((v: unknown) => string)?][] = [
   ['gpu_requests', 'GPU'], ['runtime', 'Runtime'],
   ['restart_policy', 'Restart policy'], ['probes', 'Проверки здоровья'],
   ['ports', 'Порты'], ['networks', 'Сети'], ['network_mode', 'Network mode'],
-  ['mounts', 'Тома и mounts'], ['user', 'Пользователь процесса'],
+  ['mounts', 'Тома и mounts'], ['user', 'Пользователь процесса'], ['env', 'Переменные окружения'], ['env_files', 'Переменные из файлов'],
   ['privileged', 'Privileged'], ['readonly_rootfs', 'Read-only rootfs'],
   ['cap_add', 'Добавленные capabilities'], ['cap_drop', 'Удаленные capabilities'],
   ['pid_mode', 'PID mode'], ['ipc_mode', 'IPC mode'],
@@ -280,8 +284,8 @@ export function EventItem({ e, onRelease }: { e: Audit; onRelease?: (id: number,
 }
 
 /** Paged history straight from the API, so a quiet service is not crowded out by busy ones. */
-export function History({ token, serviceId, refreshKey, onRelease }: {
-  token: string; serviceId?: string; refreshKey: string; onRelease?: (id: number, serviceId: string) => void;
+export function History({ serviceId, refreshKey, onRelease }: {
+  serviceId?: string; refreshKey: string; onRelease?: (id: number, serviceId: string) => void;
 }) {
   const [events, setEvents] = useState<Audit[]>([]);
   const [next, setNext] = useState<string | null>(null);
@@ -291,15 +295,15 @@ export function History({ token, serviceId, refreshKey, onRelease }: {
 
   useEffect(() => {
     const ctrl = new AbortController();
-    get<EventPage>(token, base, ctrl.signal)
+    get<EventPage>(base, ctrl.signal)
       .then(page => { setEvents(page.events); setNext(page.next); setError(''); })
       .catch(e => { if (!ctrl.signal.aborted) setError((e as Error).message); });
     return () => ctrl.abort();
-  }, [token, base, refreshKey]);
+  }, [base, refreshKey]);
 
   async function more() {
     try {
-      const page = await get<EventPage>(token, `${base}&before=${encodeURIComponent(next!)}`);
+      const page = await get<EventPage>(`${base}&before=${encodeURIComponent(next!)}`);
       setEvents(old => [...old, ...page.events]);
       setNext(page.next);
     } catch (e) { setError((e as Error).message); }

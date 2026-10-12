@@ -29,8 +29,8 @@ function Progress({ release }: { release: Release }) {
 }
 
 /** Bamboo deployments of the service with status derived from runtime observations. */
-export function Releases({ token, serviceId, environment, refreshKey, selected, onSelect }: {
-  token: string; serviceId: string; environment?: string; refreshKey: string;
+export function Releases({ serviceId, environment, refreshKey, selected, onSelect }: {
+  serviceId: string; environment?: string; refreshKey: string;
   selected: number | null; onSelect: (id: number | null) => void;
 }) {
   const [releases, setReleases] = useState<Release[]>([]);
@@ -42,21 +42,21 @@ export function Releases({ token, serviceId, environment, refreshKey, selected, 
   useEffect(() => {
     if (selected != null) return;
     const ctrl = new AbortController();
-    get<ReleasePage>(token, base, ctrl.signal)
+    get<ReleasePage>(base, ctrl.signal)
       .then(page => { setReleases(page.releases); setNext(page.next); setError(''); })
       .catch(e => { if (!ctrl.signal.aborted) setError((e as Error).message); });
     return () => ctrl.abort();
-  }, [token, base, refreshKey, selected]);
+  }, [base, refreshKey, selected]);
 
   async function more() {
     try {
-      const page = await get<ReleasePage>(token, `${base}&before=${encodeURIComponent(next!)}`);
+      const page = await get<ReleasePage>(`${base}&before=${encodeURIComponent(next!)}`);
       setReleases(old => [...old, ...page.releases]);
       setNext(page.next);
     } catch (e) { setError((e as Error).message); }
   }
 
-  if (selected != null) return <ReleaseView token={token} id={selected} refreshKey={refreshKey} onBack={() => onSelect(null)} />;
+  if (selected != null) return <ReleaseView id={selected} refreshKey={refreshKey} onBack={() => onSelect(null)} />;
   return <div>
     {error && <div role="alert" className="alert">{error}</div>}
     <div className="table-wrap"><Table>
@@ -81,17 +81,17 @@ export function Releases({ token, serviceId, environment, refreshKey, selected, 
   </div>;
 }
 
-function ReleaseView({ token, id, refreshKey, onBack }: { token: string; id: number; refreshKey: string; onBack: () => void }) {
+function ReleaseView({ id, refreshKey, onBack }: { id: number; refreshKey: string; onBack: () => void }) {
   const [data, setData] = useState<ReleaseDetail | null>(null);
   const [error, setError] = useState('');
 
   useEffect(() => {
     const ctrl = new AbortController();
-    get<ReleaseDetail>(token, `/api/releases/${id}`, ctrl.signal)
+    get<ReleaseDetail>(`/api/releases/${id}`, ctrl.signal)
       .then(d => { setData(d); setError(''); })
       .catch(e => { if (!ctrl.signal.aborted) setError((e as Error).message); });
     return () => ctrl.abort();
-  }, [token, id, refreshKey]);
+  }, [id, refreshKey]);
 
   const back = <button className={linkButton('mb-4 text-muted-foreground')} onClick={onBack}>← Все релизы</button>;
   if (!data) return <div>{back}{error ? <div role="alert" className="alert">{error}</div> : <div className="empty">Загрузка релиза…</div>}</div>;

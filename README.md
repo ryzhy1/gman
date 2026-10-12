@@ -13,11 +13,16 @@ NVIDIA на серверах, Bitbucket/GitLab для исходного код�
 ## Что работает в каркасе
 
 - Каталог сервисов и карточки с владельцем, командой, репозиторием и внешними ссылками.
-- Прием inventory от Docker-хостов и Kubernetes-кластера, раздельные токены источников.
+- Прием inventory от Docker-хостов и Kubernetes-кластера.
 - Агент сбора (разовый запуск или `--watch` по `docker events` и watch API Kubernetes): контейнеры/pods, image/digest, requests/limits, порты, mounts,
   сети и network/pid/ipc mode, user, capabilities, ulimits, log driver, restart policy,
-  probes/healthcheck (без команд), GPU requests и NVIDIA_VISIBLE_DEVICES/CUDA_VISIBLE_DEVICES.
-  Значения остальных env, commands и команды проверок не отправляются.
+  probes/healthcheck (без команд), GPU requests и все переменные окружения со значениями (env;
+  в Kubernetes для valueFrom/envFrom — источник: Secret, ConfigMap, поле pod-а). Значения не
+  маскируются и могут содержать секреты. Commands и команды проверок не отправляются.
+  Docker: dotenv-файлы, которые приложение читает само (godotenv, python-dotenv и т. п.), —
+  .env, .env.local, .env.dev(elopment), .env.prod(uction), .env.staging, .env.test в WorkingDir
+  контейнера; агент читает их через `docker cp` (без exec, до 256 КБ) один раз на запуск
+  контейнера и передает в env_files, портал показывает их отдельной таблицей «Из файла …».
 - Состояние отдельно от health: status, health, ready, причина (OOMKilled, CrashLoopBackOff),
   exit code, причина прошлого завершения; время создания, старта и завершения; время
   последнего OOM kill (last_oom_at), которое сохраняется и после перезапуска контейнера.
@@ -63,8 +68,8 @@ NVIDIA на серверах, Bitbucket/GitLab для исходного код�
   GET /api/configs/diff?from=&to= (пути полей, added/removed/changed; элементы списков
   портов, mounts, capabilities — как «поле[]»). Вкладка «Конфигурация» в карточке
   сервиса: текущая конфигурация, список версий с фильтром по экземпляру, выбор
-  «Было/Стало» и таблица различий. Секретов в конфигурациях нет (env и команды не
-  собираются и отклоняются схемой), поэтому значения не маскируются.
+  «Было/Стало» и таблица различий. Переменные окружения показываются как есть, без
+  маскирования (элементы env в diff — как «env[]»).
 - Endpoint событий Bamboo и скрипт отправки из deployment job, дедупликация событий.
 - Релизы: событие Bamboo сверяется с runtime по image digest или версии/тегу и окну
   времени. Статусы started → rolling-out → succeeded / failed (Bamboo failed, тайм-аут,
@@ -87,9 +92,8 @@ NVIDIA на серверах, Bitbucket/GitLab для исходного код�
 - Ссылки «Логи в Splunk» на карточке сервиса и у каждого экземпляра: поиск по service/
   environment/хосту/контейнеру за выбранный период; индексы и шаблон поиска задаются
   конфигурацией (см. «Splunk»).
-- Вход через корпоративный SSO (OIDC) с ролями «Просмотр», «Владелец сервиса» и
-  «Администратор платформы»; владельцы правят только свои записи каталога, изменения
-  каталога пишутся в журнал с автором. Без настройки SSO работает вход по токену.
+- Портал и API без входа и токенов: доступ ограничивается сетью (см. «Доступ»).
+  Изменения каталога пишутся в журнал событий.
 - Алерты: Prometheus rules + Alertmanager (молчащий узел/источник, GPU XID/ECC, перегрев,
   троттлинг с порогами по модели GPU, OOMKilled, CrashLoopBackOff, частые перезапуски;
   OOM, нехватка ресурса, вытеснение, проблемы ядра и перезагрузка узла Kubernetes;
@@ -97,27 +101,56 @@ NVIDIA на серверах, Bitbucket/GitLab для исходного код�
   Pending, упавшие Job, DaemonSet не на своих узлах), подавление дочерних алертов
   упавшего узла, webhook/email из .env, страница «Алерты» с runbook в портале.
 
-## Локальный запуск через Docker
+## Запуск
 
-Требуются работающий Docker daemon и Docker Compose. Из корня проекта:
+Нужны только Docker и Docker Compose ≥ 2.20 (include). Из корня проекта:
 
 ```sh
-python3 deploy/init_env.py
-docker compose --env-file .env -f deploy/compose.yaml up --build -d
+docker compose up --build -d
 ```
 
-Открыть http://127.0.0.1:8080. Без SSO войти с GMAN_READ_TOKEN (просмотр) или
-GMAN_ADMIN_TOKEN (администратор) из локального .env; SSO — раздел «Вход и роли».
-Prometheus: http://127.0.0.1:9090. Alertmanager: http://127.0.0.1:9093.
-Grafana: http://127.0.0.1:3000 (admin /
-GRAFANA_ADMIN_PASSWORD из .env). Порты привязаны к loopback. Если .env создан
-предыдущей версией, добавьте в него GRAFANA_ADMIN_PASSWORD вручную.
-OTLP gateway принимает локально 4317/4318 без TLS: это конфигурация стенда.
-Для удаленных серверов используйте production-override (раздел ниже).
+Все конфигурации (Prometheus, правила алертов, Alertmanager, дашборды Grafana, OTel) собираются
+в образы, .env не обязателен: у всех переменных есть рабочие значения по умолчанию (список —
+в deploy/compose.yaml). Чтобы задать их, создайте .env рядом с compose.yaml. Случайные пароли
+PostgreSQL и администратора Grafana создает `python3 deploy/init_env.py` — только до первого
+запуска: PostgreSQL запоминает пароль, с которым создан volume. Остановить: `docker compose down`
+(данные в volumes сохраняются; `down -v` удаляет их).
 
-init_env.py не перезаписывает существующий .env. Начальные source_id:
-server-01 и cluster-01; для остальных узлов добавьте отдельные токены в
-GMAN_AGENT_TOKENS и пересоздайте API. Не используйте один токен для всех серверов.
+| Сервис | Что делает |
+| --- | --- |
+| portal | портал на http://<сервер>:8080 (GMAN_BIND_ADDRESS, GMAN_PORT), API на /api/, Grafana на /grafana/ |
+| api, db | API и PostgreSQL; схема мигрируется при старте API |
+| agent | inventory контейнеров этого сервера (Docker socket), source_id GMAN_SOURCE_ID (gman-server) |
+| node-otel | метрики хоста и контейнеров этого сервера под тем же source_id |
+| otel | OTLP gateway, 4317/4318 без TLS (GMAN_OTLP_BIND_ADDRESS) — для Collector других хостов |
+| prometheus, alertmanager | 127.0.0.1:9090 и 127.0.0.1:9093 |
+| grafana | дашборды открываются без входа (Viewer); admin / GRAFANA_ADMIN_PASSWORD (admin) для правки |
+
+Агент работает в контейнере и показывает адрес контейнера; адрес сервера, который увидят
+пользователи, задайте в GMAN_HOST_IP.
+
+### Подключение других серверов
+
+На каждом Docker-хосте, который должен попасть в GMan, нужен только Docker. Архив с нужными файлами
+(агент и Collector, ~30 КБ) собирается в репозитории: `deploy/host/pack.sh` → gman-host.tar.gz.
+На хосте:
+
+```sh
+tar xzf gman-host.tar.gz && cd gman-host
+GMAN_SERVER=10.0.0.5 GMAN_SOURCE_ID=server-02 docker compose -f deploy/host/compose.yaml up -d --build
+```
+
+Если порты сервера GMan изменены, добавьте GMAN_PORT (портал) и GMAN_OTLP_PORT (OTLP gRPC).
+Порты сервера GMan задаются в его .env: GMAN_PORT, GMAN_OTLP_PORT, GMAN_OTLP_HTTP_PORT,
+GMAN_PROMETHEUS_PORT, GMAN_ALERTMANAGER_PORT, GMAN_GRAFANA_PORT (последние три — только 127.0.0.1).
+
+GMAN_SERVER — адрес сервера GMan, GMAN_SOURCE_ID — уникальное имя хоста (например, hostname);
+их можно записать в deploy/host/.env. Поднимаются агент inventory (контейнеры, env и .env-файлы,
+сведения о хосте) и Collector метрик хоста и контейнеров; оба в сети хоста, поэтому портал
+показывает настоящий IP хоста. С хоста должны быть доступны порт портала (GMAN_PORT, 8080) и
+OTLP (GMAN_OTLP_PORT, 4317) сервера GMan. Хост появляется в «Серверы и GPU» через несколько секунд, метрики — через
+минуту. Отключить: `docker compose -f deploy/host/compose.yaml down -v`. Kubernetes-кластеры
+подключаются агентом с `--runtime kubernetes` («Подключение inventory») и deploy/otel-k8s.yaml.
 
 ## Метрики локального Mac
 
@@ -187,7 +220,7 @@ nginx (root), права ключей 0600. portal.pem, gateway.pem, ca.pem и c
 Необязательные: GMAN_BIND_ADDRESS и GMAN_OTLP_BIND_ADDRESS (по умолчанию 0.0.0.0),
 GMAN_TLS_DIR, GMAN_BACKUP_DIR (deploy/backups), GMAN_BACKUP_KEEP (14),
 GMAN_BACKUP_INTERVAL_SECONDS (86400), GMAN_BACKUP_UPLOAD_CMD и GMAN_BACKUP_OFFSITE_DIR
-(выгрузка), GMAN_BACKUP_RESTORE_CHECK_DAYS (7), GMAN_K8S_TOKEN_REVIEW (GPU DaemonSet),
+(выгрузка), GMAN_BACKUP_RESTORE_CHECK_DAYS (7),
 GMAN_TLS_WATCH_FILES (пути внутри контейнера API через запятую; по умолчанию четыре файла
 /etc/gman/tls/{portal,gateway,ca,crl}.pem).
 
@@ -202,7 +235,6 @@ docker compose --env-file .env -f deploy/compose.yaml -f deploy/compose.prod.yam
 из уведомлений ведут на GMAN_ALERTMANAGER_URL, по умолчанию 127.0.0.1:9093 — через SSH-туннель),
 PostgreSQL и Grafana не публикуются. Получатели алертов — GMAN_ALERT_* (раздел «Алерты»),
 runbook-ссылки в уведомлениях ведут на https://GMAN_PUBLIC_HOST. Ссылки Grafana в портале ведут на https://GMAN_PUBLIC_HOST/grafana.
-GMAN_OIDC_REDIRECT_URI по умолчанию — https://GMAN_PUBLIC_HOST/api/auth/callback (его и регистрируйте в IdP).
 Ограничьте 443 и 4317 межсетевым экраном подсетями серверов и пользователей.
 
 nginx: HSTS, TLS 1.2/1.3; тело запроса до 1 МБ, для POST /api/inventory — до 20 МБ;
@@ -345,64 +377,22 @@ PostgreSQL 17 (libpq-переменные PGHOST/PGUSER/PGPASSWORD).
 Prometheus и Grafana не бэкапятся: метрики хранятся 30 дней, дашборды и datasource
 описаны в deploy/grafana. Сертификаты и .env храните отдельно, в бэкап они не входят.
 
-## Вход и роли
+## Доступ
 
-Люди входят через корпоративный SSO (OIDC Authorization Code + PKCE). Обмен кода,
-проверка ID token (подпись по JWKS, issuer, audience, nonce, срок) и сессия — на стороне
-API (конфиденциальный клиент). Браузер получает только HttpOnly cookie сессии
-(SameSite=Lax, Secure и префикс `__Host-` при HTTPS); в базе хранится лишь хеш ее значения.
-Изменяющие запросы из портала передают CSRF-токен сессии в заголовке X-CSRF-Token.
-«Выйти» удаляет сессию на сервере.
-
-Роль берется из групп IdP при входе и действует до конца сессии (по умолчанию 8 часов):
-
-| Роль | Права | Группы |
-| --- | --- | --- |
-| Просмотр (viewer) | только чтение | GMAN_OIDC_VIEWER_GROUPS (`*` — любой вошедший) |
-| Владелец сервиса (owner) | чтение; изменение записей каталога, где он в `owners` | GMAN_OIDC_OWNER_GROUPS |
-| Администратор платформы (admin) | все, включая новые сервисы и список `owners` | GMAN_OIDC_ADMIN_GROUPS |
-
-Группы перечисляются через запятую, при нескольких совпадениях действует старшая роль.
-Пользователь без подходящей группы не входит. Владение задается полем `owners` записи
-каталога: email, логин (preferred_username), subject или `group:<группа IdP>`, без учета
-регистра. Владелец не может создать сервис и изменить `owners` — это делает администратор.
-Поле `owner` («Ответственный») остается описанием и прав не дает.
-
-Настройка (переменные API, в compose они берутся из .env):
-
-| Переменная | Назначение |
-| --- | --- |
-| GMAN_OIDC_ISSUER | issuer IdP; пустое значение — режим только токенов |
-| GMAN_OIDC_CLIENT_ID, GMAN_OIDC_CLIENT_SECRET | конфиденциальный клиент в IdP |
-| GMAN_OIDC_REDIRECT_URI | `https://<портал>/api/auth/callback`, зарегистрировать в IdP |
-| GMAN_OIDC_POST_LOGOUT_URI | необязательно: `https://<портал>/?logged_out=1` для выхода и из IdP |
-| GMAN_OIDC_SCOPES | по умолчанию `openid profile email` |
-| GMAN_OIDC_GROUPS_CLAIM | claim с группами, по умолчанию `groups`; путь через точку, например `realm_access.roles` |
-| GMAN_OIDC_ADMIN_GROUPS, GMAN_OIDC_OWNER_GROUPS, GMAN_OIDC_VIEWER_GROUPS | группы ролей |
-| GMAN_SESSION_HOURS | срок сессии, по умолчанию 8 |
-
-Если групп нет в ID token, они читаются из userinfo. Частичная настройка OIDC
-останавливает запуск API с перечнем недостающих переменных. Endpoints: GET
-/api/auth/login, GET /api/auth/callback, POST /api/auth/logout, GET /api/me.
-
-Bearer-токены остаются для автоматизации и режима без SSO: GMAN_READ_TOKEN дает чтение,
-GMAN_ADMIN_TOKEN — права администратора; пустое значение отключает токен. Изменения
-через admin-токен пишутся в журнал с автором GMAN_ADMIN_TOKEN (человек неизвестен).
-GMAN_CI_TOKEN и GMAN_AGENT_TOKENS не изменились. Без GMAN_OIDC_ISSUER портал
-показывает форму токена, как раньше.
+Авторизации нет: портал и все API (чтение, каталог, /api/inventory, /api/deployments) доступны
+любому, кто достучится до сервера. Ограничивайте доступ сетью: межсетевой экран, VPN или
+прокси с собственной аутентификацией перед портом портала. Автор изменения каталога в журнале —
+«неизвестен».
 
 ## Регистрация сервиса
 
 Скопируйте deploy/service.example.json, заполните реальные поля. Ссылки необязательны.
 Раздел logs.splunk (index, query) тоже необязателен — см. «Splunk»; пустой можно удалить.
-Загрузите запись через PUT /api/services/{id} с Bearer GMAN_ADMIN_TOKEN или войдите в
-портал администратором и задайте `owners`; дальше владельцы правят запись в карточке
-сервиса («Изменить запись каталога»). Создание и изменения записи видны в журнале событий.
-Пример для локальной оболочки (токен задается в окружении):
+Загрузите запись через PUT /api/services/{id}; дальше ее можно править в карточке
+сервиса («Изменить запись каталога»). Создание и изменения записи видны в журнале событий:
 
 ```sh
 curl --fail-with-body -X PUT http://127.0.0.1:8080/api/services/example-api \
-  -H "Authorization: Bearer $GMAN_ADMIN_TOKEN" \
   -H 'Content-Type: application/json' --data-binary @deploy/service.example.json
 ```
 
@@ -435,8 +425,7 @@ python3 agent/collect.py --runtime docker --source-id server-01
 ```
 
 Без --send выводится нормализованный JSON, без отправки в сеть. Для доставки
-задайте GMAN_URL и GMAN_AGENT_TOKEN этого source_id и добавьте --send.
-Для удаленного адреса скрипт требует HTTPS. Не передавайте токены в аргументах CLI.
+задайте GMAN_URL (например, http://<сервер GMan>:8080) и добавьте --send.
 Запуск раз в минуту без пересечений — systemd timer из deploy/systemd (раздел
 «Production-развертывание»).
 При ошибке полного сбора снимок не отправляется, чтобы не отметить все контейнеры удаленными.
@@ -498,8 +487,8 @@ list/watch); применяется администратором класте�
 выдаются ClusterRole с ClusterRoleBinding: события узлов kubelet и node-problem-detector пишут
 в namespace default, Role в namespace агента их не покажет. Агент собирает
 pods всего кластера, включая init containers. Он не читает Secrets, не выполняет exec,
-но доступ к Pod spec сам по себе может открывать plain-text env в API Kubernetes;
-агент не передает эти значения в GMan.
+и передает в GMan env контейнеров из Pod spec: значения, заданные в spec, — как есть, а для
+valueFrom/envFrom — только ссылку на Secret/ConfigMap (сами Secrets не читаются).
 
 Режим наблюдения для кластера вместо таймера:
 
@@ -575,41 +564,9 @@ account). Процесс получает namespace, pod, контейнер и 
 только снимок с source_id = `<cluster>.<hostname>` (иначе 422). В /metrics GPU узла
 помечаются host_id = имя узла, как в DCGM и gman_k8s_node_ready.
 
-#### Идентичность GPU-узла: bound service account token
-
-DaemonSet не хранит токенов GMan: каждый pod получает свой projected service account token
-(audience `gman`, 1 час, kubelet обновляет его сам; агент перечитывает файл
-GMAN_AGENT_TOKEN_FILE при каждом запуске). API проверяет токен через TokenReview API
-кластера: подпись, срок, audience `gman` (обычный токен pod-а для API Kubernetes не
-подходит) и существование pod-а, к которому токен привязан. Узел берется из привязки
-токена: на Kubernetes ≥ 1.30 — из extra `authentication.kubernetes.io/node-name`, на более
-старых — `get pod` по имени из токена со сверкой UID. Такой токен принимается только для
-снимка kubernetes-node своего кластера и своего узла (иначе 403): pod на одном GPU-узле не
-может отправить снимок за другой. После удаления pod-а его токен перестает приниматься
-в пределах ~70 с (кэш TokenReview в kube-apiserver 10 с и в API 60 с).
-
-Настройка (deploy/gpu-attribution-k8s.yaml создает ServiceAccount `gman-token-reviewer`
-с ClusterRole system:auth-delegator, get pods в gman-gpu, и его долгоживущий токен в
-Secret): в .env
-
-```sh
-kubectl -n gman-gpu get secret gman-token-reviewer -o jsonpath='{.data.token}' | base64 -d
-kubectl config view --raw --minify -o jsonpath='{.clusters[0].cluster.certificate-authority-data}'
-GMAN_K8S_TOKEN_REVIEW='{"cluster-01":{"api_url":"https://10.0.0.1:6443","certificate_authority_data":"<base64>","token":"<токен>"}}'
-```
-
-Ключ — source_id кластера (GMAN_CLUSTER DaemonSet-а). Необязательные поля: `audience`
-(`gman`), `service_accounts` (`["gman-gpu:gman-gpu-agent"]`), `issuer` (при нескольких
-кластерах: токен отправляется только в кластер с совпадающим `iss`), `ca_file` и
-`token_file` вместо встроенных значений; GMAN_K8S_TOKEN_REVIEW_FILE — путь к тому же JSON.
-API должен достучаться до API-сервера кластера; если тот недоступен, ответ 503 и агент
-повторяет отправку. Статические токены `<cluster>.<node>` в GMAN_AGENT_TOKENS продолжают
-работать (systemd-вариант). Spool DaemonSet-а на emptyDir намеренно: у источника узла
-хранится только последний снимок.
-
 Варианты запуска: DaemonSet из deploy/gpu-attribution-k8s.yaml (hostPID, без
 capabilities, nvidia-smi от NVIDIA container runtime без запроса nvidia.com/gpu,
-projected token, RBAC — только list pods) или systemd timer на узле со своим токеном с read-only kubeconfig (в /etc/gman/agent.env: GMAN_RUNTIME=kubernetes-node,
+RBAC — только list pods) или systemd timer на узле с read-only kubeconfig (в /etc/gman/agent.env: GMAN_RUNTIME=kubernetes-node,
 NODE_NAME и GMAN_CLUSTER — значения по умолчанию для --node и --cluster). GMAN_PROC_ROOT задает другой путь к
 /proc хоста, если он смонтирован отдельно.
 
@@ -621,7 +578,7 @@ time-slicing/MPS они общие для pod-ов на ней.
 ## Bamboo
 
 В deployment job добавьте Script task `python3 agent/bamboo_event.py`. Обязательны
-GMAN_URL, защищенный GMAN_CI_TOKEN, GMAN_SERVICE_ID и GMAN_DEPLOYMENT_STATUS
+GMAN_URL, GMAN_SERVICE_ID и GMAN_DEPLOYMENT_STATUS
 (started/succeeded/failed: отдельные tasks в начале и в final tasks).
 
 Остальное по умолчанию берется из переменных, которые Bamboo экспортирует в script
@@ -674,7 +631,7 @@ GMAN_RELEASE_CRASH_RESTARTS (3). Правила статусов — в docs/arc
 
 API: GET /api/releases?service_id=&environment=&status=&limit=&before= (новые сначала,
 курсор `next`), GET /api/releases/{id} — релиз, связанные события и текущие экземпляры
-раскатки. Нужен доступ просмотра (роль viewer по SSO или GMAN_READ_TOKEN). Ответ
+раскатки. Ответ
 POST /api/deployments содержит release_id. /metrics API отдает gman_release_status
 (1 для статуса последнего релиза каждой пары сервис/окружение) и
 gman_release_started_timestamp_seconds; по ним алерт GManReleaseFailed (раздел «Алерты»).
@@ -889,7 +846,7 @@ Collector-ов (DCGM, kube-state-metrics) с меткой exported_job; цель
 `up{job="otel", exported_job=""}`.
 
 Портал читает состояние workloads через GET /api/workloads?service_id=&environment= (карточка
-сервиса) или ?cluster= (карточка кластера) с ролью «Просмотр»; нужен хотя бы service_id или
+сервиса) или ?cluster= (карточка кластера); нужен хотя бы service_id или
 cluster. API выполняет фиксированные шаблоны PromQL (backend/app/workloads.py, произвольный
 PromQL клиент не передает): ряды kube_* приводятся к ключу recording rules (source_id,
 namespace, workload_kind, workload) и фильтруются через gman:kube_workload_service:info.
@@ -943,7 +900,7 @@ index — строка или объект «окружение → индекс
 для кнопки на карточке.
 
 Ссылки строит API: GET /api/logs/splunk?service_id=…&environment=…&range=1h|24h|7d
-(токен просмотра) возвращает ссылку сервиса и ссылки экземпляров по ключу
+возвращает ссылку сервиса и ссылки экземпляров по ключу
 `<source_id>/<instance_id>`. Ошибка конфигурации пишется в лог API, ссылки скрываются.
 Ссылки открываются в новой вкладке с rel=noopener. Имена полей Splunk (gman_service,
 container_id и т. д.) — предположение: согласуйте их вместе с индексами.
@@ -1015,7 +972,7 @@ gman_instance_last_oom_timestamp_seconds, gman_gpu_*, gman_release_*,
 gman_k8s_node_pressure{source_id,host_id,condition} (истинные условия узла кроме Ready) и
 gman_k8s_node_event_last_timestamp_seconds{source_id,host_id,node,reason} — время последнего
 события узла с этой причиной (host_id = node, для подавления по узлу; ряд держится, пока
-отметка события не удалена по GMAN_RETENTION_DAYS). Путь /metrics без токена, но nginx его не проксирует: Prometheus читает
+отметка события не удалена по GMAN_RETENTION_DAYS). nginx не проксирует /metrics: Prometheus читает
 api:8000 внутри сети Compose, снаружи endpoint недоступен. Сроки TLS — тоже с /metrics:
 для каждого файла из GMAN_TLS_WATCH_FILES gman_tls_cert_not_after_timestamp_seconds{file,subject}
 (по ряду на сертификат PEM-цепочки), gman_tls_crl_next_update_timestamp_seconds{file,issuer}
@@ -1110,7 +1067,7 @@ GMAN_ALERT_HEARTBEAT_URL — сигнал никуда не отправляет
 
 **Внешняя проба.** deploy/monitoring/probe.sh — для cron на другой машине (не на сервере
 GMan): `https://<host>/healthz` (сеть, DNS, nginx, сертификат портала),
-`https://<host>/api/auth/info` (API за nginx), сроки сертификатов, которые nginx отдает на
+`https://<host>/api/events?limit=1` (API и база за nginx), сроки сертификатов, которые nginx отдает на
 443 и на OTLP-порту 4317 (по умолчанию тревога за 21 день; на 4317 nginx требует клиентский
 сертификат, но свой предъявляет). Молчит при успехе, при ошибке пишет в stderr и
 возвращает 1 — cron отправит вывод письмом; GMAN_PROBE_PING_URL дополнительно пингует
@@ -1142,9 +1099,9 @@ npm run build
 
 Для разработки API: python -m uvicorn backend.app.main:app --port 8000;
 без DATABASE_URL применяется SQLite только для локальной разработки/тестов.
-Задайте токены, как в Compose. Frontend: npm run dev, /api проксируется на 8000.
+Frontend: npm run dev, /api проксируется на 8000.
 
-Проверено: тесты API/агента/метрик/истории конфигураций/ссылок Splunk/SSO/алертов/сроков TLS (включая spool, backoff, flock, debounce `--watch`, watch Kubernetes и Events на fixtures; SSO — против mock IdP), TypeScript и production build,
+Проверено: тесты API/агента/метрик/истории конфигураций/ссылок Splunk/алертов/сроков TLS (включая spool, backoff, flock, debounce `--watch`, watch Kubernetes и Events на fixtures), TypeScript и production build,
 синтаксис Docker Compose; чтение AMD sysfs; браузерная проверка портала на тестовых
 данных с API на SQLite; bamboo_event.py против локального API. Тест test_deploy.py сверяет
 имена DCGM с deploy/dcgm-counters.csv, allowlist kube-state-metrics с правилами, дашбордами и шаблонами /api/workloads,
@@ -1160,15 +1117,13 @@ PostgreSQL со схемой из Alembic-миграций (backend/migrations),
 services, sources (последний снимок), instances (текущее состояние), config_snapshots
 (история различающихся конфигураций экземпляра по хешу с именем и окружением экземпляра —
 основа для версий и diff; возврат к прежней конфигурации — новая версия), events (с release_id),
-deployments, releases (релизы Bamboo со статусом сверки), sessions (SSO-сессии, только хеш
-cookie), runtime_event_marks (последний count и время каждого Kubernetes Event для записи
+deployments, releases (релизы Bamboo со статусом сверки), runtime_event_marks (последний count и время каждого Kubernetes Event для записи
 повторов один раз; у событий узлов — еще узел и причина, миграция 0006: из них метрика
-событий узла и сводка в карточке узла). Новые поля снимков и каталога (например, owners, logs) хранятся в JSON
+событий узла и сводка в карточке узла). Новые поля снимков и каталога (например, logs) хранятся в JSON
 и не требуют миграций.
 GMAN_RETENTION_DAYS (по умолчанию 180, 0 — отключить) удаляет события, неиспользуемые
 снимки конфигурации, завершенные релизы и отметки Kubernetes Events старше срока; запросы
-деплоев (deployments) не удаляются. Истекшие SSO-сессии удаляются той же ежечасной очисткой
-(и при каждом входе) независимо от GMAN_RETENTION_DAYS.
+деплоев (deployments) не удаляются.
 
 Переход с первой версии каркаса: старая таблица records не переносится. Агенты пришлют
 снимки заново (по одному событию source-connected), сервисы каталога нужно загрузить

@@ -1,6 +1,6 @@
 import React, { useEffect, useState } from 'react';
 import { createRoot } from 'react-dom/client';
-import { ApiError, get, ROLE_LABELS, send, type CurrentMetrics, type Me, type Overview, type SplunkLinks } from './api';
+import { get, type CurrentMetrics, type Overview, type SplunkLinks } from './api';
 import { Alerts } from './alerts';
 import { ConfigView, History, InstanceTable, instanceHref, placeInstances, serverAddress, servicePorts, type Placed } from './components';
 import { ConfigHistory } from './configs';
@@ -12,9 +12,8 @@ import { Resources } from './resources';
 import { Workloads } from './workloads';
 import { LaunchDetails } from './launch';
 import { LlmCharts, LlmSummary } from './llm';
-import { Activity, AlertTriangle, ArrowLeft, ArrowRight, Boxes, ChevronRight, ExternalLink, History as HistoryIcon, LogOut, Menu, Moon, Search, Server, Sun } from 'lucide-react';
+import { Activity, AlertTriangle, ArrowLeft, ArrowRight, Boxes, ChevronRight, ExternalLink, History as HistoryIcon, Menu, Moon, Search, Server, Sun, X } from 'lucide-react';
 import { cn } from '@/lib/utils';
-import { Avatar, AvatarFallback } from '@/ui/avatar';
 import { Badge } from '@/ui/badge';
 import { Button, buttonVariants } from '@/ui/button';
 import { Card, CardAction, CardContent, CardDescription, CardHeader, CardTitle } from '@/ui/card';
@@ -38,23 +37,6 @@ function route() {
 
 const serviceHref = (id: string) => `#services/${encodeURIComponent(id)}`;
 
-const AUTH_ERRORS: Record<string, string> = {
-  forbidden: 'Для вашей учетной записи нет роли в GMan. Обратитесь к администратору платформы.',
-  idp_unavailable: 'Сервер SSO недоступен. Попробуйте позже.',
-};
-
-/** Redirect to the backend's SSO login; refuses to loop if the session cookie did not stick. */
-function ssoLogin(force: boolean): boolean {
-  let last = 0;
-  try { last = Number(sessionStorage.getItem('gman_sso_at') ?? 0); } catch { /* storage unavailable */ }
-  if (!force && Date.now() - last < 30_000) return false;
-  try { sessionStorage.setItem('gman_sso_at', String(Date.now())); } catch { /* storage unavailable */ }
-  location.assign(`/api/auth/login?next=${encodeURIComponent(location.pathname + location.hash)}`);
-  return true;
-}
-
-type Mode = 'loading' | 'oidc' | 'token';
-
 /** Light/dark theme: the viewer's choice is remembered in this browser, the system setting otherwise. */
 function useTheme() {
   const [dark, setDark] = useState(() => {
@@ -76,40 +58,7 @@ function Brand() {
   </div>;
 }
 
-function Login({ mode, notice, onToken }: { mode: Mode; notice: string; onToken: (token: string) => void }) {
-  const [draft, setDraft] = useState('');
-  return <div className="grid min-h-svh place-items-center bg-muted/40 p-4">
-    <Card className="w-full max-w-md">
-      <CardHeader className="gap-4">
-        <Brand />
-        <CardTitle className="text-2xl leading-tight">Ваша инфраструктура.<br />В одном месте.</CardTitle>
-        <CardDescription>Каталог сервисов, конфигурации и история запусков.</CardDescription>
-      </CardHeader>
-      <CardContent className="grid gap-4">
-        {notice && <div role="alert" className="alert">{notice}</div>}
-        {mode === 'loading' && <p className="text-sm text-muted-foreground">Проверка входа…</p>}
-        {mode === 'oidc' && <>
-          <Button size="lg" className="w-full" onClick={() => ssoLogin(true)}>Войти через корпоративный SSO <ArrowRight /></Button>
-          <p className="text-xs text-muted-foreground">Роль определяется группами вашей учетной записи: просмотр, владелец сервиса или администратор платформы.</p>
-        </>}
-        {mode === 'token' && <>
-          <form className="grid gap-3" onSubmit={e => { e.preventDefault(); onToken(draft); setDraft(''); }}>
-            <Label htmlFor="token">Токен стенда</Label>
-            <Input id="token" type="password" value={draft} onChange={e => setDraft(e.target.value)} required autoComplete="off" />
-            <Button size="lg">Открыть платформу <ArrowRight /></Button>
-          </form>
-          <p className="text-xs text-muted-foreground">Токен хранится только в памяти вкладки. SSO на этом стенде не настроен (GMAN_OIDC_ISSUER).</p>
-        </>}
-      </CardContent>
-    </Card>
-  </div>;
-}
-
 function App() {
-  const [token, setToken] = useState('');
-  const [me, setMe] = useState<Me | null>(null);
-  const [mode, setMode] = useState<Mode>('loading');
-  const [notice, setNotice] = useState('');
   const [reload, setReload] = useState(0);
   const [data, setData] = useState<Overview | null>(null);
   const [metrics, setMetrics] = useState<CurrentMetrics | null>(null);
@@ -120,6 +69,8 @@ function App() {
   const [query, setQuery] = useState('');
   const [selected, setSelected] = useState(() => route()[0] === 'services' ? route()[1] ?? '' : '');
   const [instanceRoute, setInstanceRoute] = useState<string[]>(() => route()[0] === 'instances' ? route().slice(1) : []);
+  // #server/<source_id>[/<node>]: the services page limited to one Docker host or Kubernetes node.
+  const [server, setServer] = useState<string[]>(() => route()[0] === 'server' ? route().slice(1, 3) : []);
   const [tab, setTab] = useState('Обзор');
   const [environment, setEnvironment] = useState(ALL);
   const [release, setRelease] = useState<number | null>(null);
@@ -133,6 +84,7 @@ function App() {
       const [kind, ...ids] = route();
       setSelected(kind === 'services' ? ids[0] ?? '' : '');
       setInstanceRoute(kind === 'instances' ? ids : []);
+      setServer(kind === 'server' ? ids.slice(0, 2) : []);
       setPage(kind === 'alerts' ? 'Алерты' : kind === 'hosts' ? 'Серверы и GPU' : kind === 'audit' ? 'Аудит' : 'Сервисы');
       setTab('Обзор'); setRelease(null);
     };
@@ -141,107 +93,64 @@ function App() {
   }, []);
 
   useEffect(() => {
-    const params = new URLSearchParams(location.search);
-    const authError = params.get('auth_error');
-    const loggedOut = params.has('logged_out');
-    if (authError || loggedOut) history.replaceState(null, '', location.pathname);
-    (async () => {
-      try {
-        const info = await get<{ oidc: boolean; open?: boolean }>('', '/api/auth/info');
-        if (info.open) { setMe(await get<Me>('', '/api/me')); return; }
-        if (!info.oidc) { setMode('token'); return; }
-        setMode('oidc');
-        try { setMe(await get<Me>('', '/api/me')); return; } catch (e) {
-          if (!(e instanceof ApiError && e.status === 401)) throw e;
-        }
-        if (authError) setNotice(AUTH_ERRORS[authError] ?? `Не удалось войти через SSO (${authError}). Попробуйте еще раз.`);
-        else if (loggedOut) setNotice('Вы вышли из GMan.');
-        else if (!ssoLogin(false)) setNotice('Вход не завершился: браузер не сохранил сессию. Проверьте, что портал открыт по адресу из GMAN_OIDC_REDIRECT_URI.');
-      } catch (e) {
-        setMode('token');
-        setNotice(`API недоступен: ${(e as Error).message}`);
-      }
-    })();
-  }, []);
-
-  async function signInWithToken(value: string) {
-    try {
-      setMe(await get<Me>(value, '/api/me'));
-      setToken(value);
-      setNotice('');
-    } catch (e) {
-      setNotice(e instanceof ApiError && e.status === 401 ? 'Неверный токен' : (e as Error).message);
-    }
-  }
-
-  async function logout() {
-    if (me?.auth === 'oidc') {
-      try { location.assign((await send<{ redirect: string }>(me, '', 'POST', '/api/auth/logout')).redirect); }
-      catch (e) { setError((e as Error).message); }
-      return;
-    }
-    setToken(''); setMe(null); setData(null); setError('');
-  }
-
-  useEffect(() => {
-    if (!me) return;
     const ctrl = new AbortController();
     async function refresh() {
       try {
-        const overview = await get<Overview>(token, '/api/overview', ctrl.signal);
+        const overview = await get<Overview>('/api/overview', ctrl.signal);
         syncServerClock(overview.server_time);
         setData(overview);
         setError('');
         // Metrics are optional: the catalog stays usable when the store is down.
-        setMetrics(await get<CurrentMetrics>(token, '/api/metrics/current', ctrl.signal)
+        setMetrics(await get<CurrentMetrics>('/api/metrics/current', ctrl.signal)
           .catch(e => ({ enabled: true, error: (e as Error).message })));
       } catch (e) {
         if (ctrl.signal.aborted) return;
-        // An expired SSO session goes back through the IdP; a bad token is just reported.
-        if (e instanceof ApiError && e.status === 401 && me!.auth === 'oidc') { setMe(null); ssoLogin(false); return; }
         setError((e as Error).message);
       }
     }
     void refresh();
     const timer = setInterval(refresh, 30_000);
     return () => { ctrl.abort(); clearInterval(timer); };
-  }, [me, token, reload]);
+  }, [reload]);
 
   // Links are built by the API (SPL escaping); refreshed with the overview so new instances get one.
   useEffect(() => setSplunk(null), [selected, environment, range]);
   useEffect(() => {
-    if (!me || !selected) return;
+    if (!selected) return;
     const ctrl = new AbortController();
     const params = new URLSearchParams({ service_id: selected, range, ...(environment === ALL ? {} : { environment }) });
-    get<SplunkLinks>(token, `/api/logs/splunk?${params}`, ctrl.signal).then(setSplunk).catch(() => undefined);
+    get<SplunkLinks>(`/api/logs/splunk?${params}`, ctrl.signal).then(setSplunk).catch(() => undefined);
     return () => ctrl.abort();
-  }, [me, token, selected, environment, range, data?.server_time]);
-
-  if (!me) return <Login mode={mode} notice={notice} onToken={signInWithToken} />;
+  }, [selected, environment, range, data?.server_time]);
 
   const all: Placed[] = placeInstances(data?.sources ?? []);
   const instances = all.filter(i => environment === ALL || i.environment === environment);
-  const services = (data?.services ?? []).filter(s =>
-    `${s.name} ${s.id} ${s.team} ${s.owner}`.toLowerCase().includes(query.toLowerCase()));
-  // One row per server and ports of a service's running instances in the chosen environment.
   // One row per server and ports of a service's running instances in the chosen environment; running
-  // containers and pods without a catalog entry follow, each opening its own instance page.
+  // containers and pods without a catalog entry follow, each opening its own instance page. The search matches
+  // the service (name, ID, team, owner) or a row's ports and server address, e.g. "8080" or ":8080".
   type Row = { key: string; name: string; href: string; address: string; ports: string; first: boolean; unbound?: boolean };
-  const needle = query.toLowerCase();
-  const running: Row[] = services.flatMap(service => {
+  const onServer = (i: Placed) => !server.length || (i.source.source_id === server[0] && (!server[1] || i.node === server[1]));
+  const listed = instances.filter(i => i.status === 'running' && onServer(i));
+  const needle = query.trim().toLowerCase().replace(/^:/, '');
+  const found = (...texts: string[]) => !needle || texts.some(t => t.toLowerCase().includes(needle));
+  const running: Row[] = (data?.services ?? []).flatMap(service => {
+    const named = found(service.name, service.id, service.team, service.owner);
     const rows = new Map<string, { address: string; ports: string }>();
-    for (const i of instances) if (i.service_id === service.id && i.status === 'running') {
+    for (const i of listed) if (i.service_id === service.id) {
       const row = { address: serverAddress(i), ports: servicePorts(i).join(', ') };
-      rows.set(`${row.address}|${row.ports}`, row);
+      if (named || found(row.ports, row.address)) rows.set(`${row.address}|${row.ports}`, row);
     }
     return [...rows.values()].sort((a, b) => a.address.localeCompare(b.address)).map((r, n) =>
       ({ ...r, key: `${service.id}/${r.address}/${r.ports}`, name: service.name, href: serviceHref(service.id), first: n === 0 }));
-  }).concat(instances
-    .filter(i => i.status === 'running' && !data?.services.some(s => s.id === i.service_id)
-      && `${i.name} ${i.service_id} ${i.controller}`.toLowerCase().includes(needle))
-    .sort((a, b) => a.name.localeCompare(b.name))
-    .map(i => ({ key: `${i.source.source_id}/${i.id}`, name: i.name, href: instanceHref(i), first: true, unbound: true,
-      address: serverAddress(i), ports: servicePorts(i).join(', ') })));
+  }).concat(listed
+    .filter(i => !data?.services.some(s => s.id === i.service_id))
+    .map(i => ({ i, address: serverAddress(i), ports: servicePorts(i).join(', ') }))
+    .filter(({ i, address, ports }) => found(i.name, i.service_id, i.controller, ports, address))
+    .sort((a, b) => a.i.name.localeCompare(b.i.name))
+    .map(({ i, address, ports }) => ({ key: `${i.source.source_id}/${i.id}`, name: i.name, href: instanceHref(i), first: true,
+      unbound: true, address, ports })));
+  const serverSource = data?.sources.find(s => s.source_id === server[0]);
+  const serverName = server[1] ? `${server[1]} (${serverSource?.hostname ?? server[0]})` : serverSource?.hostname ?? server[0];
   const runningCount = new Set(running.filter(r => r.first).map(r => r.key)).size;
   const service = data?.services.find(s => s.id === selected);
   const selectedInstance = all.find(i => i.source.source_id === instanceRoute[0] && i.id === instanceRoute[1]);
@@ -275,14 +184,6 @@ function App() {
       <Icon className="size-4" />{p}
     </Button>)}
   </nav>;
-  const account = <div className="flex items-center gap-3 rounded-lg border bg-background p-3">
-    <Avatar className="size-8"><AvatarFallback className="text-xs">{me.name.slice(0, 2).toUpperCase()}</AvatarFallback></Avatar>
-    <div className="min-w-0 flex-1">
-      <p className="truncate text-sm font-medium" title={me.email || me.subject}>{me.name}</p>
-      <p className="truncate text-xs text-muted-foreground">{ROLE_LABELS[me.role]} · {me.auth === 'oidc' ? 'SSO' : me.auth === 'open' ? 'без входа' : 'вход по токену'}</p>
-    </div>
-    {me.auth !== 'open' && <Button variant="ghost" size="icon-sm" onClick={logout} title="Выйти" aria-label="Выйти"><LogOut /></Button>}
-  </div>;
   const stats = data ? [
     ['Сервисы в каталоге', data.services.length, `${instances.length} экземпляров в выбранном окружении`, Boxes],
     ['Подключенные источники', data.sources.length, `${data.sources.filter(stale).length} с устаревшими данными, ${data.sources.filter(s => s.errors?.length).length} с ошибками сбора`, Server],
@@ -298,7 +199,6 @@ function App() {
         <p className="text-xs text-muted-foreground">Каталог и наблюдаемость</p>
       </div>
       {nav}
-      <div className="mt-auto">{account}</div>
     </aside>
     <div className="md:pl-60">
       <header className="sticky top-0 z-10 flex h-14 items-center gap-3 border-b bg-background/80 px-4 backdrop-blur md:px-8">
@@ -307,7 +207,6 @@ function App() {
           <SheetContent side="left" className="w-64 gap-6 p-4">
             <SheetTitle className="px-2 pt-2"><Brand /></SheetTitle>
             {nav}
-            <div className="mt-auto">{account}</div>
           </SheetContent>
         </Sheet>
         <nav aria-label="Навигация" className="flex min-w-0 items-center gap-1.5 text-sm text-muted-foreground">
@@ -340,7 +239,7 @@ function App() {
         {metrics && (!metrics.enabled || metrics.error) && data && <div role="status" className="alert">
           Метрики ресурсов недоступны: {metrics.error ?? 'хранилище не настроено'}. Каталог и конфигурации показаны без них.
         </div>}
-        {error && <div role="alert" className="alert">{error}. {data ? 'Показан последний полученный снимок.' : 'Проверьте API и токен.'}</div>}
+        {error && <div role="alert" className="alert">{error}. {data ? 'Показан последний полученный снимок.' : 'Проверьте, что API доступен.'}</div>}
         {!data ? <div className="empty">{error ? 'Данные недоступны.' : 'Загрузка каталога…'}</div> : <>
           <div className="grid grid-cols-2 gap-4 xl:grid-cols-4">
             {stats.map(([label, n, hint, Icon]) => <Card key={label} className="gap-2 py-5">
@@ -358,10 +257,14 @@ function App() {
               <div className="space-y-1.5">
                 <CardTitle className="flex items-center gap-2">Запущенные сервисы <Badge variant="muted">{runningCount}</Badge></CardTitle>
                 <CardDescription>Нажмите на строку, чтобы открыть страницу сервиса</CardDescription>
+                {server.length > 0 && <Badge variant="secondary" className="gap-1.5 py-1 pr-1 font-normal">
+                  <Server className="size-3.5" /> {server[1] ? 'Узел' : 'Сервер'}: <b className="font-medium">{serverName}</b>
+                  <a href="#services" className="rounded-sm p-0.5 hover:bg-background" title="Показать сервисы всех серверов" aria-label="Сбросить фильтр по серверу"><X className="size-3.5" /></a>
+                </Badge>}
               </div>
               <div className="relative w-full sm:w-72">
                 <Search className="pointer-events-none absolute top-1/2 left-2.5 size-4 -translate-y-1/2 text-muted-foreground" />
-                <Input aria-label="Поиск сервисов" placeholder="Найти сервис, команду, владельца…" className="pl-8"
+                <Input aria-label="Поиск сервисов" placeholder="Сервис, команда, порт или IP…" className="pl-8"
                   value={query} onChange={e => setQuery(e.target.value)} />
               </div>
             </CardHeader>
@@ -383,8 +286,9 @@ function App() {
                   </TableRow>)}</TableBody>
               </Table></div>}
               {!running.length && <div className="empty">
-                <h3>{query ? 'Сервисы не найдены' : 'Нет запущенных сервисов'}</h3>
-                <p>Зарегистрируйте сервис через API и задайте gman.service в Docker labels или labels шаблона Pod.</p>
+                <h3>{query ? 'Сервисы не найдены' : server.length ? 'На этом сервере нет запущенных сервисов' : 'Нет запущенных сервисов'}</h3>
+                {query ? <p>Поиск идет по названию, идентификатору, команде, ответственному, порту и IP сервера.</p>
+                  : !server.length && <p>Зарегистрируйте сервис через API и задайте gman.service в Docker labels или labels шаблона Pod.</p>}
               </div>}
             </CardContent>
           </Card>}
@@ -413,9 +317,9 @@ function App() {
             <section>
               {tab === 'Обзор' && <>
                 <h2>О сервисе</h2>
-                <dl>{[['Команда', service.team], ['Ответственный', service.owner], ['Владельцы (изменяют запись)', (service.owners ?? []).join(', ')], ['Идентификатор', service.id], ['Репозиторий', service.repository]]
+                <dl>{[['Команда', service.team], ['Ответственный', service.owner], ['Идентификатор', service.id], ['Репозиторий', service.repository]]
                   .map(([k, v]) => <div key={k}><dt>{k}</dt><dd>{v || 'Не указано'}</dd></div>)}</dl>
-                <ServiceEditor key={service.id} service={service} me={me} token={token} onSaved={() => setReload(n => n + 1)} />
+                <ServiceEditor key={service.id} service={service} onSaved={() => setReload(n => n + 1)} />
                 <LlmSummary metrics={metrics} serviceId={service.id} grafanaUrl={grafana} range={range} />
                 <h3 className="subheading">Кем, когда и с какой конфигурацией запущен</h3>
                 {own.map(i => <LaunchDetails key={i.source.source_id + i.id} instance={i} events={data.events}
@@ -423,14 +327,14 @@ function App() {
                 {!own.length && <p className="empty">Агент ещё не передал экземпляры этого сервиса в выбранном окружении.</p>}
                 <h3 className="subheading">Текущее размещение</h3>
                 <InstanceTable rows={own} metrics={metrics} logs={splunk?.instances} />
-                <Workloads token={token} serviceId={service.id} environment={environment === ALL ? undefined : environment}
+                <Workloads serviceId={service.id} environment={environment === ALL ? undefined : environment}
                   grafanaUrl={grafana} range={range} refreshKey={data.server_time} />
                 <p className="note">Сервисы обнаруживаются независимо от способа запуска. Владелец сервиса и инициатор деплоя — разные роли. Bamboo сообщает автора деплоя; для ручных запусков без отдельного аудита автор неизвестен. CPU — в ядрах (1.0 = одно ядро), процент — от лимита контейнера. VRAM — видеопамять процессов контейнера, а не загрузка GPU.</p>
               </>}
               {tab === 'Ресурсы' && <>
-                <Resources token={token} instances={own} grafanaLink={links!.grafana} range={range} onRange={setRange}
+                <Resources instances={own} grafanaLink={links!.grafana} range={range} onRange={setRange}
                   splunkLink={splunk?.service || links!.splunk} />
-                <LlmCharts token={token} metrics={metrics} serviceId={service.id} range={range} />
+                <LlmCharts metrics={metrics} serviceId={service.id} range={range} />
               </>}
               {tab === 'Экземпляры' && <InstanceTable rows={own} metrics={metrics} logs={splunk?.instances} />}
               {tab === 'Конфигурация' && <>
@@ -439,27 +343,27 @@ function App() {
                 {!own.length && <div className="empty">Конфигурации еще не получены.</div>}
                 <p className="note">Значения переменных окружения, команды и команды проверок здоровья не собираются.</p>
                 <h2 className="subheading">История версий</h2>
-                <ConfigHistory key={service.id} token={token} serviceId={service.id}
+                <ConfigHistory key={service.id} serviceId={service.id}
                   instances={all.filter(i => i.service_id === service.id)} refreshKey={data.server_time} />
               </>}
-              {tab === 'Релизы' && <Releases token={token} serviceId={service.id} environment={environment === ALL ? undefined : environment}
+              {tab === 'Релизы' && <Releases serviceId={service.id} environment={environment === ALL ? undefined : environment}
                 refreshKey={data.server_time} selected={release} onSelect={setRelease} />}
-              {tab === 'История' && <History token={token} serviceId={service.id} refreshKey={data.server_time} onRelease={openRelease} />}
+              {tab === 'История' && <History serviceId={service.id} refreshKey={data.server_time} onRelease={openRelease} />}
             </section>
           </div>}
 
           {page === 'Серверы и GPU' && <div className="host-grid">
             {hostSources.map(s => s.source_type === 'kubernetes-cluster'
               ? <ClusterCard key={s.source_id} source={s} sources={data.sources} metrics={metrics} grafanaUrl={grafana} range={range} onService={openService}>
-                <Workloads token={token} cluster={s.source_id} grafanaUrl={grafana} range={range} refreshKey={data.server_time} />
+                <Workloads cluster={s.source_id} grafanaUrl={grafana} range={range} refreshKey={data.server_time} />
               </ClusterCard>
               : <HostCard key={s.source_id} source={s} metrics={metrics} grafanaUrl={grafana} range={range} onService={openService} />)}
             {!data.sources.length && <section className="empty">Источники еще не подключены. Начните с одного Docker-хоста или Kubernetes-кластера.</section>}
           </div>}
 
-          {page === 'Алерты' && <Alerts token={token} refreshKey={data.server_time} />}
+          {page === 'Алерты' && <Alerts refreshKey={data.server_time} />}
 
-          {page === 'Аудит' && <section><h2>Журнал событий</h2><History token={token} refreshKey={data.server_time} onRelease={openRelease} /></section>}
+          {page === 'Аудит' && <section><h2>Журнал событий</h2><History refreshKey={data.server_time} onRelease={openRelease} /></section>}
 
           <footer className="pb-4 text-xs text-muted-foreground">Обновление каждые 30 секунд · Получено: {date(data.server_time)} · Время браузера: {Intl.DateTimeFormat().resolvedOptions().timeZone}</footer>
         </>}

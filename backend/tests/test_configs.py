@@ -1,9 +1,9 @@
 from backend.app.configs import diff, summary
-from backend.tests.test_api import auth, client, post, snapshot  # noqa: F401  (fixture)
+from backend.tests.test_api import client, post, snapshot  # noqa: F401  (fixture)
 
 
 def read(client, path, **params):
-    return client.get(path, headers=auth("read"), params=params)
+    return client.get(path, params=params)
 
 
 def history(client):
@@ -86,13 +86,11 @@ def test_version_and_diff(client):
     assert same["identical"] and same["changes"] == []
 
 
-def test_auth_and_not_found(client):
+def test_reads_and_not_found(client):
     history(client)
     for path in ("/api/services/api/configs", "/api/instances/node-1/container-1/configs", "/api/configs/1",
                  "/api/configs/diff?from=1&to=2"):
-        assert client.get(path).status_code == 401
-        assert client.get(path, headers=auth("agent")).status_code == 401
-        assert client.get(path, headers=auth("read")).status_code == 200
+        assert client.get(path).status_code == 200
     assert read(client, "/api/services/missing/configs").status_code == 404
     assert read(client, "/api/instances/node-1/missing/configs").status_code == 404
     assert read(client, "/api/instances/node-2/container-1/configs").status_code == 404
@@ -104,7 +102,7 @@ def test_auth_and_not_found(client):
 
 
 def test_catalog_service_without_versions_is_empty_not_404(client):
-    client.put("/api/services/new", headers=auth("admin"), json={"id": "new", "name": "New"})
+    client.put("/api/services/new", json={"id": "new", "name": "New"})
     assert read(client, "/api/services/new/configs").json() == {"versions": [], "next": None}
 
 

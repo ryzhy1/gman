@@ -55,8 +55,8 @@ function requests(shown: Placed[], metric: string, kind: Kind): Request[] {
 }
 
 /** The period is owned by the service card so that its Splunk links cover the same window. */
-export function Resources({ token, instances, grafanaLink, range, onRange, splunkLink }: {
-  token: string; instances: Placed[]; grafanaLink: string; range: string; onRange: (range: string) => void; splunkLink?: string;
+export function Resources({ instances, grafanaLink, range, onRange, splunkLink }: {
+  instances: Placed[]; grafanaLink: string; range: string; onRange: (range: string) => void; splunkLink?: string;
 }) {
   const [data, setData] = useState<Record<string, Series[]>>({});
   const [failed, setFailed] = useState<string[]>([]);
@@ -76,7 +76,7 @@ export function Resources({ token, instances, grafanaLink, range, onRange, splun
     // A failing series (e.g. a scope the metrics API does not serve yet) leaves a gap, not a broken tab.
     Promise.all(metrics.map(async ([metric, , , , kind]) => [metric, (await Promise.all(requests(shown, metric, kind).map(async r => {
       try {
-        const result = await get<RangeResult>(token, `/api/metrics/range?${new URLSearchParams({ ...r.params, range })}`, ctrl.signal);
+        const result = await get<RangeResult>(`/api/metrics/range?${new URLSearchParams({ ...r.params, range })}`, ctrl.signal);
         return { name: r.name, color: r.color, points: result.points };
       } catch (e) {
         if (ctrl.signal.aborted) throw e;
@@ -91,7 +91,7 @@ export function Resources({ token, instances, grafanaLink, range, onRange, splun
       .catch(() => undefined);
     return () => ctrl.abort();
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [token, key, range]);
+  }, [key, range]);
 
   return <div>
     <div className="chart-controls">

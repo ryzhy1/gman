@@ -18,7 +18,7 @@
 
 Прикладной стек: FastAPI, PostgreSQL, React/TypeScript. Не выяснены: состав узлов
 Kubernetes, число workloads, модели GPU, действующие Grafana/хранилище метрик, индексы
-и поля Splunk, IdP для SSO, канал уведомлений, сроки хранения и требования доступности.
+и поля Splunk, канал уведомлений, сроки хранения и требования доступности.
 
 ## Компоненты
 
@@ -45,7 +45,6 @@ flowchart LR
     graf[Grafana]
     bk[backup]
   end
-  idp[IdP OIDC]
   splunk[Splunk]
   agent -->|"HTTPS inventory"| nginx
   kagent -->|"HTTPS"| nginx
@@ -62,7 +61,6 @@ flowchart LR
   api -->|"/api/v2/alerts"| am
   graf --> prom
   nginx -->|"/grafana/"| graf
-  api <-->|OIDC| idp
   bk --> db
   nginx -.->|"ссылки в браузере"| splunk
 ```
@@ -92,9 +90,9 @@ flowchart LR
    nvidia-smi или AMD sysfs, сведения о хосте. Агент кластера читает pods, nodes, Events pod-ов и
    узлов через kubectl (или API с service account). Агент GPU-узла (`kubernetes-node`) читает nvidia-smi,
    `/proc/<pid>/cgroup` и pods своего узла.
-2. Снимок пишется в spool на диске и отправляется `POST /api/inventory` с Bearer-токеном
-   источника. Повторы с backoff; неотправленное остается в spool.
-3. API сопоставляет токен с source_id до разбора тела, проверяет схему (extra=forbid),
+2. Снимок пишется в spool на диске и отправляется `POST /api/inventory`. Повторы с backoff;
+   неотправленное остается в spool.
+3. API проверяет схему (extra=forbid),
    берет advisory lock источника и отвергает дубликат или снимок не новее принятого
    (`accepted=false`).
 4. Снимок заменяет текущее состояние источника (sources, instances); новая конфигурация
@@ -241,22 +239,13 @@ OOMKilled экземпляра — OOMKilling того же узла (SystemOOM 
 (scope node) скрываются NotReady узла и молчанием источника кластера.
 Runbook — страница портала `#alerts/<имя>`. Silence — в UI Alertmanager.
 
-### Вход и доступ
+### Доступ
 
-1. Портал запрашивает `GET /api/auth/info`. При настроенном OIDC браузер уходит на
-   `/api/auth/login`: API создает state, nonce и PKCE verifier в подписанной cookie (10 минут)
-   и перенаправляет в IdP.
-2. `/api/auth/callback`: обмен кода (конфиденциальный клиент), проверка ID token по JWKS
-   (только асимметричные алгоритмы, issuer, audience/azp, nonce, срок), группы из claim или
-   userinfo, роль по GMAN_OIDC_*_GROUPS. Без подходящей группы вход отклоняется.
-3. Сессия хранится в таблице sessions (хеш значения cookie, роль, CSRF-токен, срок, по
-   умолчанию 8 часов). Браузер держит только HttpOnly cookie (`__Host-` и Secure при HTTPS,
-   SameSite=Lax). Изменяющие запросы требуют X-CSRF-Token.
-4. Явный заголовок Authorization имеет приоритет над cookie: Bearer GMAN_READ_TOKEN (чтение)
-   и GMAN_ADMIN_TOKEN (администратор) — для автоматизации и режима без SSO.
-
-Машинные учетные данные отдельны: токен на каждый source_id (GMAN_AGENT_TOKENS),
-GMAN_CI_TOKEN для Bamboo. OTLP — клиентские сертификаты пилотного CA.
+Аутентификации и ролей нет: портал, API, прием inventory (`/api/inventory`) и событий Bamboo
+(`/api/deployments`) открыты всем, кто достучится до сервера; source_id берется из тела снимка.
+Доступ ограничивается сетью (межсетевой экран, VPN, внешний прокси с аутентификацией).
+Grafana открывает дашборды анонимно с ролью Viewer. OTLP в production-override — клиентские
+сертификаты пилотного CA.
 
 ### Bamboo
 
@@ -292,7 +281,6 @@ advisory lock. Снимки, экземпляры и конфигурации х
 | events | id | Журнал: тип, service/source/instance, received_at, occurred_at, release_id, JSON события с actor и changes |
 | deployments | event_id | Исходный запрос CI для идемпотентности |
 | releases | id | Прогон деплоя Bamboo для сервиса/окружения: версия, image/digest, commit, инициатор, статус и причина, окно, прогресс экземпляров |
-| sessions | sha256 cookie | SSO-сессии: subject, роль, email/имя/группы на момент входа, CSRF-токен, срок |
 | runtime_event_marks | source_id + uid | Последний записанный count и время Kubernetes Event — дедупликация повторов; у событий узла еще node и reason (метрика и сводка карточки узла); удаляется по GMAN_RETENTION_DAYS |
 
 Соответствие сущностям исходного проекта:
@@ -362,7 +350,7 @@ gman_service/gman_environment, k8s.namespace/pod; command, env, пользова
 | history-gap | источник молчал дольше GMAN_HISTORY_GAP_SECONDS или агент отбросил снимки (spool overflow): gap_from/gap_to, reasons, dropped_snapshots; по событию на каждый затронутый сервис | unknown |
 | deployment | Bamboo | из CI, actor_source = Bamboo integration assertion; release_id |
 | instance-appeared / config-changed, связанные с релизом | разница снимков + сверка с релизом | инициатор релиза, actor_source = Bamboo, correlated by digest/version |
-| service-created / service-updated | изменение каталога через API | email/логин SSO (human) или GMAN_ADMIN_TOKEN (unknown), с ролью и subject |
+| service-created / service-updated | изменение каталога через API | неизвестен (actor_source = portal) |
 
 Первый снимок не считается деплоем. Происхождение (compose project/service/working dir,
 OCI source/revision/version, app.kubernetes.io/*, helm chart, Kubernetes field managers)
@@ -547,27 +535,19 @@ Alertmanager отдельным маршрутом каждые 5 минут ш�
 
 ## Доступ и безопасность
 
-| Кто | Как | Права |
-| --- | --- | --- |
-| Человек, SSO | OIDC Authorization Code + PKCE, серверная сессия | viewer — чтение; owner — правка записей каталога, где он в `owners` (кроме самого `owners`); admin — все, включая новые сервисы |
-| Автоматизация | Bearer GMAN_READ_TOKEN / GMAN_ADMIN_TOKEN | чтение / администратор; автор в журнале — имя токена |
-| Агент inventory | Bearer-токен на source_id | только `POST /api/inventory` своего source_id |
-| GPU-агент DaemonSet | bound service account token (audience `gman`), проверка TokenReview кластера (GMAN_K8S_TOKEN_REVIEW) | только снимок kubernetes-node своего узла (узел из привязки токена к pod-у) |
-| Bamboo | Bearer GMAN_CI_TOKEN | только `POST /api/deployments` |
-| Collector узла | клиентский сертификат пилотного CA (mTLS в nginx, CRL) | OTLP: host.id = CN сертификата хоста; для сертификата кластера k8s.cluster.name = CN |
-
-Владение (`owners`) сопоставляется с subject, email, логином или `group:<группа>` без учета
-регистра. Роль фиксируется при входе и действует до конца сессии. Изменения каталога
-пишутся в журнал с автором и ролью.
+Аутентификации нет: портал, API, `POST /api/inventory` (source_id из тела снимка) и
+`POST /api/deployments` открыты всем, кто достучится до сервера. Доступ ограничивается сетью.
+Collector узла в production-override — клиентский сертификат пилотного CA (mTLS в nginx, CRL):
+host.id = CN сертификата хоста; для сертификата кластера k8s.cluster.name = CN.
 
 Сеть (production): снаружи только 443 (портал, /api, Grafana на /grafana/), 80 (редирект)
 и 4317 (OTLP gRPC с mTLS и CRL в nginx); Prometheus и Alertmanager — на 127.0.0.1, PostgreSQL и Grafana не
 публикуются. nginx: TLS 1.2/1.3, HSTS, CSP, limit_req по IP, лимиты тела запроса.
 
-Данные: агент отправляет allowlist полей inspect/Pod spec. Значения env (кроме
-NVIDIA_VISIBLE_DEVICES/CUDA_VISIBLE_DEVICES), команды, args и команды проверок здоровья не
-собираются и отвергаются схемой API; labels — только allowlist происхождения. Поэтому
-конфигурации показываются без маскирования. Ссылки каталога — только HTTP(S) без учетных
+Данные: агент отправляет allowlist полей inspect/Pod spec, включая все переменные окружения
+со значениями (Kubernetes valueFrom/envFrom — ссылкой на источник). Они хранятся и показываются
+без маскирования и могут содержать секреты. Команды, args и команды проверок здоровья не
+собираются и отвергаются схемой API; labels — только allowlist происхождения. Ссылки каталога — только HTTP(S) без учетных
 данных; токены не помещаются в URL. Ошибки API не раскрывают параметры SQL и inventory.
 
 Привилегии на узлах: агент и Collector Docker-хоста получают Docker socket через группу

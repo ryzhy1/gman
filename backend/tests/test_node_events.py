@@ -8,7 +8,7 @@ import pytest
 from agent import collect
 from agent.collect import KubeWatcher
 from backend.tests.test_alerts import find, samples
-from backend.tests.test_api import auth, client, post  # noqa: F401  (pytest fixture)
+from backend.tests.test_api import client, post  # noqa: F401  (pytest fixture)
 from backend.tests.test_kube_watch import node_ev, pod
 
 CID = "4f2a" + "0" * 56 + "beef"  # 64-hex runtime container ID
@@ -171,7 +171,6 @@ def test_one_shot_docker_oom_failure_keeps_the_mark(tmp_path):
 def test_one_shot_docker_send_uses_the_oom_mark(tmp_path, monkeypatch):
     seen = []
     monkeypatch.setenv("GMAN_URL", "https://gman.example")
-    monkeypatch.setenv("GMAN_AGENT_TOKEN", "t")
     monkeypatch.setattr(collect, "collect", lambda *a: {"errors": [], "instances": []})
     monkeypatch.setattr(collect, "with_docker_ooms", lambda data, mark: seen.append(mark) or data)
     monkeypatch.setattr(collect, "run_once", lambda snapshot, spool, deliver: snapshot())
@@ -201,7 +200,7 @@ def node_event(uid="n1", reason="OOMKilling", count=1, last=60, node="gpu-1", **
 
 def history(client, service_id=None):  # noqa: F811
     query = f"?service_id={service_id}" if service_id is not None else ""
-    return [e for e in client.get("/api/events" + query, headers=auth("read")).json()["events"]
+    return [e for e in client.get("/api/events" + query).json()["events"]
             if e["type"] == "runtime-event"]
 
 
@@ -240,7 +239,7 @@ def test_node_events_on_metrics_and_node_card(client):  # noqa: F811
     assert find(data, "gman_k8s_node_event_last_timestamp_seconds", node="gpu-2", reason="Rebooted", host_id="gpu-2")
     assert find(data, "gman_k8s_node_pressure", host_id="gpu-1", condition="DiskPressure") == 1
     assert not [k for k in data if k[0] == "gman_k8s_node_event_last_timestamp_seconds" and ("reason", "BackOff") in k[1]]
-    source = client.get("/api/overview", headers=auth("read")).json()["sources"][0]
+    source = client.get("/api/overview").json()["sources"][0]
     summary = {(e["node"], e["reason"]): (e["count"], e["events"]) for e in source["node_events"]}
     assert summary == {("gpu-1", "OOMKilling"): (2, 2), ("gpu-1", "EvictionThresholdMet"): (4, 1),
                        ("gpu-2", "Rebooted"): (1, 1)}
@@ -250,7 +249,7 @@ def test_node_events_on_metrics_and_node_card(client):  # noqa: F811
 def test_old_node_events_leave_the_card_but_keep_the_metric(client):  # noqa: F811
     old = (datetime.now(timezone.utc) - timedelta(hours=30)).isoformat()
     post(client, cluster(0, [{**node_event(), "first_at": old, "last_at": old}]))
-    assert client.get("/api/overview", headers=auth("read")).json()["sources"][0]["node_events"] == []
+    assert client.get("/api/overview").json()["sources"][0]["node_events"] == []
     assert "gman_k8s_node_event_last_timestamp_seconds{" in client.get("/metrics").text
 
 

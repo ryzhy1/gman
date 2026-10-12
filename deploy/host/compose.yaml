@@ -1,0 +1,39 @@
+# Connects one more Docker host to a GMan server: containers (with env and .env files), host info, host and container
+# metrics. Run on that host from a copy of this repository:
+#   GMAN_SERVER=10.0.0.5 GMAN_SOURCE_ID=server-02 docker compose -f deploy/host/compose.yaml up -d --build
+# or put both variables into deploy/host/.env and run `docker compose -f deploy/host/compose.yaml up -d --build`.
+#   GMAN_SERVER     address of the GMan server (its portal and OTLP ports must be reachable from this host).
+#   GMAN_SOURCE_ID  unique name of this host in GMan, e.g. its hostname.
+#   GMAN_PORT       portal port of the GMan server, default 8080.
+#   GMAN_OTLP_PORT  OTLP gRPC port of the GMan server, default 4317.
+# Host networking: the agent reports the host's own address, and the Collector sees the host's network interfaces.
+name: gman-host
+services:
+  agent:
+    build: ../../agent
+    command: ["--runtime", "docker", "--source-id", "${GMAN_SOURCE_ID:?Set GMAN_SOURCE_ID (name of this host in GMan)}",
+              "--send", "--watch"]
+    environment:
+      GMAN_URL: http://${GMAN_SERVER:?Set GMAN_SERVER (address of the GMan server)}:${GMAN_PORT:-8080}
+      GMAN_HOST_IP: ${GMAN_HOST_IP:-}
+    network_mode: host
+    pid: host
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+      - /etc/os-release:/etc/os-release:ro
+      - agent:/var/lib/gman-agent
+    restart: unless-stopped
+  node-otel:
+    build: {context: .., dockerfile: images/otel.Dockerfile}
+    command: ["--config=/etc/otelcol/node.yaml"]
+    environment:
+      GMAN_HOST_ID: ${GMAN_SOURCE_ID:?Set GMAN_SOURCE_ID (name of this host in GMan)}
+      OTEL_GATEWAY: ${GMAN_SERVER:?Set GMAN_SERVER (address of the GMan server)}:${GMAN_OTLP_PORT:-4317}
+    network_mode: host
+    user: "0:0"
+    volumes:
+      - /:/hostfs:ro
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+    restart: unless-stopped
+volumes:
+  agent:

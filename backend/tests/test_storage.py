@@ -12,7 +12,7 @@ from sqlalchemy.orm import Session
 
 from backend.app import db as store
 from backend.tests.database import database_url
-from backend.tests.test_api import auth, client, post, snapshot  # noqa: F401  (fixture)
+from backend.tests.test_api import client, post, snapshot  # noqa: F401  (fixture)
 
 
 def main_module():
@@ -27,11 +27,11 @@ def rows(model, *order):
 
 def test_service_update_round_trips(client):
     value = {"id": "api", "name": "API", "description": "d", "owner": "o", "team": "t", "repository": "",
-             "grafana": "", "splunk": "", "bamboo": "", "owners": []}
-    assert client.put("/api/services/api", headers=auth("admin"), json=value).status_code == 200
+             "grafana": "", "splunk": "", "bamboo": ""}
+    assert client.put("/api/services/api", json=value).status_code == 200
     value["name"] = "API v2"
-    assert client.put("/api/services/api", headers=auth("admin"), json=value).json() == value
-    assert client.get("/api/overview", headers=auth("read")).json()["services"] == [value]
+    assert client.put("/api/services/api", json=value).json() == value
+    assert client.get("/api/overview").json()["services"] == [value]
 
 
 def test_instances_keep_order_and_config_history_is_deduplicated(client):
@@ -50,7 +50,7 @@ def test_instances_keep_order_and_config_history_is_deduplicated(client):
     reverted["instances"] = restarted["instances"]
     post(client, reverted)
 
-    source = client.get("/api/overview", headers=auth("read")).json()["sources"][0]
+    source = client.get("/api/overview").json()["sources"][0]
     assert [i["id"] for i in source["instances"]] == ["container-1", "container-0"]
     assert source["instances"][0]["restarts"] == 1
     history = rows(store.ConfigSnapshot, store.ConfigSnapshot.id)
@@ -66,16 +66,16 @@ def test_events_cursor_pages_through_everything(client):
     for i in range(5):
         value = {"event_id": f"e:{i}", "service_id": "api", "environment": "prod",
                  "status": "succeeded", "build_id": f"B-{i}"}
-        client.post("/api/deployments", headers=auth("ci"), json=value)
+        client.post("/api/deployments", json=value)
     seen, before = [], ""
     while True:
-        page = client.get("/api/events", headers=auth("read"), params={"limit": 2, "before": before}).json()
+        page = client.get("/api/events", params={"limit": 2, "before": before}).json()
         seen += [e["build_id"] for e in page["events"]]
         if not page["next"]:
             break
         before = page["next"]
     assert seen == [f"B-{i}" for i in reversed(range(5))]
-    assert client.get("/api/events", headers=auth("read"), params={"before": "garbage"}).status_code == 422
+    assert client.get("/api/events", params={"before": "garbage"}).status_code == 422
 
 
 def test_retention_deletes_old_history_at_most_hourly(client, monkeypatch):
@@ -94,21 +94,6 @@ def test_retention_deletes_old_history_at_most_hourly(client, monkeypatch):
     # The next purge waits for the interval to pass.
     assert not main.retention.run(main.engine)
     assert main.retention.run(main.engine, datetime.now(timezone.utc) + timedelta(hours=1, seconds=1))
-
-
-def test_retention_purges_expired_sessions(client, monkeypatch):
-    # Without new SSO sign-ins nothing else removes expired sessions; they go even with retention disabled.
-    main = main_module()
-    monkeypatch.setenv("GMAN_RETENTION_DAYS", "0")
-    now = datetime.now(timezone.utc)
-    with Session(main.engine) as session:
-        for name, expires in (("expired", now - timedelta(minutes=1)), ("live", now + timedelta(hours=1))):
-            session.add(store.UserSession(id=name, subject=name, role="viewer", data={}, csrf_token="x",
-                                          created_at=now - timedelta(hours=8), expires_at=expires))
-        session.commit()
-    main.retention.last = None
-    main.retention.run(main.engine, now)
-    assert [s.id for s in rows(store.UserSession, store.UserSession.id)] == ["live"]
 
 
 def test_concurrent_writes_are_serialized(client):

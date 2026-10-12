@@ -2,7 +2,7 @@
 # External probe of a GMan server, for cron on another machine (not the GMan server itself): complements the
 # GManWatchdog heartbeat (deploy/alerts) with checks Prometheus cannot make about its own host.
 #   1. https://<host>/healthz answers 200 (DNS, network, nginx, portal certificate);
-#   2. https://<host>/api/auth/info answers 200 (the API behind nginx);
+#   2. https://<host>/api/events?limit=1 answers 200 (the API and its database behind nginx);
 #   3. the certificates nginx presents on 443 and on the OTLP port expire in more than GMAN_PROBE_WARN_DAYS.
 # Silent on success; on failure prints the problems to stderr and exits 1 (cron mails the output).
 #
@@ -65,7 +65,7 @@ check_cert() {
 }
 
 check_url /healthz
-check_url /api/auth/info
+check_url '/api/events?limit=1'
 check_cert "$port"
 [ -z "$otlp_port" ] || check_cert "$otlp_port"
 

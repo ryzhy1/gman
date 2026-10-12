@@ -3,7 +3,7 @@ from urllib.parse import parse_qs, urlsplit
 import pytest
 
 from backend.app import splunk
-from backend.tests.test_api import auth, client, post, snapshot  # noqa: F401 (fixture)
+from backend.tests.test_api import client, post, snapshot  # noqa: F401 (fixture)
 
 BASE = "https://splunk.example.com/en-US/app/search/search"
 
@@ -86,33 +86,32 @@ def test_service_override(configured):
 
 
 def test_api_links(client, configured):  # noqa: F811
-    assert client.get("/api/logs/splunk?service_id=api", headers=auth("read")).status_code == 404
+    assert client.get("/api/logs/splunk?service_id=api").status_code == 404
     service = {"id": "api", "name": "API", "logs": {"splunk": {"index": "api_idx"}}}
-    assert client.put("/api/services/api", headers=auth("admin"), json=service).status_code == 200
+    assert client.put("/api/services/api", json=service).status_code == 200
     value = snapshot()
     value["instances"][0]["environment"] = "prod"
     assert post(client, value).status_code == 200
-    response = client.get("/api/logs/splunk?service_id=api&environment=prod&range=1h", headers=auth("read"))
+    response = client.get("/api/logs/splunk?service_id=api&environment=prod&range=1h")
     body = response.json()
     assert body["enabled"] and body["error"] is None
     assert params(body["service"])["q"] == 'search index="api_idx" gman_service="api" gman_environment="prod"'
     assert params(body["instances"]["node-1/container-1"])["q"] == (
         'search index="api_idx" gman_service="api" gman_environment="prod" host="host" container_id="container-1"')
-    assert client.get("/api/logs/splunk?service_id=api&environment=test", headers=auth("read")).json()["instances"] == {}
-    assert client.get("/api/logs/splunk?service_id=api&range=1y", headers=auth("read")).status_code == 422
+    assert client.get("/api/logs/splunk?service_id=api&environment=test").json()["instances"] == {}
+    assert client.get("/api/logs/splunk?service_id=api&range=1y").status_code == 422
     # Default period is one hour, as on the "Ресурсы" tab and in the README.
-    default = client.get("/api/logs/splunk?service_id=api", headers=auth("read")).json()
+    default = client.get("/api/logs/splunk?service_id=api").json()
     assert params(default["service"])["earliest"] == "-1h"
-    assert client.get("/api/logs/splunk?service_id=api").status_code == 401
 
 
 def test_api_rejects_bad_override_and_reports_bad_config(client, configured, monkeypatch):  # noqa: F811
     for logs in ({"splunk": {"index": 'x" | delete'}}, {"splunk": {"query": "search {nope}"}}, {"splunk": {"bogus": 1}}):
-        response = client.put("/api/services/api", headers=auth("admin"), json={"id": "api", "name": "API", "logs": logs})
+        response = client.put("/api/services/api", json={"id": "api", "name": "API", "logs": logs})
         assert response.status_code == 422
-    assert client.put("/api/services/api", headers=auth("admin"), json={"id": "api", "name": "API"}).status_code == 200
+    assert client.put("/api/services/api", json={"id": "api", "name": "API"}).status_code == 200
     monkeypatch.setenv("GMAN_SPLUNK_INDEXES", "{bad")
-    body = client.get("/api/logs/splunk?service_id=api", headers=auth("read")).json()
+    body = client.get("/api/logs/splunk?service_id=api").json()
     assert body["enabled"] is False and body["service"] is None and "misconfigured" in body["error"]
     monkeypatch.delenv("GMAN_SPLUNK_URL")
-    assert client.get("/api/logs/splunk?service_id=api", headers=auth("read")).json()["enabled"] is False
+    assert client.get("/api/logs/splunk?service_id=api").json()["enabled"] is False

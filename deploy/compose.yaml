@@ -1,11 +1,18 @@
 name: gman
+# The whole GMan server: `docker compose up --build -d` from the project root (compose.yaml includes this file).
+# Every configuration file is built into the images, so nothing besides Docker is needed on the server and no
+# .env is required: all variables below have working defaults; set them in .env next to compose.yaml to override.
+# The portal and API have no sign-in: publish them only on a network you trust.
+# Published ports (host side): GMAN_PORT (portal, 8080), GMAN_OTLP_PORT (4317), GMAN_OTLP_HTTP_PORT (4318);
+# on 127.0.0.1 only: GMAN_PROMETHEUS_PORT (9090), GMAN_ALERTMANAGER_PORT (9093), GMAN_GRAFANA_PORT (3000).
 services:
   db:
     image: postgres:17-alpine
     environment:
       POSTGRES_DB: gman
       POSTGRES_USER: gman
-      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD}
+      # The database is reachable only from the Compose network.
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-gman}
     volumes: ["postgres:/var/lib/postgresql/data"]
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U gman"]
@@ -16,35 +23,14 @@ services:
   api:
     build: ../backend
     environment:
-      DATABASE_URL: postgresql+psycopg://gman:${POSTGRES_PASSWORD}@db/gman
-      # Shared Bearer tokens for automation and token-only mode; an empty value disables the token.
-      # true: portal opens without sign-in (local stand only); ignored when SSO is configured.
-      GMAN_AUTH_DISABLED: ${GMAN_AUTH_DISABLED:-false}
-      GMAN_READ_TOKEN: ${GMAN_READ_TOKEN:-}
-      GMAN_ADMIN_TOKEN: ${GMAN_ADMIN_TOKEN:-}
-      GMAN_CI_TOKEN: ${GMAN_CI_TOKEN:?Set GMAN_CI_TOKEN}
-      GMAN_AGENT_TOKENS: ${GMAN_AGENT_TOKENS:?Set GMAN_AGENT_TOKENS}
-      # GPU DaemonSet pods: bound service account tokens verified by TokenReview (README, «Процессы GPU в Kubernetes»).
-      GMAN_K8S_TOKEN_REVIEW: ${GMAN_K8S_TOKEN_REVIEW:-}
+      DATABASE_URL: postgresql+psycopg://gman:${POSTGRES_PASSWORD:-gman}@db/gman
       PROMETHEUS_URL: http://prometheus:9090
-      # Address of Grafana as the browser sees it; used for default dashboard links.
-      GMAN_GRAFANA_URL: ${GMAN_GRAFANA_URL:-http://127.0.0.1:3000}
+      # Address of Grafana as the browser sees it; the portal proxies it under /grafana/.
+      GMAN_GRAFANA_URL: ${GMAN_GRAFANA_URL:-/grafana}
       # Splunk search links on the service card; empty URL hides them (README, «Splunk»).
       GMAN_SPLUNK_URL: ${GMAN_SPLUNK_URL:-}
       GMAN_SPLUNK_SEARCH: ${GMAN_SPLUNK_SEARCH:-}
       GMAN_SPLUNK_INDEXES: ${GMAN_SPLUNK_INDEXES:-}
-      # SSO (OIDC). Empty GMAN_OIDC_ISSUER keeps token-only mode; see README, «Вход и роли».
-      GMAN_OIDC_ISSUER: ${GMAN_OIDC_ISSUER:-}
-      GMAN_OIDC_CLIENT_ID: ${GMAN_OIDC_CLIENT_ID:-}
-      GMAN_OIDC_CLIENT_SECRET: ${GMAN_OIDC_CLIENT_SECRET:-}
-      GMAN_OIDC_REDIRECT_URI: ${GMAN_OIDC_REDIRECT_URI:-}
-      GMAN_OIDC_POST_LOGOUT_URI: ${GMAN_OIDC_POST_LOGOUT_URI:-}
-      GMAN_OIDC_SCOPES: ${GMAN_OIDC_SCOPES:-openid profile email}
-      GMAN_OIDC_GROUPS_CLAIM: ${GMAN_OIDC_GROUPS_CLAIM:-groups}
-      GMAN_OIDC_ADMIN_GROUPS: ${GMAN_OIDC_ADMIN_GROUPS:-}
-      GMAN_OIDC_OWNER_GROUPS: ${GMAN_OIDC_OWNER_GROUPS:-}
-      GMAN_OIDC_VIEWER_GROUPS: ${GMAN_OIDC_VIEWER_GROUPS:-}
-      GMAN_SESSION_HOURS: ${GMAN_SESSION_HOURS:-8}
       # Active alerts for the portal's alerts page.
       ALERTMANAGER_URL: http://alertmanager:9093
     depends_on:
@@ -58,7 +44,8 @@ services:
     restart: unless-stopped
   portal:
     build: ../frontend
-    ports: ["127.0.0.1:8080:80"]
+    # Portal, API (/api/) and Grafana (/grafana/). Remote agents send inventory to http://<server>:<GMAN_PORT>.
+    ports: ["${GMAN_BIND_ADDRESS:-0.0.0.0}:${GMAN_PORT:-8080}:80"]
     depends_on:
       api: {condition: service_healthy}
     healthcheck:
@@ -67,26 +54,55 @@ services:
       timeout: 5s
       retries: 3
     restart: unless-stopped
+  # Inventory of this server's own Docker containers. Other hosts run agent/collect.py with GMAN_URL pointing here.
+  agent:
+    build: ../agent
+    command: ["--runtime", "docker", "--source-id", "${GMAN_SOURCE_ID:-gman-server}", "--send", "--watch"]
+    environment:
+      GMAN_URL: http://api:8000
+      # Address shown with the services of this host; by default the container's own address would be shown.
+      GMAN_HOST_IP: ${GMAN_HOST_IP:-}
+    # Host PID and UTS namespaces: GPU processes are matched to containers by host PID, and the host name is reported.
+    pid: host
+    uts: host
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+      - /etc/os-release:/etc/os-release:ro
+      - agent:/var/lib/gman-agent
+    depends_on:
+      api: {condition: service_healthy}
+    restart: unless-stopped
+  # Host and container metrics of this server, sent to the gateway below under the agent's source ID.
+  node-otel:
+    build: {context: ., dockerfile: images/otel.Dockerfile}
+    command: ["--config=/etc/otelcol/node.yaml"]
+    environment:
+      GMAN_HOST_ID: ${GMAN_SOURCE_ID:-gman-server}
+    # Root for the Docker socket; everything from the host is mounted read-only.
+    user: "0:0"
+    volumes:
+      - /:/hostfs:ro
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+    depends_on: [otel]
+    restart: unless-stopped
   otel:
-    image: otel/opentelemetry-collector-contrib:0.162.0
-    command: ["--config=/etc/otelcol/config.yaml"]
-    volumes: ["./otel-gateway.yaml:/etc/otelcol/config.yaml:ro"]
-    ports: ["127.0.0.1:4317:4317", "127.0.0.1:4318:4318"]
+    build: {context: ., dockerfile: images/otel.Dockerfile}
+    # OTLP from the Collectors of other hosts (deploy/otel-agent.example.yaml). Plain OTLP without TLS: for
+    # untrusted networks use the production override (mTLS through nginx).
+    ports: ["${GMAN_OTLP_BIND_ADDRESS:-0.0.0.0}:${GMAN_OTLP_PORT:-4317}:4317",
+            "${GMAN_OTLP_BIND_ADDRESS:-0.0.0.0}:${GMAN_OTLP_HTTP_PORT:-4318}:4318"]
     # The collector image is distroless (no shell/wget): no in-container healthcheck.
     # Liveness is visible in Prometheus as up{job="otel"}.
     restart: unless-stopped
   prometheus:
-    image: prom/prometheus:v3.5.0
+    build: {context: ., dockerfile: images/prometheus.Dockerfile}
     environment:
       # Browser-facing portal address for runbook links in alert annotations.
-      GMAN_PORTAL_URL: ${GMAN_PORTAL_URL:-http://127.0.0.1:8080}
-    volumes:
-      - ./prometheus.yaml:/etc/prometheus/prometheus.yml:ro
-      - ./alerts/rules.yaml:/etc/prometheus/rules/gman.yaml:ro
-      - prometheus:/prometheus
+      GMAN_PORTAL_URL: ${GMAN_PORTAL_URL:-http://127.0.0.1:${GMAN_PORT:-8080}}
+    volumes: ["prometheus:/prometheus"]
     command: ["--config.file=/etc/prometheus/prometheus.yml", "--storage.tsdb.retention.time=30d",
               "--enable-feature=expand-external-labels"]
-    ports: ["127.0.0.1:9090:9090"]
+    ports: ["127.0.0.1:${GMAN_PROMETHEUS_PORT:-9090}:9090"]
     healthcheck:
       test: ["CMD", "wget", "-q", "-O", "/dev/null", "http://127.0.0.1:9090/-/healthy"]
       interval: 15s
@@ -94,9 +110,7 @@ services:
       retries: 3
     restart: unless-stopped
   alertmanager:
-    image: prom/alertmanager:v0.28.1
-    # Renders receivers from the variables below, then starts Alertmanager (see the script header).
-    entrypoint: ["/bin/sh", "/etc/gman-alerts/alertmanager.sh"]
+    build: {context: ., dockerfile: images/alertmanager.Dockerfile}
     environment:
       GMAN_ALERT_WEBHOOK_URL: ${GMAN_ALERT_WEBHOOK_URL:-}
       # Dead man's switch: ping URL of an external check for GManWatchdog (README, «Внешний мониторинг»).
@@ -107,12 +121,9 @@ services:
       GMAN_ALERT_SMTP_USERNAME: ${GMAN_ALERT_SMTP_USERNAME:-}
       GMAN_ALERT_SMTP_PASSWORD: ${GMAN_ALERT_SMTP_PASSWORD:-}
       GMAN_ALERT_SMTP_REQUIRE_TLS: ${GMAN_ALERT_SMTP_REQUIRE_TLS:-true}
-      GMAN_ALERTMANAGER_URL: ${GMAN_ALERTMANAGER_URL:-http://127.0.0.1:9093}
-    volumes:
-      - ./alerts/alertmanager.yaml:/etc/gman-alerts/alertmanager.yaml:ro
-      - ./alerts/alertmanager.sh:/etc/gman-alerts/alertmanager.sh:ro
-      - alertmanager:/alertmanager
-    ports: ["127.0.0.1:9093:9093"]
+      GMAN_ALERTMANAGER_URL: ${GMAN_ALERTMANAGER_URL:-http://127.0.0.1:${GMAN_ALERTMANAGER_PORT:-9093}}
+    volumes: ["alertmanager:/alertmanager"]
+    ports: ["127.0.0.1:${GMAN_ALERTMANAGER_PORT:-9093}:9093"]
     healthcheck:
       test: ["CMD", "wget", "-q", "-O", "/dev/null", "http://127.0.0.1:9093/-/healthy"]
       interval: 15s
@@ -120,19 +131,21 @@ services:
       retries: 3
     restart: unless-stopped
   grafana:
-    image: grafana/grafana:12.1.1
+    build: {context: ., dockerfile: images/grafana.Dockerfile}
     environment:
-      GF_SECURITY_ADMIN_PASSWORD: ${GRAFANA_ADMIN_PASSWORD:?Set GRAFANA_ADMIN_PASSWORD}
+      # Served by the portal under /grafana/; dashboards open without sign-in (read-only viewer).
+      GF_SERVER_ROOT_URL: ${GMAN_GRAFANA_ROOT_URL:-%(protocol)s://%(domain)s:%(http_port)s/grafana/}
+      GF_SERVER_SERVE_FROM_SUB_PATH: "true"
+      GF_AUTH_ANONYMOUS_ENABLED: "true"
+      GF_AUTH_ANONYMOUS_ORG_ROLE: Viewer
+      GF_SECURITY_ADMIN_PASSWORD: ${GRAFANA_ADMIN_PASSWORD:-admin}
       GF_ANALYTICS_REPORTING_ENABLED: "false"
       GF_ANALYTICS_CHECK_FOR_UPDATES: "false"
       GF_USERS_ALLOW_SIGN_UP: "false"
-    volumes:
-      - ./grafana/provisioning:/etc/grafana/provisioning:ro
-      - ./grafana/dashboards:/etc/grafana/dashboards:ro
-      - grafana:/var/lib/grafana
-    ports: ["127.0.0.1:3000:3000"]
+    volumes: ["grafana:/var/lib/grafana"]
+    ports: ["127.0.0.1:${GMAN_GRAFANA_PORT:-3000}:3000"]
     healthcheck:
-      test: ["CMD", "wget", "-q", "-O", "/dev/null", "http://127.0.0.1:3000/api/health"]
+      test: ["CMD", "wget", "-q", "-O", "/dev/null", "http://127.0.0.1:3000/grafana/api/health"]
       interval: 15s
       timeout: 5s
       retries: 5
@@ -144,3 +157,4 @@ volumes:
   prometheus:
   alertmanager:
   grafana:
+  agent:

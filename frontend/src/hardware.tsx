@@ -1,5 +1,5 @@
 import type { CurrentMetrics, GPU, GPUProcess, MetricValues, Node, NodeEvent, Source } from './api';
-import { nodeGpuSource, type Placed } from './components';
+import { nodeGpuSource, serverHref, type Placed } from './components';
 import { bytes, cores, date, grafanaLink, num, percent, rate, size, stale, unit, uptime } from './format';
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '@/ui/table';
 import { Meter as Bar, linkButton, tone as badge } from '@/ui/tone';
@@ -141,15 +141,20 @@ function gpuTitle(g: { vendor: string; model: string }, index: number) {
   return `GPU ${index} · ${g.vendor}${g.model ? ` ${g.model}` : ''}`;
 }
 
-function SourceHead({ source, grafana, gpuGrafana }: { source: Source; grafana: string; gpuGrafana?: string }) {
+/** `services`: link to the services page filtered to this server, with the number of running instances. */
+function SourceHead({ source, grafana, gpuGrafana, services }: {
+  source: Source; grafana: string; gpuGrafana?: string; services?: number;
+}) {
   return <>
     <div className="section-head">
-      <h2>{source.hostname}</h2>
+      <h2>{services == null ? source.hostname
+        : <a href={serverHref(source.source_id)} title="Открыть сервисы, запущенные на этом сервере">{source.hostname}</a>}</h2>
       <span className={badge(stale(source) ? 'warn' : '')}>{stale(source) ? 'Устарело' : 'Получены данные'}</span>
     </div>
     <p className="muted">{source.source_type} · {source.source_id}{source.agent_version && ` · агент ${source.agent_version}`} · снимок {date(source.observed_at)}
       {grafana && <> · <a href={grafana} target="_blank" rel="noreferrer">Grafana ↗</a></>}
-      {gpuGrafana && <> · <a href={gpuGrafana} target="_blank" rel="noreferrer">GPU ↗</a></>}</p>
+      {gpuGrafana && <> · <a href={gpuGrafana} target="_blank" rel="noreferrer">GPU ↗</a></>}
+      {services != null && <> · <a href={serverHref(source.source_id)}>Сервисы на сервере ({services}) →</a></>}</p>
     {source.errors?.map(e => <div role="alert" className="alert" key={e}>Ошибка сбора: {e}</div>)}
   </>;
 }
@@ -167,7 +172,8 @@ export function HostCard({ source, metrics, grafanaUrl, range, onService }: {
   return <section>
     <SourceHead source={source} grafana={source.source_type === 'docker-host'
       ? grafanaLink(grafanaUrl, 'gman-host', { host: source.source_id }, range) : ''}
-      gpuGrafana={source.gpus.length || extra.length ? grafanaLink(grafanaUrl, 'gman-gpu', { host: source.source_id, gpu: null }, range) : ''} />
+      gpuGrafana={source.gpus.length || extra.length ? grafanaLink(grafanaUrl, 'gman-gpu', { host: source.source_id, gpu: null }, range) : ''}
+      services={running} />
     <HostGauges host={metrics?.host?.[source.source_id]} cpuCount={source.cpu_count} memoryTotal={source.memory_total_bytes}
       missing={<>Метрики хоста не получены: проверьте OTel Collector с GMAN_HOST_ID={source.source_id}.</>} />
     <dl>
@@ -177,7 +183,7 @@ export function HostCard({ source, metrics, grafanaUrl, range, onService }: {
       <div><dt>Оперативная память</dt><dd>{bytes(source.memory_total_bytes)}</dd></div>
       <div><dt>Runtime</dt><dd>{source.runtime_version || '—'}</dd></div>
       <div><dt>Аптайм</dt><dd>{uptime(source.uptime_seconds)}{boot != null && <small>загружен {date(new Date(boot).toISOString())}</small>}</dd></div>
-      <div><dt>Экземпляры</dt><dd>{running} запущено из {source.instances.length}</dd></div>
+      <div><dt>Экземпляры</dt><dd><a href={serverHref(source.source_id)}>{running} запущено</a> из {source.instances.length}</dd></div>
     </dl>
     {source.gpus.map((g, n) => <GpuCard key={g.id} title={gpuTitle(g, n)} id={g.id} inventory={g} live={live[prefix + g.id]}
       observedAt={source.observed_at} instances={instances} onService={onService} />)}
@@ -244,14 +250,16 @@ function NodeCard({ node, source, gpuSource, metrics, events, onService }: {
   const dcgmOnly = dcgm.filter(([k]) => !inventory.some(g => prefix + g.id === k));
   const instances = source.instances.filter(i => i.node === node.name).map(i => ({ ...i, source }));
   const pods = new Set(source.instances.filter(i => i.node === node.name).map(i => i.id.split(':')[0])).size;
+  const running = instances.filter(i => i.status === 'running').length;
   return <div className="node">
     <div className="node-head">
-      <b>{node.name}</b>
+      <b><a href={serverHref(source.source_id, node.name)} title="Открыть сервисы, запущенные на этом узле">{node.name}</a></b>
       <span className={badge(node.ready ? '' : 'bad')}>{node.ready ? 'Ready' : 'NotReady'}</span>
       {node.unschedulable && <span className={badge('warn')} title="kubectl cordon: новые pod не планируются">Cordon</span>}
       {node.pressure.map(p => <span key={p} className={badge('bad')} title={p}>{PRESSURE[p] ?? p}</span>)}
     </div>
-    <small>{node.roles.length ? node.roles.join(', ') : 'worker'} · {pods} pod · kubelet {node.kubelet_version || '—'}</small>
+    <small>{node.roles.length ? node.roles.join(', ') : 'worker'} · {pods} pod · kubelet {node.kubelet_version || '—'}
+      {' · '}<a href={serverHref(source.source_id, node.name)}>Сервисы на узле ({running}) →</a></small>
     <small>{[node.os, node.kernel, node.runtime_version].filter(Boolean).join(' · ') || '—'}</small>
     {node.taints.length > 0 && <small>Taints: {node.taints.join(', ')}</small>}
     <div className="meters">

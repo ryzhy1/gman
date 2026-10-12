@@ -12,7 +12,7 @@ import pytest
 
 from agent import collect
 from agent.collect import Blocked, Rejected, Retryable, Spool, Watcher
-from backend.tests.test_api import auth, client, post  # noqa: F401  (pytest fixture)
+from backend.tests.test_api import client, post  # noqa: F401  (pytest fixture)
 
 ROOT = Path(__file__).resolve().parents[2]
 
@@ -130,12 +130,12 @@ def test_permanent_errors_are_not_retried():
 ])
 def test_post_classifies_failures(monkeypatch, error, kind):
     def fail(request, timeout):
-        assert request.headers["Authorization"] == "Bearer t"
+        assert request.get_header("Authorization") is None
         raise error
 
     monkeypatch.setattr(collect, "urlopen", fail)
     with pytest.raises(kind):
-        collect.post({"a": 1}, ("https://gman/api/inventory", "t"))
+        collect.post({"a": 1}, "https://gman/api/inventory")
 
 
 # --- Lock and one-shot runs -----------------------------------------------------------------------
@@ -154,7 +154,6 @@ def test_lock_is_exclusive_and_non_blocking(tmp_path):
 
 def test_overlapping_run_exits_cleanly(tmp_path, monkeypatch, capsys):
     monkeypatch.setenv("GMAN_URL", "https://gman.example")
-    monkeypatch.setenv("GMAN_AGENT_TOKEN", "t")
     monkeypatch.setattr(collect, "collect", lambda *a: pytest.fail("must not collect while locked"))
     held = collect.acquire_lock(tmp_path / "node-1.lock")
     collect.main(["--runtime", "docker", "--source-id", "node-1", "--send", "--state-dir", str(tmp_path)])
@@ -326,5 +325,5 @@ def test_replayed_and_ephemeral_snapshots_are_accepted_by_api(client):  # noqa: 
     responses = [post(client, d).json()["accepted"] for d in [first, *collect.with_ephemeral(later, seen), first]]
     # Replaying an already delivered (older) snapshot is a harmless no-op, not an error.
     assert responses == [True, True, True, False]
-    types = [e["type"] for e in client.get("/api/events", headers=auth("read")).json()["events"]]
+    types = [e["type"] for e in client.get("/api/events").json()["events"]]
     assert types.count("instance-appeared") == 2 and types.count("instance-removed") == 1

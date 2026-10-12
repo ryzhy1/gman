@@ -11,7 +11,7 @@ import pytest
 
 from agent import collect
 from backend.app import metrics
-from backend.tests.test_api import auth, client  # noqa: F401  (fixture)
+from backend.tests.test_api import client  # noqa: F401  (fixture)
 from backend.tests.test_metrics import configured, prometheus  # noqa: F401  (fixture)
 
 UID = "6515dd0c-1f3d-45c4-a644-84204c46d898"
@@ -185,12 +185,6 @@ def test_kube_get_falls_back_to_in_cluster_api(monkeypatch, tmp_path):
     assert seen["auth"] == "Bearer sa-token" and seen["context"] == ("context", str(tmp_path / "ca.crt"))
 
 
-def test_token_file(monkeypatch, tmp_path):
-    (tmp_path / "gpu-1").write_text("per-node-token\n")
-    monkeypatch.setenv("GMAN_AGENT_TOKEN_FILE", str(tmp_path / "gpu-1"))
-    assert collect.agent_token() == "per-node-token"
-
-
 def node_snapshot(**extra):
     return {"source_id": "node-1.gpu-1", "source_type": "kubernetes-node", "hostname": "gpu-1", "cluster": "node-1",
             "observed_at": datetime.now(timezone.utc).isoformat(), "instances": [],
@@ -199,16 +193,9 @@ def node_snapshot(**extra):
                  "pod": "trainer-0", "container": "trainer", "instance_id": UID + ":trainer"}]}], **extra}
 
 
-@pytest.fixture
-def node_token(monkeypatch):
-    monkeypatch.setenv("GMAN_AGENT_TOKENS", '{"node-1":"agent","node-1.gpu-1":"agent-gpu-1"}')
-    return auth("agent-gpu-1")
-
-
-def test_api_accepts_node_gpu_snapshot(client, node_token):
-    headers = node_token
-    assert client.post("/api/inventory", headers=headers, json=node_snapshot()).status_code == 200
-    source = next(s for s in client.get("/api/overview", headers=auth("read")).json()["sources"]
+def test_api_accepts_node_gpu_snapshot(client):
+    assert client.post("/api/inventory", json=node_snapshot()).status_code == 200
+    source = next(s for s in client.get("/api/overview").json()["sources"]
                   if s["source_id"] == "node-1.gpu-1")
     assert source["cluster"] == "node-1" and source["instances"] == []
     assert source["gpus"][0]["processes"][0]["instance_id"] == UID + ":trainer"
@@ -216,14 +203,14 @@ def test_api_accepts_node_gpu_snapshot(client, node_token):
                 "config": {"image": "trainer:v1"}}
     # A node source never carries instances (they belong to the cluster source) and must name its cluster.
     for bad in (node_snapshot(instances=[instance]), node_snapshot(cluster=""), node_snapshot(cluster="a b")):
-        assert client.post("/api/inventory", headers=headers, json=bad).status_code == 422
+        assert client.post("/api/inventory", json=bad).status_code == 422
 
 
-def test_node_source_describes_only_the_node_it_is_named_after(client, node_token):
-    # The token of "node-1.gpu-1" cannot report another node or put the node into another cluster.
+def test_node_source_describes_only_the_node_it_is_named_after(client):
+    # "node-1.gpu-1" cannot report another node or put the node into another cluster.
     for bad in (node_snapshot(hostname="gpu-2"), node_snapshot(cluster="other"),
                 node_snapshot(cluster="node-1.gpu", hostname="1")):
-        assert client.post("/api/inventory", headers=node_token, json=bad).status_code == 422
+        assert client.post("/api/inventory", json=bad).status_code == 422
 
 
 def test_k8s_gpu_metrics_by_pod(client, configured):
@@ -236,17 +223,17 @@ def test_k8s_gpu_metrics_by_pod(client, configured):
                 {"metric": {"namespace": "ml", "pod": "trainer-0", "container": "trainer"}, "value": [0, "87"]}]}})
         return httpx.Response(200, json={"status": "success", "data": {"resultType": "vector", "result": []}})
     prometheus(handler)
-    data = client.get("/api/metrics/current", headers=auth("read")).json()
+    data = client.get("/api/metrics/current").json()
     assert data["k8s_gpu"] == {"ml/trainer-0/trainer": {"gpu_utilization_percent": 87.0}}
     seen.clear()
     params = {"scope": "k8s_gpu", "metric": "gpu_memory_used_bytes", "namespace": "ml", "pod_name": "trainer-0",
               "container_name": "trainer"}
-    assert client.get("/api/metrics/range", headers=auth("read"), params=params).status_code == 200
+    assert client.get("/api/metrics/range", params=params).status_code == 200
     selector = seen[0][seen[0].index("{") + 1:seen[0].index("}")].split(",")
     assert sorted(selector) == sorted(['pod!=""', 'namespace="ml"', 'pod="trainer-0"', 'container="trainer"'])
     for bad in ({k: v for k, v in params.items() if k != "pod_name"}, {**params, "pod_uid": UID},
                 {**params, "scope": "k8s_container"}):
-        assert client.get("/api/metrics/range", headers=auth("read"), params=bad).status_code == 422
+        assert client.get("/api/metrics/range", params=bad).status_code == 422
     assert set(metrics.SCOPES["k8s_gpu"][1]) == {"namespace", "pod", "container"}
 
 
@@ -256,7 +243,7 @@ def test_systemd_unit_runs_node_mode_from_environment(tmp_path, monkeypatch):
     unit = (Path(__file__).resolve().parents[2] / "deploy/systemd/gman-collect.service").read_text()
     exec_start = next(line for line in unit.splitlines() if line.startswith("ExecStart="))
     env = {"GMAN_RUNTIME": "kubernetes-node", "GMAN_SOURCE_ID": "cluster-01.gpu-1", "NODE_NAME": "gpu-1",
-           "GMAN_CLUSTER": "cluster-01", "GMAN_URL": "https://gman.example", "GMAN_AGENT_TOKEN": "t",
+           "GMAN_CLUSTER": "cluster-01", "GMAN_URL": "https://gman.example",
            "GMAN_AGENT_STATE_DIR": str(tmp_path)}
     for key, value in env.items():
         monkeypatch.setenv(key, value)

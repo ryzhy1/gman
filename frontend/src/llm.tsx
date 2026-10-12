@@ -61,8 +61,8 @@ const CHARTS = [
 ] as const;
 
 /** History of the service's models for the Resources tab; one series per model. */
-export function LlmCharts({ token, metrics, serviceId, range }: {
-  token: string; metrics?: CurrentMetrics | null; serviceId: string; range: string;
+export function LlmCharts({ metrics, serviceId, range }: {
+  metrics?: CurrentMetrics | null; serviceId: string; range: string;
 }) {
   const models = serviceModels(metrics, serviceId).map(([m]) => m).slice(0, SERIES_COLORS.length);
   const key = models.join('\n');
@@ -72,13 +72,13 @@ export function LlmCharts({ token, metrics, serviceId, range }: {
     const ctrl = new AbortController();
     Promise.all(CHARTS.map(async ([metric]) => [metric, await Promise.all(models.map(async (model, n) => {
       const params = new URLSearchParams({ scope: 'llm', metric, service_id: serviceId, model, range });
-      const result = await get<RangeResult>(token, `/api/metrics/range?${params}`, ctrl.signal)
+      const result = await get<RangeResult>(`/api/metrics/range?${params}`, ctrl.signal)
         .catch(() => ({ points: [] as RangeResult['points'] }));
       return { name: model, color: SERIES_COLORS[n], points: result.points };
     }))] as const)).then(entries => setData(Object.fromEntries(entries))).catch(() => undefined);
     return () => ctrl.abort();
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [token, serviceId, key, range]);
+  }, [serviceId, key, range]);
   if (!models.length) return null;
   return <>
     <h3 className="subheading">Модели (vLLM)</h3>

@@ -4,8 +4,7 @@ Docker: python3 agent/collect.py --runtime docker --source-id server-01
 K8s: python3 agent/collect.py --runtime kubernetes --source-id cluster-01 (pods, nodes, pod and node Events)
 K8s GPU node, run on the node in the host PID namespace (GPU processes attributed to pods):
   python3 agent/collect.py --runtime kubernetes-node --cluster cluster-01 --node gpu-1 --source-id cluster-01.gpu-1
-Default emits sanitized JSON; --send submits it to GMAN_URL using GMAN_AGENT_TOKEN
-(or the file named by GMAN_AGENT_TOKEN_FILE).
+Default emits sanitized JSON; --send submits it to GMAN_URL (the API has no authentication).
 With --send, snapshots go through a bounded on-disk spool (oldest first, retried with backoff),
 and a non-blocking flock keeps runs from overlapping. --watch follows `docker events` (Docker) or the
 Kubernetes watch API for pods and Events (list + watch from resourceVersion, relist on 410 Gone) and sends
@@ -18,6 +17,7 @@ import copy
 import csv
 import errno
 import fcntl
+import io
 import json
 import os
 import queue
@@ -27,6 +27,7 @@ import socket
 import ssl
 import subprocess
 import sys
+import tarfile
 import threading
 import time
 from datetime import datetime, timedelta, timezone
@@ -36,7 +37,7 @@ from urllib.error import HTTPError, URLError
 from urllib.parse import quote
 from urllib.request import Request, urlopen
 
-AGENT_VERSION = "0.6.0"
+AGENT_VERSION = "0.7.0"
 # Host /proc. In a container this requires hostPID: nvidia-smi reports PIDs of the caller's PID namespace.
 PROC_ROOT = os.environ.get("GMAN_PROC_ROOT", "/proc")
 # In-cluster API access when kubectl is not installed (e.g. the DaemonSet in deploy/gpu-attribution-k8s.yaml).
@@ -56,7 +57,7 @@ ORIGIN_LABELS = {
     "app.kubernetes.io/managed-by": "managed_by",
     "helm.sh/chart": "helm_chart",
 }
-# Device selection variables are the only env values read: they hold GPU indexes/UUIDs.
+# GPU device selection variables, also reported with the GPU requests: they hold GPU indexes/UUIDs.
 GPU_ENV = ("NVIDIA_VISIBLE_DEVICES", "CUDA_VISIBLE_DEVICES")
 
 
@@ -108,6 +109,7 @@ def docker_instance(c):
     finished = None if running else timestamp(state.get("FinishedAt"))
     health = cfg.get("Healthcheck") or {}
     env = dict(e.split("=", 1) for e in cfg.get("Env") or [] if "=" in e and e.split("=", 1)[0] in GPU_ENV)
+    # Every variable as "NAME=value", including values that may be secrets (image ENV and docker run -e).
     return {"id": c["Id"], "name": c.get("Name", "").lstrip("/"),
             "service_id": labels.get("gman.service", ""),
             "environment": labels.get("gman.environment", "unknown"), "runtime": "docker",
@@ -138,6 +140,7 @@ def docker_instance(c):
                        "pid_mode": host.get("PidMode") or "",
                        "ipc_mode": host.get("IpcMode") or "",
                        "user": cfg.get("User") or "",
+                       "env": list(cfg.get("Env") or []),
                        "cap_add": host.get("CapAdd") or [],
                        "cap_drop": host.get("CapDrop") or [],
                        "shm_size_bytes": host.get("ShmSize") or None,
@@ -154,6 +157,72 @@ def docker_instance(c):
                                        + [f"{k}={v}" for k, v in env.items()],
                        "privileged": bool(host.get("Privileged")),
                        "readonly_rootfs": bool(host.get("ReadonlyRootfs"))}}
+
+
+# Dotenv files an application may load itself at start (godotenv, python-dotenv, dotenv for Node...): their
+# variables never reach the container environment, so they are read from the container's working directory.
+ENV_FILES = (".env", ".env.local", ".env.development", ".env.dev", ".env.production", ".env.prod", ".env.staging",
+             ".env.test")
+ENV_FILE_MAX_BYTES = 256 * 1024
+DOTENV_LINE = re.compile(r"^\s*(?:export\s+)?([A-Za-z_][A-Za-z0-9_.-]*)\s*=\s*(.*?)\s*$")
+# (container ID, StartedAt) -> files: applications read them at start, so a running container is read once.
+env_file_cache = {}
+
+
+def parse_dotenv(text):
+    """"NAME=value" per assignment in file order; comments, blank lines and quotes around the value dropped."""
+    result = []
+    for line in text.splitlines():
+        match = DOTENV_LINE.match(line)
+        if not match:
+            continue
+        name, value = match[1], match[2]
+        if len(value) >= 2 and value[0] == value[-1] and value[0] in "\"'":
+            value = value[1:-1]
+        elif " #" in value:
+            value = value.split(" #", 1)[0].rstrip()
+        result.append(f"{name}={value}")
+    return result
+
+
+def read_container_file(container_id, path, run=subprocess.run):
+    """A regular file from a container (running or stopped) via `docker cp`, without exec; None if absent."""
+    try:
+        done = run(["docker", "cp", f"{container_id}:{path}", "-"], capture_output=True, timeout=10)
+    except (OSError, subprocess.SubprocessError):
+        return None
+    if done.returncode != 0:
+        return None
+    try:
+        with tarfile.open(fileobj=io.BytesIO(done.stdout)) as archive:
+            member = next((m for m in archive if m.isfile()), None)
+            if member is None or member.size > ENV_FILE_MAX_BYTES:
+                return None
+            return archive.extractfile(member).read().decode(errors="replace")
+    except (tarfile.TarError, OSError):
+        return None
+
+
+def env_files(c, read=read_container_file):
+    """Dotenv files in the working directory of an inspected container: {path: ["NAME=value", ...]}."""
+    key = (c.get("Id", ""), (c.get("State") or {}).get("StartedAt", ""))
+    if key not in env_file_cache:
+        directory = ((c.get("Config") or {}).get("WorkingDir") or "/").rstrip("/")
+        found = {}
+        for name in ENV_FILES:
+            text = read(c.get("Id", ""), f"{directory}/{name}")
+            if text is not None:
+                found[f"{directory}/{name}"] = parse_dotenv(text)
+        if len(env_file_cache) > 1000:
+            env_file_cache.clear()
+        env_file_cache[key] = found
+    return env_file_cache[key]
+
+
+def docker_instance_with_files(c):
+    instance = docker_instance(c)
+    instance["config"]["env_files"] = env_files(c)
+    return instance
 
 
 def inspect_containers():
@@ -204,6 +273,30 @@ def probe(kind, p):
     else:
         target = "exec"  # The command is not collected: it may embed credentials.
     return f"{kind} {target} period={p.get('periodSeconds', 10)}s failure={p.get('failureThreshold', 3)}"
+
+
+def env_source(ref):
+    """Where a valueFrom variable comes from; Kubernetes resolves it in the kubelet, the Pod spec has no value."""
+    for kind, value in ref.items():
+        if kind in ("secretKeyRef", "configMapKeyRef"):
+            return f"<{kind} {value.get('name', '')}/{value.get('key', '')}>"
+        if kind == "fieldRef":
+            return f"<fieldRef {value.get('fieldPath', '')}>"
+        if kind == "resourceFieldRef":
+            return f"<resourceFieldRef {value.get('resource', '')}>"
+    return "<valueFrom>"
+
+
+def pod_env(c):
+    """Container env as "NAME=value" in spec order, then envFrom sources as "<envFrom>=<kind name[ prefix]>"."""
+    result = [f"{e['name']}={e['value']}" if "value" in e else f"{e['name']}={env_source(e.get('valueFrom') or {})}"
+              for e in c.get("env") or [] if e.get("name")]
+    for source in c.get("envFrom") or []:
+        for kind in ("configMapRef", "secretRef"):
+            if kind in source:
+                prefix = f" prefix={source['prefix']}" if source.get("prefix") else ""
+                result.append(f"<envFrom>=<{kind} {source[kind].get('name', '')}{prefix}>")
+    return result
 
 
 def pod_managers(meta):
@@ -264,6 +357,7 @@ def pod_instances(pod):
                                   "pid_mode": "host" if spec.get("hostPID") else "",
                                   "ipc_mode": "host" if spec.get("hostIPC") else "",
                                   "user": "" if user is None else str(user),
+                                  "env": pod_env(c),
                                   "cap_add": capabilities.get("add") or [],
                                   "cap_drop": capabilities.get("drop") or [],
                                   "probes": [p for p in (probe("liveness", c.get("livenessProbe")),
@@ -865,7 +959,8 @@ def collect(runtime, source_id, node="", cluster="", pods=None, events=None):
                     kernel=os.uname().release)
     elif runtime == "docker":
         data.update(source_type="docker-host", hostname=os.uname().nodename,
-                    instances=[docker_instance(c) for c in inspect_containers()], gpus=gpus(errors), **host_info())
+                    instances=[docker_instance_with_files(c) for c in inspect_containers()], gpus=gpus(errors),
+                    **host_info())
     else:
         if pods is None:
             pods = kube_list(["get", "pods", "--all-namespaces"], "/api/v1/pods")["items"]
@@ -899,30 +994,22 @@ class Retryable(Exception):
 
 
 class Blocked(Exception):
-    """The API refuses this agent (401/403): retrying now is pointless, but the snapshot is kept."""
+    """The API or a proxy in front of it refuses the agent (401/403): retrying now is pointless, but the snapshot is kept."""
 
 
 class Rejected(Exception):
     """The API permanently rejects this snapshot (e.g. 422): drop it so it does not block the spool."""
 
 
-def agent_token():
-    # A file lets a DaemonSet mount one Secret with a token per node and pick its own by node name.
-    path = os.environ.get("GMAN_AGENT_TOKEN_FILE")
-    return Path(path).read_text().strip() if path else os.environ["GMAN_AGENT_TOKEN"]
-
-
 def endpoint():
     url = os.environ["GMAN_URL"].rstrip("/")
-    if not (url.startswith("https://") or url.startswith("http://127.0.0.1:")):
-        raise ValueError("HTTPS required except for local loopback")
-    return url + "/api/inventory", agent_token()
+    if not url.startswith(("https://", "http://")):
+        raise ValueError("GMAN_URL must be an HTTP(S) URL")
+    return url + "/api/inventory"
 
 
-def post(data, target):
-    url, token = target
-    request = Request(url, data=json.dumps(data).encode(),
-                      headers={"Content-Type": "application/json", "Authorization": "Bearer " + token})
+def post(data, url):
+    request = Request(url, data=json.dumps(data).encode(), headers={"Content-Type": "application/json"})
     try:
         with urlopen(request, timeout=30) as response:
             # 200 with accepted=false means a duplicate or older snapshot: replay is idempotent.
@@ -1084,7 +1171,7 @@ def event_instance(event, previous):
 
 def capture(event, previous):
     try:
-        return docker_instance(json.loads(command(["docker", "inspect", event_id(event)]))[0])
+        return docker_instance_with_files(json.loads(command(["docker", "inspect", event_id(event)]))[0])
     except (subprocess.SubprocessError, OSError, ValueError, IndexError, KeyError):
         return event_instance(event, previous)
 

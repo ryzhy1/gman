@@ -1,0 +1,69 @@
+# Node Collector in a container: host metrics from the host's root mounted at /hostfs, container metrics from the
+# Docker socket. Service `node-otel` of the GMan server (deploy/compose.yaml) and of every other host
+# (deploy/host/compose.yaml).
+#   GMAN_HOST_ID  must equal the inventory agent's --source-id (compose: GMAN_SOURCE_ID).
+#   OTEL_GATEWAY  host:port of the gateway's OTLP gRPC receiver, default otel:4317 (the GMan server itself).
+receivers:
+  host_metrics:
+    collection_interval: 15s
+    root_path: /hostfs
+    scrapers:
+      cpu:
+        metrics:
+          system.cpu.utilization: {enabled: true}
+          system.cpu.frequency: {enabled: true}
+      memory:
+        metrics:
+          system.memory.utilization: {enabled: true}
+          system.memory.limit: {enabled: true}
+      load: {}
+      disk: {}
+      filesystem:
+        exclude_fs_types:
+          fs_types: [autofs, binfmt_misc, bpf, cgroup2, configfs, debugfs, devpts, devtmpfs, fusectl, hugetlbfs,
+                     mqueue, nsfs, overlay, proc, procfs, pstore, rpc_pipefs, securityfs, selinuxfs, squashfs,
+                     sysfs, tracefs, tmpfs]
+          match_type: strict
+        metrics:
+          system.filesystem.utilization: {enabled: true}
+      network: {}
+      paging: {}
+      processes: {}
+  docker_stats:
+    endpoint: unix:///var/run/docker.sock
+    collection_interval: 15s
+    container_labels_to_metric_labels:
+      gman.service: gman_service
+      gman.environment: gman_environment
+    metrics:
+      container.cpu.throttling_data.throttled_periods: {enabled: true}
+      container.cpu.throttling_data.throttled_time: {enabled: true}
+      container.pids.count: {enabled: true}
+      container.uptime: {enabled: true}
+      container.restarts: {enabled: true}
+processors:
+  memory_limiter:
+    check_interval: 1s
+    limit_mib: 256
+    spike_limit_mib: 64
+  resource:
+    attributes:
+      - key: host.id
+        value: ${env:GMAN_HOST_ID}
+        action: upsert
+  batch: {}
+exporters:
+  otlp_grpc:
+    # The gateway of the Compose network on the GMan server; <server>:4317 on other hosts (deploy/host/compose.yaml).
+    endpoint: ${env:OTEL_GATEWAY:-otel:4317}
+    tls: {insecure: true}
+    # Keep retrying while the GMan server is unreachable (in memory; lost on restart of this Collector).
+    retry_on_failure:
+      enabled: true
+      max_elapsed_time: 0
+service:
+  pipelines:
+    metrics:
+      receivers: [host_metrics, docker_stats]
+      processors: [memory_limiter, resource, batch]
+      exporters: [otlp_grpc]

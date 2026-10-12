@@ -1,0 +1,8 @@
+# The whole GMan server from the project root:
+#   docker compose up --build -d
+# Portal http://<server>:8080 (Grafana under /grafana/), OTLP :4317/:4318 for the Collectors of other hosts.
+# No .env is needed; variables to override are listed in deploy/compose.yaml. Production with TLS:
+# `-f deploy/compose.yaml -f deploy/compose.prod.yaml` (README, «Production-развертывание»).
+name: gman
+include:
+  - deploy/compose.yaml

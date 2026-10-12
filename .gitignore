@@ -9,3 +9,4 @@ dist/
 deploy/pki/out/
 deploy/backups/
 deploy/backups-offsite/
+gman-host.tar.gz

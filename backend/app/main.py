@@ -1,27 +1,23 @@
-"""Inventory API. Humans sign in via OIDC (auth.py) or shared Bearer tokens; agents and CI have their own tokens."""
+"""Inventory API. It has no authentication: restrict access to it at the network level."""
 import hashlib
-import hmac
-import json
 import logging
 import os
 import re
 from contextlib import asynccontextmanager
 from datetime import datetime, timedelta, timezone
-from typing import Annotated, Literal
+from typing import Literal
 from urllib.parse import urlsplit
 
-from fastapi import Depends, FastAPI, Header, HTTPException, Path, Query, Request
-from fastapi.responses import JSONResponse, PlainTextResponse, RedirectResponse
+from fastapi import Depends, FastAPI, HTTPException, Path, Query
+from fastapi.responses import JSONResponse, PlainTextResponse
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 from sqlalchemy import text
 from sqlalchemy.orm import Session
 
 from . import alerts
-from . import auth
 from . import configs
 from . import db as store
 from . import exposition
-from . import k8s_tokens
 from . import metrics
 from . import releases
 from . import splunk
@@ -41,79 +37,6 @@ retention = store.Retention()
 def db():
     with Session(engine) as session:
         yield session
-
-
-def matches(authorization, expected):
-    # Compare bytes: compare_digest rejects non-ASCII str, which would surface as a 500.
-    return bool(expected) and hmac.compare_digest((authorization or "").encode(), ("Bearer " + expected).encode())
-
-
-def authenticate(authorization, expected):
-    if not matches(authorization, expected):
-        raise HTTPException(401, "Invalid credential")
-
-
-def token_principal(authorization):
-    """Shared Bearer tokens for API automation (and for people while SSO is not configured)."""
-    if matches(authorization, os.getenv("GMAN_ADMIN_TOKEN")):
-        return auth.Principal(kind="token", role="admin", subject="GMAN_ADMIN_TOKEN")
-    if matches(authorization, os.getenv("GMAN_READ_TOKEN")):
-        return auth.Principal(kind="token", role="viewer", subject="GMAN_READ_TOKEN")
-    return None
-
-
-def open_access():
-    """GMAN_AUTH_DISABLED=true: local stand without sign-in, every request without credentials acts as admin.
-    Ignored when SSO is configured."""
-    return os.getenv("GMAN_AUTH_DISABLED", "").lower() in ("1", "true", "yes") and not auth.enabled()
-
-
-def principal(request: Request, authorization: str = Header(default=""), session: Session = Depends(db)):
-    """An explicit Authorization header is authoritative; otherwise the SSO session cookie is used."""
-    if authorization:
-        found = token_principal(authorization)
-    elif open_access():
-        found = auth.Principal(kind="token", role="admin", subject="anonymous", name="Локальный стенд")
-    else:
-        found = auth.from_session(session, request.cookies.get(auth.session_cookie())) if auth.enabled() else None
-    if found is None:
-        raise HTTPException(401, "Invalid credential")
-    return found
-
-
-def reader(user: auth.Principal = Depends(principal)):
-    return user
-
-
-def editor(user: auth.Principal = Depends(principal), x_csrf_token: str = Header(default="")):
-    """Mutating requests: CSRF token for cookie sessions, then at least the service owner role.
-    A read token stays a 401 for writes: tokens are scoped credentials, not identities."""
-    if user.kind == "token":
-        if user.role != "admin":
-            raise HTTPException(401, "Invalid credential")
-        return user
-    if not auth.csrf_ok(user, x_csrf_token):
-        raise HTTPException(403, "CSRF token missing or invalid")
-    if not user.at_least("owner"):
-        raise HTTPException(403, "Read-only role")
-    return user
-
-
-def ci(authorization: str = Header(default="")):
-    authenticate(authorization, os.getenv("GMAN_CI_TOKEN"))
-
-
-def agent(authorization: str = Header(default="")):
-    """Resolve the agent's source_id from its token before the body is validated."""
-    tokens = json.loads(os.getenv("GMAN_AGENT_TOKENS", "{}"))
-    found = [source for source, token in tokens.items() if matches(authorization, token)]
-    if found:
-        return found[0]
-    # GPU DaemonSet pods: a Kubernetes bound service account token, verified by the cluster (TokenReview).
-    identity = k8s_tokens.authenticate(authorization) if k8s_tokens.enabled() else None
-    if identity is None:
-        raise HTTPException(401, "Invalid credential")
-    return identity
 
 
 def lock(session, name):
@@ -177,9 +100,6 @@ class Service(Strict):
     splunk: str = Field(default="", max_length=2000)
     bamboo: str = Field(default="", max_length=2000)
     logs: Logs | None = None
-    # Who may edit this entry with the service owner role: IdP subject, email, username or "group:<name>".
-    # Kept in services.extra (no migration); only platform admins change it.
-    owners: list[Annotated[str, Field(min_length=1, max_length=300)]] = Field(default_factory=list, max_length=50)
 
     _urls = field_validator("repository", "grafana", "splunk", "bamboo")(http_url)
 
@@ -203,6 +123,10 @@ class Config(Strict):
     pid_mode: str = Field(default="", max_length=300)
     ipc_mode: str = Field(default="", max_length=300)
     user: str = Field(default="", max_length=300)
+    # Environment as "NAME=value", shown as is (values may be secrets).
+    env: Strings = Field(default_factory=list, max_length=2000)
+    # Docker: dotenv files in the working directory that the application loads itself, {path: ["NAME=value"]}.
+    env_files: dict[str, Strings] = Field(default_factory=dict, max_length=20)
     cap_add: Strings = Field(default_factory=list, max_length=100)
     cap_drop: Strings = Field(default_factory=list, max_length=100)
     shm_size_bytes: int | None = Field(default=None, ge=0)
@@ -411,7 +335,7 @@ class Snapshot(Strict):
         # Instances of a node are reported by the cluster source; reporting them twice would duplicate history.
         if self.source_type == "kubernetes-node" and (self.instances or not self.cluster):
             raise ValueError("kubernetes-node snapshots carry a cluster and no instances")
-        # The portal places node GPUs by (cluster, hostname) and alerts label them by hostname: a node token
+        # The portal places node GPUs by (cluster, hostname) and alerts label them by hostname: a node snapshot
         # may only describe the node its source ID names, never another node or cluster.
         if self.source_type == "kubernetes-node" and self.source_id != f"{self.cluster}.{self.hostname}":
             raise ValueError("kubernetes-node source_id must be <cluster>.<node>, the node being the hostname")
@@ -487,10 +411,6 @@ def classify(fields):
 async def lifespan(app):
     # Migrating here rather than in the container command keeps one code path for Docker,
     # local runs and tests; concurrent replicas are serialized by a PostgreSQL advisory lock.
-    auth.check_config()
-    auth.reset()
-    k8s_tokens.config()  # fail at startup on a malformed GMAN_K8S_TOKEN_REVIEW
-    k8s_tokens.reset()
     store.migrate(engine)
     yield
 
@@ -515,111 +435,22 @@ def prometheus_metrics(session: Session = Depends(db)):
     return PlainTextResponse(exposition.render(session), media_type="text/plain; version=0.0.4")
 
 
-def set_cookie(response, name, value, max_age, path="/"):
-    response.set_cookie(name, value, max_age=max_age, path=path, httponly=True, secure=auth.secure(), samesite="lax")
-
-
-def drop_cookie(response, name, path="/"):
-    response.delete_cookie(name, path=path, secure=auth.secure(), httponly=True, samesite="lax")
-
-
-@app.get("/api/auth/info")
-def auth_info():
-    """Public: tells the portal whether to redirect to SSO, ask for a token or open without sign-in."""
-    return {"oidc": auth.enabled(), "open": open_access()}
-
-
-@app.get("/api/auth/login")
-def login(next: str = Query("/", max_length=2000)):
-    if not auth.enabled():
-        raise HTTPException(404, "SSO is not configured")
-    try:
-        url, state = auth.start_login(next)
-    except auth.Failure as error:
-        logger.warning("SSO login unavailable: %s", error)
-        raise HTTPException(503, "Identity provider unavailable")
-    response = RedirectResponse(url, status_code=302)
-    set_cookie(response, auth.LOGIN_COOKIE, state, auth.LOGIN_TTL, path="/api/auth")
-    return response
-
-
-@app.get("/api/auth/callback")
-def callback(request: Request, code: str = Query("", max_length=4000), state: str = Query("", max_length=500),
-             error: str = Query("", max_length=200), session: Session = Depends(db)):
-    if not auth.enabled():
-        raise HTTPException(404, "SSO is not configured")
-    cookie = request.cookies.get(auth.LOGIN_COOKIE)
-    try:
-        if error:
-            # Without a matching state the error may come from a forged link; treat it as a bad state.
-            pending = auth.unsign(cookie or "") or {}
-            if not state or pending.get("state") != state:
-                raise auth.Failure("state", "IdP error without valid state")
-            raise auth.Failure("idp_error", "IdP returned error " + error)
-        value, target = auth.complete_login(session, code, state, cookie)
-    except auth.Failure as failure:
-        logger.warning("SSO sign-in failed: %s", failure)
-        if failure.code == "state":
-            raise HTTPException(400, "Login state missing, expired or mismatched; start the sign-in again")
-        response = RedirectResponse("/?auth_error=" + failure.code, status_code=302)
-        drop_cookie(response, auth.LOGIN_COOKIE, path="/api/auth")
-        return response
-    response = RedirectResponse(target, status_code=302)
-    drop_cookie(response, auth.LOGIN_COOKIE, path="/api/auth")
-    set_cookie(response, auth.session_cookie(), value, int(auth.session_hours() * 3600))
-    return response
-
-
-@app.post("/api/auth/logout")
-def logout(user: auth.Principal = Depends(principal), x_csrf_token: str = Header(default=""),
-           session: Session = Depends(db)):
-    if user.kind != "session":
-        raise HTTPException(400, "Bearer tokens have no session to end")
-    if not auth.csrf_ok(user, x_csrf_token):
-        raise HTTPException(403, "CSRF token missing or invalid")
-    auth.end_session(session, user)
-    response = JSONResponse({"redirect": auth.logout_url()})
-    drop_cookie(response, auth.session_cookie())
-    return response
-
-
-@app.get("/api/me")
-def me(user: auth.Principal = Depends(reader)):
-    """Who is signed in and what the portal may offer them; identities are matched against service owners."""
-    return {"auth": "oidc" if user.kind == "session" else "open" if user.subject == "anonymous" else "token", "role": user.role, "subject": user.subject,
-            "email": user.email, "name": user.name or user.username or user.email or user.subject,
-            "identities": user.identities() if user.kind == "session" else [],
-            "csrf_token": user.csrf_token or None}
-
-
 @app.put("/api/services/{service_id}")
-def put_service(service_id: str, value: Service, user: auth.Principal = Depends(editor),
-                session: Session = Depends(db)):
-    """Platform admins create and edit any entry; service owners edit entries listing them, except `owners`."""
+def put_service(service_id: str, value: Service, session: Session = Depends(db)):
     if service_id != value.id:
         raise HTTPException(422, "ID mismatch")
     lock(session, "service:" + value.id)
     before = store.service(session, value.id)
     # Optional nested sections (logs) are omitted when unset rather than stored as null.
     after = value.model_dump(exclude_none=True)
-    if user.role != "admin":
-        if before is None:
-            raise HTTPException(403, "Only platform admins register new services")
-        if not user.can_edit(before):
-            raise HTTPException(403, "You are not an owner of this service")
-        if sorted(before.get("owners") or []) != sorted(value.owners):
-            raise HTTPException(403, "Only platform admins change service owners")
     store.put_service(session, after)
     diff = changes(before or {}, after)
     if before is None or diff:
         received = datetime.now(timezone.utc)
-        human = user.kind == "session"
-        # A shared admin token may be used by a person or a script: its actor is not a known human.
+        # Without sign-in the author of a catalog change is not known.
         session.add(store.event({
             "type": "service-created" if before is None else "service-updated", "service_id": value.id,
-            "actor": user.actor, "actor_kind": "human" if human else "unknown",
-            "actor_source": "OIDC session" if human else "shared admin token",
-            "actor_subject": user.subject, "actor_role": user.role,
+            "actor": "unknown", "actor_kind": "unknown", "actor_source": "portal",
             "occurred_at": received.isoformat(), "received_at": received.isoformat(), "changes": diff},
             received, received))
     session.commit()
@@ -630,7 +461,7 @@ def put_service(service_id: str, value: Service, user: auth.Principal = Depends(
 NODE_EVENTS_WINDOW = timedelta(hours=24)
 
 
-@app.get("/api/overview", dependencies=[Depends(reader)])
+@app.get("/api/overview")
 def overview(session: Session = Depends(db)):
     sources = store.sources(session)
     recent = store.node_events(session, datetime.now(timezone.utc) - NODE_EVENTS_WINDOW)
@@ -643,7 +474,7 @@ def overview(session: Session = Depends(db)):
             "events": store.events(session, 200)["events"]}
 
 
-@app.get("/api/logs/splunk", dependencies=[Depends(reader)])
+@app.get("/api/logs/splunk")
 def splunk_links(service_id: str = Query(max_length=100), environment: str = Query("", max_length=200),
                  range_: Literal["1h", "24h", "7d"] = Query("1h", alias="range"), session: Session = Depends(db)):
     """Splunk search links for a service and its instances; built here so values are SPL-escaped."""
@@ -657,7 +488,7 @@ def splunk_links(service_id: str = Query(max_length=100), environment: str = Que
         return {"enabled": False, "error": "Splunk links are misconfigured", "service": None, "instances": {}}
 
 
-@app.get("/api/events", dependencies=[Depends(reader)])
+@app.get("/api/events")
 def list_events(limit: int = Query(200, ge=1, le=1000), before: str = Query("", max_length=200),
                 service_id: str | None = Query(None, max_length=100), session: Session = Depends(db)):
     """Newest-first audit; pass `next` from a response as `before` for the next page."""
@@ -677,7 +508,7 @@ def config_page(session, limit, before, **scope):
         raise HTTPException(422, "Invalid cursor")
 
 
-@app.get("/api/services/{service_id}/configs", dependencies=[Depends(reader)])
+@app.get("/api/services/{service_id}/configs")
 def service_configs(service_id: str, limit: int = Query(100, ge=1, le=1000), before: str = Query("", max_length=200),
                     session: Session = Depends(db)):
     """Config versions of all instances of a service, newest first; without the config bodies."""
@@ -686,7 +517,7 @@ def service_configs(service_id: str, limit: int = Query(100, ge=1, le=1000), bef
     return config_page(session, limit, before, service_id=service_id)
 
 
-@app.get("/api/instances/{source_id}/{instance_id}/configs", dependencies=[Depends(reader)])
+@app.get("/api/instances/{source_id}/{instance_id}/configs")
 def instance_configs(source_id: str, instance_id: str, limit: int = Query(100, ge=1, le=1000),
                      before: str = Query("", max_length=200), session: Session = Depends(db)):
     if not store.instance_known(session, source_id, instance_id):
@@ -702,7 +533,7 @@ def config_or_404(session, version_id):
 
 
 # Declared before /api/configs/{version_id} so that "diff" is not taken for an ID.
-@app.get("/api/configs/diff", dependencies=[Depends(reader)])
+@app.get("/api/configs/diff")
 def config_diff(from_: int = Query(alias="from", ge=1, le=MAX_ID), to: int = Query(ge=1, le=MAX_ID),
                 session: Session = Depends(db)):
     """Changes from version `from` to version `to`; any two versions may be compared."""
@@ -712,12 +543,12 @@ def config_diff(from_: int = Query(alias="from", ge=1, le=MAX_ID), to: int = Que
             "summary": configs.summary(diff), "changes": diff}
 
 
-@app.get("/api/configs/{version_id}", dependencies=[Depends(reader)])
+@app.get("/api/configs/{version_id}")
 def config_version(version_id: int = Path(ge=1, le=MAX_ID), session: Session = Depends(db)):
     return config_or_404(session, version_id)
 
 
-@app.get("/api/metrics/current", dependencies=[Depends(reader)])
+@app.get("/api/metrics/current")
 def metrics_current():
     """Latest resource usage; absence of data is reported, never turned into zeros."""
     if not metrics.base_url():
@@ -728,7 +559,7 @@ def metrics_current():
         return {"enabled": True, "error": "Metrics store unavailable: " + str(error)}
 
 
-@app.get("/api/workloads", dependencies=[Depends(reader)])
+@app.get("/api/workloads")
 def workload_state(service_id: str | None = Query(None, max_length=300),
                    environment: str | None = Query(None, max_length=300),
                    cluster: str | None = Query(None, max_length=300)):
@@ -748,7 +579,7 @@ def workload_state(service_id: str | None = Query(None, max_length=300),
         return {"enabled": True, "error": "Metrics store unavailable: " + str(error), "workloads": []}
 
 
-@app.get("/api/alerts", dependencies=[Depends(reader)])
+@app.get("/api/alerts")
 def active_alerts():
     """Firing alerts from Alertmanager, without silenced and inhibited ones."""
     if not alerts.base_url():
@@ -759,7 +590,7 @@ def active_alerts():
         return {"enabled": True, "error": "Alertmanager unavailable: " + str(error), "alerts": []}
 
 
-@app.get("/api/metrics/range", dependencies=[Depends(reader)])
+@app.get("/api/metrics/range")
 def metrics_range(scope: Literal["host", "container", "gpu", "k8s_container", "k8s_pod", "k8s_gpu", "llm"],
                   metric: str = Query(max_length=100), range_: str = Query("1h", alias="range", max_length=10),
                   host_id: str | None = Query(None, max_length=300),
@@ -834,10 +665,7 @@ def runtime_events(session, base, events, received):
 
 
 @app.post("/api/inventory")
-def ingest(value: Snapshot, source_id: str = Depends(agent), session: Session = Depends(db)):
-    if value.source_id != source_id:
-        raise HTTPException(403, "Token is not valid for this source")
-    k8s_tokens.check_snapshot(source_id, value)
+def ingest(value: Snapshot, session: Session = Depends(db)):
     data = value.model_dump(mode="json")
     new = {x["id"]: x for x in data["instances"]}
     if len(new) != len(data["instances"]):
@@ -889,7 +717,7 @@ def ingest(value: Snapshot, source_id: str = Depends(agent), session: Session = 
     return {"accepted": True}
 
 
-@app.post("/api/deployments", dependencies=[Depends(ci)])
+@app.post("/api/deployments")
 def deployment(value: Deployment, session: Session = Depends(db)):
     request = value.model_dump(mode="json")
     lock(session, "ci:" + value.event_id)
@@ -912,7 +740,7 @@ def deployment(value: Deployment, session: Session = Depends(db)):
     return {"accepted": True, "release_id": release.id}
 
 
-@app.get("/api/releases", dependencies=[Depends(reader)])
+@app.get("/api/releases")
 def list_releases(service_id: str | None = Query(None, max_length=100),
                   environment: str | None = Query(None, max_length=100),
                   status: Literal[releases.STATUSES] | None = None,
@@ -926,7 +754,7 @@ def list_releases(service_id: str | None = Query(None, max_length=100),
         raise HTTPException(422, "Invalid cursor")
 
 
-@app.get("/api/releases/{release_id}", dependencies=[Depends(reader)])
+@app.get("/api/releases/{release_id}")
 def release_detail(release_id: int, session: Session = Depends(db)):
     """Release with its correlated events and the current instances of its rollout."""
     result = releases.detail(session, release_id, datetime.now(timezone.utc))

@@ -4,7 +4,7 @@ import httpx
 import pytest
 
 from backend.app import alerts, exposition
-from backend.tests.test_api import auth, client, post, snapshot  # noqa: F401  (fixture)
+from backend.tests.test_api import client, post, snapshot  # noqa: F401  (fixture)
 
 
 def samples(text):
@@ -47,7 +47,7 @@ def test_metrics_expose_inventory_state(client):
                      "ecc_uncorrected_errors": 0, "throttle_reasons": ["gpu_idle", "hw_thermal"]},
                     {"id": "card1", "vendor": "AMD", "temperature_c": 50}]
     assert post(client, host).json()["accepted"]
-    assert client.post("/api/inventory", headers=auth("agent2"), json=cluster()).json()["accepted"]
+    assert client.post("/api/inventory", json=cluster()).json()["accepted"]
 
     response = client.get("/metrics")  # Internal endpoint: no credential, not proxied by nginx.
     assert response.status_code == 200 and response.headers["content-type"].startswith("text/plain")
@@ -86,11 +86,10 @@ def test_node_gpu_source_is_labelled_with_its_node(client, monkeypatch):
     """A kubernetes-node source "<cluster>.<node>" reports for the Kubernetes node (its hostname): the same host_id
     as DCGM and gman_k8s_node_ready, so DCGM replaces nvidia-smi in the recording rules rather than adding a second
     series for the same GPU, and GManK8sNodeNotReady inhibits the node source's GPU and GManSourceSilent alerts."""
-    monkeypatch.setenv("GMAN_AGENT_TOKENS", '{"cluster-01.gpu-1":"agent-gpu-1"}')
     node = {"source_id": "cluster-01.gpu-1", "source_type": "kubernetes-node", "hostname": "gpu-1",
             "cluster": "cluster-01", "observed_at": snapshot()["observed_at"], "instances": [],
             "gpus": [{"id": "GPU-9", "vendor": "NVIDIA", "temperature_c": 80, "throttle_reasons": []}]}
-    assert client.post("/api/inventory", headers=auth("agent-gpu-1"), json=node).json()["accepted"]
+    assert client.post("/api/inventory", json=node).json()["accepted"]
     data = samples(client.get("/metrics").text)
     assert find(data, "gman_gpu_temperature_celsius", UUID="GPU-9") == 80
     assert find(data, "gman_gpu_temperature_celsius", source_id="cluster-01.gpu-1", host_id="gpu-1") == 80
@@ -111,8 +110,7 @@ def alertmanager(monkeypatch):
 
 def test_alerts_disabled_without_alertmanager(client, monkeypatch):
     monkeypatch.delenv("ALERTMANAGER_URL", raising=False)
-    assert client.get("/api/alerts").status_code == 401
-    assert client.get("/api/alerts", headers=auth("read")).json() == {
+    assert client.get("/api/alerts").json() == {
         "enabled": False, "error": "ALERTMANAGER_URL is not configured", "alerts": []}
 
 
@@ -132,7 +130,7 @@ def test_active_alerts_are_read_from_alertmanager(client, alertmanager):
             {"labels": {"alertname": "GManWatchdog", "severity": "none", "scope": "heartbeat"},
              "annotations": {"summary": "heartbeat"}, "startsAt": "2026-10-11T09:00:00Z"}])
     alertmanager(handler)
-    data = client.get("/api/alerts", headers=auth("read")).json()
+    data = client.get("/api/alerts").json()
     assert data["error"] is None
     assert [a["name"] for a in data["alerts"]] == ["GManSourceSilent", "GManGpuOverheating"]
     assert data["alerts"][1]["labels"] == {"severity": "warning", "host_id": "h", "UUID": "GPU-1"}
@@ -145,5 +143,5 @@ def test_unavailable_alertmanager_is_reported(client, alertmanager):
     def handler(request):
         raise httpx.ConnectError("refused")
     alertmanager(handler)
-    data = client.get("/api/alerts", headers=auth("read")).json()
+    data = client.get("/api/alerts").json()
     assert data["enabled"] and data["alerts"] == [] and data["error"].startswith("Alertmanager unavailable")

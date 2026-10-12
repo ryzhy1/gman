@@ -115,6 +115,11 @@
     молчанием источника; OOMKilling узла подавляется OOMKilled экземпляра того же узла).
     Docker без `--watch`: OOM kill с restart policy — из `docker events --since <прошлый запуск>
     --until <сейчас> --filter event=oom` (отметка в каталоге состояния агента).
+19. Авторизация удалена (миграция 0007): нет SSO, сессий, ролей, `owners`, Bearer-токенов
+    (read/admin/CI/agent) и TokenReview — пп. 7 и 13 в части идентичности больше не действуют.
+    Стек самодостаточен: `docker compose up --build -d` из корня без .env; конфигурации
+    Prometheus/Alertmanager/Grafana/OTel собраны в образы, агент inventory и Collector метрик
+    самого сервера — сервисы compose, Grafana проксируется порталом на /grafana/.
 
 Проверено:
 - Тесты: 232 passed на PostgreSQL 17 (включая запросы истории конфигураций и тест
@@ -186,11 +191,9 @@ cd frontend && npm ci && npm run build && cd ..
 Проверка на PostgreSQL: задайте `GMAN_TEST_DATABASE_URL=postgresql+psycopg://...`
 для пустой тестовой базы — тесты пересоздают схему (см. backend/tests/database.py).
 
-Стенд: `python3 deploy/init_env.py`, затем
-`docker compose --env-file .env -f deploy/compose.yaml up --build -d`
-(портал :8080, Grafana :3000, Prometheus :9090, Alertmanager :9093; все на 127.0.0.1).
-Если .env создан старой версией, добавьте недостающие переменные (GRAFANA_ADMIN_PASSWORD;
-по желанию GMAN_OIDC_*, GMAN_SPLUNK_*, GMAN_ALERT_*).
+Стенд: `docker compose up --build -d` из корня (портал :8080 с Grafana на /grafana/;
+Prometheus :9090 и Alertmanager :9093 на 127.0.0.1). .env необязателен (GMAN_SPLUNK_*,
+GMAN_ALERT_*, GMAN_HOST_IP и др. — по желанию).
 
 Production (Docker Compose ≥ 2.24.4: в 2.24.3 `!override` у ports молча не срабатывает):
 сертификаты `deploy/pki/issue.sh`, `GMAN_PUBLIC_HOST` в .env, затем

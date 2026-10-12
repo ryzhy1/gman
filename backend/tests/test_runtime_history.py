@@ -1,7 +1,7 @@
 """Kubernetes Events, OOM time and history gaps in the API (ingest, history, /metrics)."""
 from datetime import datetime, timedelta, timezone
 
-from backend.tests.test_api import auth, client, post  # noqa: F401  (pytest fixture)
+from backend.tests.test_api import client, post  # noqa: F401  (pytest fixture)
 
 T0 = datetime.now(timezone.utc) - timedelta(hours=2)
 
@@ -29,7 +29,7 @@ def kube_event(count=1, last=60, uid="e1", reason="BackOff"):
 
 def events(client, service_id=None):  # noqa: F811
     query = f"?service_id={service_id}" if service_id is not None else ""
-    return client.get("/api/events" + query, headers=auth("read")).json()["events"]
+    return client.get("/api/events" + query).json()["events"]
 
 
 def test_kubernetes_events_are_recorded_once_per_occurrence(client):  # noqa: F811
@@ -43,7 +43,7 @@ def test_kubernetes_events_are_recorded_once_per_occurrence(client):  # noqa: F8
     assert recorded[1]["actor_source"] == "Kubernetes Event"
     assert recorded[1]["instance_id"] == "p1:app" and "message" not in recorded[1]
     # Events are history, not part of the source's current state.
-    source = client.get("/api/overview", headers=auth("read")).json()["sources"][0]
+    source = client.get("/api/overview").json()["sources"][0]
     assert "events" not in source
 
 
@@ -57,7 +57,7 @@ def test_oom_time_survives_docker_restart_and_is_exported(client):  # noqa: F811
     post(client, snapshot(30, [instance(last_oom_at=at(20))]))
     # Agent restarted (watch state lost) and the container was restarted by its policy: no OOM reported.
     post(client, snapshot(60, [instance(restarts=1)]))
-    current = client.get("/api/overview", headers=auth("read")).json()["sources"][0]["instances"][0]
+    current = client.get("/api/overview").json()["sources"][0]["instances"][0]
     assert datetime.fromisoformat(current["last_oom_at"]) == T0 + timedelta(seconds=20)
     restarted, oom = events(client, "api")  # source-connected has no service
     assert (restarted["type"], list(restarted["changes"])) == ("instance-restarted", ["restarts"])

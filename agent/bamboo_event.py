@@ -88,15 +88,14 @@ def payload():
 
 def main():
     url = os.environ["GMAN_URL"].rstrip("/")
-    if not (url.startswith("https://") or url.startswith("http://127.0.0.1:")):
-        raise ValueError("HTTPS required except for loopback")
+    if not url.startswith(("https://", "http://")):
+        raise ValueError("GMAN_URL must be an HTTP(S) URL")
     request = Request(url + "/api/deployments", data=json.dumps(payload()).encode(),
-                      headers={"Content-Type": "application/json", "Authorization": "Bearer " + os.environ["GMAN_CI_TOKEN"]})
+                      headers={"Content-Type": "application/json"})
     try:
         with urlopen(request, timeout=30) as response:
             print("GMan deployment event: HTTP", response.status, response.read(500).decode(errors="replace"))
     except HTTPError as error:
-        # The API's own error body contains no credentials.
         raise RuntimeError(f"HTTP {error.code} {error.read(1000).decode(errors='replace')}")
 
 

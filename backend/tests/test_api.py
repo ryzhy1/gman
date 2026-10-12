@@ -10,18 +10,11 @@ from backend.tests.database import database_url
 @pytest.fixture
 def client(tmp_path, monkeypatch):
     monkeypatch.setenv("DATABASE_URL", database_url(tmp_path))
-    for key, value in {"GMAN_READ_TOKEN": "read", "GMAN_ADMIN_TOKEN": "admin",
-                       "GMAN_AGENT_TOKENS": '{"node-1":"agent","node-2":"agent2"}', "GMAN_CI_TOKEN": "ci"}.items():
-        monkeypatch.setenv(key, value)
     from backend.app import main
     importlib.reload(main)
     with TestClient(main.app, raise_server_exceptions=False) as c:
         yield c
     main.engine.dispose()
-
-
-def auth(token):
-    return {"Authorization": "Bearer " + token}
 
 
 def snapshot(offset=0):
@@ -33,28 +26,16 @@ def snapshot(offset=0):
 
 
 def post(client, value):
-    return client.post("/api/inventory", headers=auth("agent"), json=value)
+    return client.post("/api/inventory", json=value)
 
 
-def test_auth_and_scope(client):
-    assert client.get("/api/overview").status_code == 401
-    assert client.get("/api/overview", headers=auth("read")).status_code == 200
-    assert client.put("/api/services/api", headers=auth("read"), json={"id":"api","name":"API"}).status_code == 401
+def test_no_credentials_needed(client):
+    assert client.get("/api/overview").status_code == 200
+    assert client.put("/api/services/api", json={"id": "api", "name": "API"}).status_code == 200
     value = snapshot()
     value["source_id"] = "node-2"
-    assert post(client, value).status_code == 403
-    assert client.post("/api/deployments", headers=auth("agent"), json={}).status_code == 401
-
-
-def test_auth_checked_before_body_validation(client):
-    response = client.post("/api/inventory", json={"source_id": "node-1", "bogus": 1})
-    assert response.status_code == 401
-    assert "observed_at" not in response.text
-
-
-def test_non_ascii_credential_is_rejected_not_crashed(client):
-    headers = {"Authorization": "Bearer \xe9".encode("latin-1")}
-    assert client.get("/api/overview", headers=headers).status_code == 401
+    assert post(client, value).json()["accepted"]
+    assert client.get("/api/auth/info").status_code == 404
 
 
 def test_inventory_order_history_and_removal(client):
@@ -68,7 +49,7 @@ def test_inventory_order_history_and_removal(client):
     removed = snapshot()
     removed["instances"] = []
     post(client, removed)
-    data = client.get("/api/overview", headers=auth("read")).json()
+    data = client.get("/api/overview").json()
     assert data["sources"][0]["instances"] == []
     assert [e["type"] for e in data["events"]] == ["instance-removed", "config-changed", "source-connected"]
     assert data["events"][1]["changes"] == {"config.image": ["api:v1", "api:v2"]}
@@ -84,7 +65,7 @@ def test_state_and_restart_events_are_classified(client):
     restarted = snapshot()
     restarted["instances"][0].update(health="unhealthy", restarts=1, started_at="2026-10-10T11:00:00Z")
     post(client, restarted)
-    events = client.get("/api/events", headers=auth("read"), params={"service_id": "api"}).json()["events"]
+    events = client.get("/api/events", params={"service_id": "api"}).json()["events"]
     assert [e["type"] for e in events] == ["instance-restarted", "state-changed"]
 
 
@@ -93,32 +74,41 @@ def test_service_history_is_not_limited_by_global_window(client):
     for i in range(3):
         value = {"event_id": f"other:{i}", "service_id": "other", "environment": "prod",
                  "status": "succeeded", "build_id": f"B-{i}"}
-        client.post("/api/deployments", headers=auth("ci"), json=value)
-    first = client.get("/api/events", headers=auth("read"), params={"limit": 2}).json()
+        client.post("/api/deployments", json=value)
+    first = client.get("/api/events", params={"limit": 2}).json()
     assert len(first["events"]) == 2 and first["next"]
-    rest = client.get("/api/events", headers=auth("read"), params={"limit": 2, "before": first["next"]}).json()
+    rest = client.get("/api/events", params={"limit": 2, "before": first["next"]}).json()
     assert len(rest["events"]) == 2 and rest["next"] is None
-    own = client.get("/api/events", headers=auth("read"), params={"service_id": "other"}).json()["events"]
+    own = client.get("/api/events", params={"service_id": "other"}).json()["events"]
     assert {e["build_id"] for e in own} == {"B-0", "B-1", "B-2"}
 
 
-def test_reject_secrets_and_unsafe_urls(client):
+def test_env_is_stored_and_unsafe_urls_rejected(client):
     value = snapshot()
     value["instances"][0]["config"]["env"] = {"PASSWORD": "secret"}
-    assert post(client, value).status_code == 422
-    assert client.put("/api/services/api", headers=auth("admin"), json={"id":"api","name":"API","repository":"javascript:alert(1)"}).status_code == 422
-    assert client.put("/api/services/api", headers=auth("admin"), json={"id":"api","name":"API","repository":"https://git.example/api"}).status_code == 200
+    assert post(client, value).status_code == 422  # a list of "NAME=value", not a mapping
+    value["instances"][0]["config"]["env"] = ["PASSWORD=secret", "EMPTY="]
+    assert post(client, value).json()["accepted"]
+    [instance] = client.get("/api/overview").json()["sources"][0]["instances"]
+    assert instance["config"]["env"] == ["PASSWORD=secret", "EMPTY="]
+    value = snapshot(1)
+    value["instances"][0]["config"]["env_files"] = {"/app/.env.local": ["JWT_SECRET=s"]}
+    assert post(client, value).json()["accepted"]
+    [instance] = client.get("/api/overview").json()["sources"][0]["instances"]
+    assert instance["config"]["env_files"] == {"/app/.env.local": ["JWT_SECRET=s"]}
+    assert client.put("/api/services/api", json={"id":"api","name":"API","repository":"javascript:alert(1)"}).status_code == 422
+    assert client.put("/api/services/api", json={"id":"api","name":"API","repository":"https://git.example/api"}).status_code == 200
 
 
 def test_duplicate_deployment_and_unknown_actor(client):
     value = {"event_id":"build:1:done","service_id":"api","environment":"prod",
              "status":"succeeded", "build_id":"PLAN-1"}
-    assert client.post("/api/deployments", headers=auth("ci"), json=value).json()["accepted"]
+    assert client.post("/api/deployments", json=value).json()["accepted"]
     # A retry without occurred_at is the same event, not a conflict.
-    assert not client.post("/api/deployments", headers=auth("ci"), json=value).json()["accepted"]
+    assert not client.post("/api/deployments", json=value).json()["accepted"]
     value["status"] = "failed"
-    assert client.post("/api/deployments", headers=auth("ci"), json=value).status_code == 409
-    data = client.get("/api/overview", headers=auth("read")).json()
+    assert client.post("/api/deployments", json=value).status_code == 409
+    data = client.get("/api/overview").json()
     assert len(data["events"]) == 1
     assert data["events"][0]["actor"] == "unknown"
     assert data["events"][0]["occurred_at"] == data["events"][0]["received_at"]
@@ -131,13 +121,3 @@ def test_timestamps_and_duplicate_instances(client):
     value = snapshot()
     value["instances"].append(value["instances"][0])
     assert post(client, value).status_code == 422
-
-
-def test_open_access_without_sign_in(client, monkeypatch):
-    assert client.get("/api/overview").status_code == 401
-    monkeypatch.setenv("GMAN_AUTH_DISABLED", "true")
-    assert client.get("/api/auth/info").json()["open"] is True
-    assert client.get("/api/me").json()["auth"] == "open"
-    assert client.get("/api/overview").status_code == 200
-    # An explicit credential is still checked.
-    assert client.get("/api/overview", headers=auth("wrong")).status_code == 401

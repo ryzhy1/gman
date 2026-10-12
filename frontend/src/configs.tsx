@@ -30,18 +30,18 @@ function defaults(versions: ConfigVersion[]): [number | null, number | null] {
   return [from?.id ?? null, to.id];
 }
 
-function DiffView({ token, from, to }: { token: string; from: number; to: number }) {
+function DiffView({ from, to }: { from: number; to: number }) {
   const [diff, setDiff] = useState<ConfigDiff | null>(null);
   const [error, setError] = useState('');
 
   useEffect(() => {
     const ctrl = new AbortController();
     setDiff(null);
-    get<ConfigDiff>(token, `/api/configs/diff?from=${from}&to=${to}`, ctrl.signal)
+    get<ConfigDiff>(`/api/configs/diff?from=${from}&to=${to}`, ctrl.signal)
       .then(d => { setDiff(d); setError(''); })
       .catch(e => { if (!ctrl.signal.aborted) setError((e as Error).message); });
     return () => ctrl.abort();
-  }, [token, from, to]);
+  }, [from, to]);
 
   if (error) return <div role="alert" className="alert">{error}</div>;
   if (!diff) return <div className="empty">Сравнение версий…</div>;
@@ -70,8 +70,8 @@ function DiffView({ token, from, to }: { token: string; from: number; to: number
 }
 
 /** Config versions of a service or one of its instances, with a diff between two chosen versions. */
-export function ConfigHistory({ token, serviceId, instances, refreshKey }:
-  { token: string; serviceId: string; instances: Placed[]; refreshKey: string }) {
+export function ConfigHistory({ serviceId, instances, refreshKey }:
+  { serviceId: string; instances: Placed[]; refreshKey: string }) {
   const [scope, setScope] = useState('');
   const [versions, setVersions] = useState<ConfigVersion[]>([]);
   const [next, setNext] = useState<string | null>(null);
@@ -88,7 +88,7 @@ export function ConfigHistory({ token, serviceId, instances, refreshKey }:
 
   useEffect(() => {
     const ctrl = new AbortController();
-    get<ConfigVersionPage>(token, base, ctrl.signal)
+    get<ConfigVersionPage>(base, ctrl.signal)
       .then(page => {
         setVersions(page.versions); setNext(page.next); setError(''); setLoaded(true);
         // Keep the reader's choice across the 30-second refresh while both versions are still listed.
@@ -99,11 +99,11 @@ export function ConfigHistory({ token, serviceId, instances, refreshKey }:
       })
       .catch(e => { if (!ctrl.signal.aborted) setError((e as Error).message); });
     return () => ctrl.abort();
-  }, [token, base, refreshKey]);
+  }, [base, refreshKey]);
 
   async function more() {
     try {
-      const page = await get<ConfigVersionPage>(token, `${base}&before=${encodeURIComponent(next!)}`);
+      const page = await get<ConfigVersionPage>(`${base}&before=${encodeURIComponent(next!)}`);
       setVersions(old => [...old, ...page.versions]);
       setNext(page.next);
     } catch (e) { setError((e as Error).message); }
@@ -139,7 +139,7 @@ export function ConfigHistory({ token, serviceId, instances, refreshKey }:
       <h3 className="subheading">Различия</h3>
       {from == null || to == null || from === to
         ? <div className="empty">{versions.length < 2 ? 'Есть только одна версия — сравнивать не с чем.' : 'Выберите две разные версии.'}</div>
-        : <DiffView token={token} from={from} to={to} />}
+        : <DiffView from={from} to={to} />}
     </>}
     <p className="note">Версия — каждая отличающаяся конфигурация экземпляра; возврат к прежней конфигурации записывается новой версией. «Наблюдалась» — от первого до последнего снимка с этой конфигурацией; изменения между опросами агента не видны. Значения переменных окружения и команды не собираются, поэтому в истории их нет.</p>
   </div>;
