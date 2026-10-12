@@ -2,6 +2,7 @@ import { useEffect, useState } from 'react';
 import { ApiError, get, type RangeResult } from './api';
 import { LineChart, SERIES_COLORS, type Series } from './chart';
 import type { Placed } from './components';
+import { Tabs, TabsList, TabsTrigger } from '@/ui/tabs';
 import { cores, num, podContainer, rate, size } from './format';
 
 const RANGES = [['1h', '1 час'], ['24h', '24 часа'], ['7d', '7 дней']] as const;
@@ -94,9 +95,9 @@ export function Resources({ token, instances, grafanaLink, range, onRange, splun
 
   return <div>
     <div className="chart-controls">
-      <div className="segmented" role="group" aria-label="Период">
-        {RANGES.map(([value, label]) => <button key={value} className={range === value ? 'chosen' : ''} onClick={() => onRange(value)}>{label}</button>)}
-      </div>
+      <Tabs value={range} onValueChange={onRange} aria-label="Период">
+        <TabsList>{RANGES.map(([value, label]) => <TabsTrigger key={value} value={value}>{label}</TabsTrigger>)}</TabsList>
+      </Tabs>
       {grafanaLink && <a href={grafanaLink} target="_blank" rel="noreferrer">Подробнее в Grafana ↗</a>}
       {splunkLink && <a href={splunkLink} target="_blank" rel="noopener noreferrer">Логи в Splunk ↗</a>}
     </div>

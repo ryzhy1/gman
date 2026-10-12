@@ -1,13 +1,15 @@
 import type { CurrentMetrics, GPU, GPUProcess, MetricValues, Node, NodeEvent, Source } from './api';
 import { nodeGpuSource, type Placed } from './components';
 import { bytes, cores, date, grafanaLink, num, percent, rate, size, stale, unit, uptime } from './format';
+import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '@/ui/table';
+import { Meter as Bar, linkButton, tone as badge } from '@/ui/tone';
 
 type Open = (serviceId: string) => void;
 
 function Gauge({ label, ratio, detail }: { label: string; ratio: number | null | undefined; detail?: string }) {
   return <div className="gauge">
     <span>{label}</span><b>{percent(ratio)}</b>
-    {ratio != null && <progress max="1" value={Math.min(1, ratio)} />}
+    {ratio != null && <Bar max="1" value={Math.min(1, ratio)} />}
     {detail && <small>{detail}</small>}
   </div>;
 }
@@ -61,13 +63,13 @@ function GpuCard({ title, id, inventory, live, observedAt, instances, onService,
       : [g.fan_percent != null && `${num(g.fan_percent, 0)} %`, g.fan_rpm != null && `${num(g.fan_rpm, 0)} RPM`].filter(Boolean).join(' · '), true],
     ['PCIe', g.pcie_generation == null && g.pcie_width == null ? '—' : `Gen ${g.pcie_generation ?? '?'} ×${g.pcie_width ?? '?'}`],
     ['ECC, неисправл. ошибки', g.ecc_uncorrected_errors == null ? '—'
-      : g.ecc_uncorrected_errors! > 0 ? <span className="badge bad">{g.ecc_uncorrected_errors}</span> : '0'],
+      : g.ecc_uncorrected_errors! > 0 ? <span className={badge('bad')}>{g.ecc_uncorrected_errors}</span> : '0'],
     ['MIG', inventory?.mig_mode ?? '—'],
     ['Persistence mode', inventory?.persistence_mode ?? '—'],
   ];
   if (live) details.push(
     ['Копирование памяти', unit(live.memory_copy_utilization_percent, '%'), true],
-    ['Последняя XID-ошибка', live.last_xid_error == null ? '—' : live.last_xid_error ? <span className="badge bad">XID {live.last_xid_error}</span> : 'нет', true]);
+    ['Последняя XID-ошибка', live.last_xid_error == null ? '—' : live.last_xid_error ? <span className={badge('bad')}>XID {live.last_xid_error}</span> : 'нет', true]);
   const shown = details.filter(([, v, always]) => nvidia || always || v !== '—');
   return <div className="gpu">
     <div className="gpu-head">
@@ -78,19 +80,19 @@ function GpuCard({ title, id, inventory, live, observedAt, instances, onService,
     </div>
     <div className="gpu-numbers">
       <span>Загрузка<b>{unit(g.utilization_percent, '%')}</b>
-        {g.utilization_percent != null && <progress max="100" value={Math.min(100, g.utilization_percent)} />}</span>
+        {g.utilization_percent != null && <Bar max="100" value={Math.min(100, g.utilization_percent)} />}</span>
       <span>VRAM<b>{g.memory_used_bytes == null ? '—' : size(g.memory_used_bytes)}</b>
-        {memRatio != null && <progress max="1" value={Math.min(1, memRatio)} />}
+        {memRatio != null && <Bar max="1" value={Math.min(1, memRatio)} />}
         <small>из {g.memory_total_bytes == null ? '—' : size(g.memory_total_bytes)}{memRatio != null && ` · ${percent(memRatio)}`}</small></span>
       <span>Температура<b>{unit(g.temperature_c, '°C')}</b>
         <small>{[g.hotspot_temperature_c != null && `hotspot ${num(g.hotspot_temperature_c, 0)} °C`,
           g.memory_temperature_c != null && `память ${num(g.memory_temperature_c, 0)} °C`].filter(Boolean).join(' · ') || 'другие датчики —'}</small></span>
       <span>Мощность<b>{unit(g.power_w, 'W')}</b>
-        {powerRatio != null && <progress className={powerRatio > 0.95 ? 'hot' : ''} max="1" value={Math.min(1, powerRatio)} />}
+        {powerRatio != null && <Bar hot={powerRatio > 0.95} max="1" value={Math.min(1, powerRatio)} />}
         <small>{g.power_limit_w == null ? 'лимит —' : `лимит ${num(g.power_limit_w, 0)} W · ${percent(powerRatio)}`}</small></span>
     </div>
     {throttles.length > 0 && <div className="badges" aria-label="Причины снижения частот">
-      {throttles.map(t => <span key={t} className={`badge ${THROTTLE[t]?.[1] ?? 'warn'}`} title={t}>{THROTTLE[t]?.[0] ?? t}</span>)}
+      {throttles.map(t => <span key={t} className={badge(THROTTLE[t]?.[1] ?? 'warn')} title={t}>{THROTTLE[t]?.[0] ?? t}</span>)}
     </div>}
     <dl className="compact">{shown.map(([k, v]) => <div key={k}><dt>{k}</dt><dd>{v}</dd></div>)}</dl>
     {inventory && nvidia && <GpuProcesses gpu={inventory} instances={instances} onService={onService} />}
@@ -112,7 +114,7 @@ function Owner({ process, instances, onService }: { process: GPUProcess; instanc
   return <>
     <b>{i.name}</b>
     <small>{i.service_id
-      ? onService ? <button className="service-link" onClick={() => onService(i.service_id)}>{i.service_id}</button> : i.service_id
+      ? onService ? <button className={linkButton()} onClick={() => onService(i.service_id)}>{i.service_id}</button> : i.service_id
       : 'не привязан к сервису'} · PID {process.pid}</small>
   </>;
 }
@@ -123,14 +125,14 @@ function GpuProcesses({ gpu, instances, onService }: { gpu: GPU; instances: Plac
   const rows = [...gpu.processes].sort((a, b) => (b.used_memory_bytes ?? -1) - (a.used_memory_bytes ?? -1));
   const owners = new Set(rows.map(p => p.container_id || p.pod_uid || `pid:${p.pid}`));
   return <>
-    <div className="table-wrap"><table className="dense">
-      <thead><tr><th>Владелец процесса</th><th>VRAM процесса</th></tr></thead>
-      <tbody>{rows.map(p => <tr key={p.pid}>
-        <td><Owner process={p} instances={instances} onService={onService} /></td>
-        <td>{p.used_memory_bytes == null ? 'н/д' : size(p.used_memory_bytes)}
-          {p.used_memory_bytes != null && gpu.memory_total_bytes ? <small>{percent(p.used_memory_bytes / gpu.memory_total_bytes)} VRAM</small> : null}</td>
-      </tr>)}</tbody>
-    </table></div>
+    <div className="table-wrap"><Table className="dense">
+      <TableHeader><TableRow><TableHead>Владелец процесса</TableHead><TableHead>VRAM процесса</TableHead></TableRow></TableHeader>
+      <TableBody>{rows.map(p => <TableRow key={p.pid}>
+        <TableCell><Owner process={p} instances={instances} onService={onService} /></TableCell>
+        <TableCell>{p.used_memory_bytes == null ? 'н/д' : size(p.used_memory_bytes)}
+          {p.used_memory_bytes != null && gpu.memory_total_bytes ? <small>{percent(p.used_memory_bytes / gpu.memory_total_bytes)} VRAM</small> : null}</TableCell>
+      </TableRow>)}</TableBody>
+    </Table></div>
     {owners.size > 1 && <p className="note">GPU используется совместно: загрузка, мощность и температура относятся ко всей карте и не делятся между процессами.</p>}
   </>;
 }
@@ -139,14 +141,15 @@ function gpuTitle(g: { vendor: string; model: string }, index: number) {
   return `GPU ${index} · ${g.vendor}${g.model ? ` ${g.model}` : ''}`;
 }
 
-function SourceHead({ source, grafana }: { source: Source; grafana: string }) {
+function SourceHead({ source, grafana, gpuGrafana }: { source: Source; grafana: string; gpuGrafana?: string }) {
   return <>
     <div className="section-head">
       <h2>{source.hostname}</h2>
-      <span className={`badge ${stale(source) ? 'warn' : ''}`}>{stale(source) ? 'Устарело' : 'Получены данные'}</span>
+      <span className={badge(stale(source) ? 'warn' : '')}>{stale(source) ? 'Устарело' : 'Получены данные'}</span>
     </div>
     <p className="muted">{source.source_type} · {source.source_id}{source.agent_version && ` · агент ${source.agent_version}`} · снимок {date(source.observed_at)}
-      {grafana && <> · <a href={grafana} target="_blank" rel="noreferrer">Grafana ↗</a></>}</p>
+      {grafana && <> · <a href={grafana} target="_blank" rel="noreferrer">Grafana ↗</a></>}
+      {gpuGrafana && <> · <a href={gpuGrafana} target="_blank" rel="noreferrer">GPU ↗</a></>}</p>
     {source.errors?.map(e => <div role="alert" className="alert" key={e}>Ошибка сбора: {e}</div>)}
   </>;
 }
@@ -163,7 +166,8 @@ export function HostCard({ source, metrics, grafanaUrl, range, onService }: {
   const running = source.instances.filter(i => i.status === 'running').length;
   return <section>
     <SourceHead source={source} grafana={source.source_type === 'docker-host'
-      ? grafanaLink(grafanaUrl, 'gman-host', { host: source.source_id }, range) : ''} />
+      ? grafanaLink(grafanaUrl, 'gman-host', { host: source.source_id }, range) : ''}
+      gpuGrafana={source.gpus.length || extra.length ? grafanaLink(grafanaUrl, 'gman-gpu', { host: source.source_id, gpu: null }, range) : ''} />
     <HostGauges host={metrics?.host?.[source.source_id]} cpuCount={source.cpu_count} memoryTotal={source.memory_total_bytes}
       missing={<>Метрики хоста не получены: проверьте OTel Collector с GMAN_HOST_ID={source.source_id}.</>} />
     <dl>
@@ -197,7 +201,7 @@ function Meter({ label, used, total, show, capacity }: {
   return <div className="meter">
     <span>{label}</span>
     <b>{used == null ? '—' : show(used)} <i>из {total == null ? '—' : show(total)}</i></b>
-    {ratio != null && <progress className={ratio > 1 ? 'hot' : ''} max="1" value={Math.min(1, ratio)} />}
+    {ratio != null && <Bar hot={ratio > 1} max="1" value={Math.min(1, ratio)} />}
     <small>{ratio == null ? 'запрошено —' : `запрошено ${percent(ratio)} от доступного`}
       {capacity != null && capacity !== total && ` · емкость ${show(capacity)}`}</small>
   </div>;
@@ -216,14 +220,14 @@ const NODE_EVENTS: Record<string, [string, 'warn' | 'bad']> = {
 /** Summary of the node's Events; each Event (with the pod an OOM kill was mapped to) is in the audit. */
 function NodeEvents({ events }: { events: NodeEvent[] }) {
   if (!events.length) return null;
-  return <div className="table-wrap"><table className="dense" aria-label="События узла за 24 часа">
-    <thead><tr><th>События узла за 24 ч</th><th>Повторов</th><th>Последнее</th></tr></thead>
-    <tbody>{events.map(e => <tr key={e.reason}>
-      <td><span className={`dot ${NODE_EVENTS[e.reason]?.[1] ?? 'warn'}`} /> {NODE_EVENTS[e.reason]?.[0] ?? e.reason}<small>{e.reason}</small></td>
-      <td>{e.count}{e.events > 1 && <small>{e.events} событий Kubernetes</small>}</td>
-      <td>{date(e.last_at)}</td>
-    </tr>)}</tbody>
-  </table></div>;
+  return <div className="table-wrap"><Table className="dense" aria-label="События узла за 24 часа">
+    <TableHeader><TableRow><TableHead>События узла за 24 ч</TableHead><TableHead>Повторов</TableHead><TableHead>Последнее</TableHead></TableRow></TableHeader>
+    <TableBody>{events.map(e => <TableRow key={e.reason}>
+      <TableCell><span className={`dot ${NODE_EVENTS[e.reason]?.[1] ?? 'warn'}`} /> {NODE_EVENTS[e.reason]?.[0] ?? e.reason}<small>{e.reason}</small></TableCell>
+      <TableCell>{e.count}{e.events > 1 && <small>{e.events} событий Kubernetes</small>}</TableCell>
+      <TableCell>{date(e.last_at)}</TableCell>
+    </TableRow>)}</TableBody>
+  </Table></div>;
 }
 
 const coreUnit = (v: number) => `${cores(v)} ядер`;
@@ -243,9 +247,9 @@ function NodeCard({ node, source, gpuSource, metrics, events, onService }: {
   return <div className="node">
     <div className="node-head">
       <b>{node.name}</b>
-      <span className={`badge ${node.ready ? '' : 'bad'}`}>{node.ready ? 'Ready' : 'NotReady'}</span>
-      {node.unschedulable && <span className="badge warn" title="kubectl cordon: новые pod не планируются">Cordon</span>}
-      {node.pressure.map(p => <span key={p} className="badge bad" title={p}>{PRESSURE[p] ?? p}</span>)}
+      <span className={badge(node.ready ? '' : 'bad')}>{node.ready ? 'Ready' : 'NotReady'}</span>
+      {node.unschedulable && <span className={badge('warn')} title="kubectl cordon: новые pod не планируются">Cordon</span>}
+      {node.pressure.map(p => <span key={p} className={badge('bad')} title={p}>{PRESSURE[p] ?? p}</span>)}
     </div>
     <small>{node.roles.length ? node.roles.join(', ') : 'worker'} · {pods} pod · kubelet {node.kubelet_version || '—'}</small>
     <small>{[node.os, node.kernel, node.runtime_version].filter(Boolean).join(' · ') || '—'}</small>

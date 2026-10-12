@@ -322,7 +322,7 @@ def test_expired_session_is_rejected(sso, idp):
 
 
 def test_bearer_tokens_still_work_with_sso(sso):
-    assert sso.get("/api/auth/info").json() == {"oidc": True}
+    assert sso.get("/api/auth/info").json() == {"oidc": True, "open": False}
     assert sso.get("/api/overview", headers=bearer("read")).status_code == 200
     assert sso.get("/api/me", headers=bearer("read")).json()["role"] == "viewer"
     assert sso.put("/api/services/api", headers=bearer("read"), json=service("api")).status_code == 401
@@ -344,7 +344,7 @@ def test_half_configured_oidc_fails_at_startup(monkeypatch):
 
 
 def test_token_mode_without_oidc(client):
-    assert client.get("/api/auth/info").json() == {"oidc": False}
+    assert client.get("/api/auth/info").json() == {"oidc": False, "open": False}
     assert client.get("/api/auth/login", follow_redirects=False).status_code == 404
     assert client.get("/api/me").status_code == 401
     user = client.get("/api/me", headers=bearer("read")).json()

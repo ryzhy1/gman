@@ -9,7 +9,7 @@ export type Service = {
 export type Role = 'viewer' | 'owner' | 'admin';
 /** Signed-in user: an SSO session (cookie + CSRF token) or a shared Bearer token. */
 export type Me = {
-  auth: 'oidc' | 'token'; role: Role; subject: string; email: string; name: string;
+  auth: 'oidc' | 'token' | 'open'; role: Role; subject: string; email: string; name: string;
   identities: string[]; csrf_token: string | null;
 };
 export const ROLE_LABELS: Record<Role, string> = {
@@ -62,7 +62,7 @@ export type GPU = {
 };
 
 export type Node = {
-  name: string; ready: boolean; unschedulable: boolean; pressure: string[]; roles: string[]; taints: string[];
+  name: string; internal_ip?: string; ready: boolean; unschedulable: boolean; pressure: string[]; roles: string[]; taints: string[];
   kubelet_version: string; os: string; kernel: string; runtime_version: string;
   cpu_capacity: number | null; cpu_allocatable: number | null; cpu_requested: number | null;
   memory_capacity_bytes: number | null; memory_allocatable_bytes: number | null; memory_requested_bytes: number | null;
@@ -75,6 +75,8 @@ export type NodeEvent = { node: string; reason: string; count: number; events: n
 
 export type Source = {
   source_id: string; hostname: string; source_type: string; agent_version: string;
+  /** docker-host: address of the host (agent default route or GMAN_HOST_IP). */
+  ip?: string;
   /** kubernetes-node: GPU snapshot of node `hostname` of cluster source `cluster`, without instances. */
   cluster?: string;
   observed_at: string; received_at: string; cpu_count: number | null; memory_total_bytes: number | null;
@@ -192,6 +194,8 @@ export type CurrentMetrics = {
   k8s_pod?: Record<string, MetricValues>;
   /** Keyed by "namespace/pod/container": DCGM series of GPUs allocated to the container. */
   k8s_gpu?: Record<string, MetricValues>;
+  /** Keyed by "<service>/<model>": vLLM servers of a catalog service (model names may contain "/"). */
+  llm?: Record<string, MetricValues>;
 };
 export type RangeResult = { points: [number, number | null][]; step: number };
 

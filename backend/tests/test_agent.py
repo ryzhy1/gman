@@ -5,6 +5,34 @@ from agent import bamboo_event, collect
 from agent.collect import docker_instance, pod_instances, quantity
 
 
+def test_macos_host_info(monkeypatch):
+    monkeypatch.setattr(collect.sys, 'platform', 'darwin')
+    monkeypatch.setattr(collect.time, 'time', lambda: 2000)
+    outputs = {
+        ('sysctl', '-n', 'hw.memsize'): '17179869184\n',
+        ('sysctl', '-n', 'machdep.cpu.brand_string'): 'Apple M1\n',
+        ('sysctl', '-n', 'kern.boottime'): '{ sec = 1000, usec = 0 }\n',
+        ('sw_vers', '-productVersion'): '15.0\n',
+        ('docker', 'version', '--format', '{{.Server.Version}}'): '25.0.2\n',
+    }
+    monkeypatch.setattr(collect, 'command', lambda args: outputs[tuple(args)])
+    info = collect.host_info()
+    assert info['memory_total_bytes'] == 17179869184
+    assert info['cpu_model'] == 'Apple M1'
+    assert info['os'] == 'macOS 15.0'
+    assert info['uptime_seconds'] == 1000
+
+
+def test_macos_missing_cpu_model_preserves_memory(monkeypatch):
+    monkeypatch.setattr(collect.sys, 'platform', 'darwin')
+    def command(args):
+        if args == ['sysctl', '-n', 'hw.memsize']:
+            return '17179869184'
+        raise OSError('unavailable')
+    monkeypatch.setattr(collect, 'command', command)
+    assert collect.host_info()['memory_total_bytes'] == 17179869184
+
+
 def test_docker_allowlist_and_cpu_quota():
     result = docker_instance({"Id":"id", "Config":{"Image":"img", "Env":["SECRET=abc", "NVIDIA_VISIBLE_DEVICES=0,1"],
                               "Cmd":["--password=abc"], "Healthcheck":{"Test":["CMD", "curl", "-u", "abc"]},
@@ -193,3 +221,14 @@ def test_node_capacity_and_requests():
     assert (result["gpu_capacity"], result["gpu_requested"], result["memory_requested_bytes"]) == (8, 2, 1024**3)
     from backend.app.main import Node
     Node(**result)
+
+
+def test_host_ip_override(monkeypatch):
+    monkeypatch.setenv('GMAN_HOST_IP', '203.0.113.7')
+    assert collect.host_ip() == '203.0.113.7'
+
+
+def test_node_internal_ip():
+    node = {'metadata': {'name': 'n1'}, 'status': {'addresses': [
+        {'type': 'Hostname', 'address': 'n1'}, {'type': 'InternalIP', 'address': '10.0.0.5'}]}}
+    assert collect.nodes([node], [])[0]['internal_ip'] == '10.0.0.5'

@@ -1,6 +1,9 @@
-import { useEffect, useState } from 'react';
+import { useEffect, useState, type ReactNode } from 'react';
 import { get, type Audit, type CurrentMetrics, type EventPage, type GPU, type GPUProcess, type Instance, type MetricValues, type Source } from './api';
 import { bytes, cores, date, describeStatus, isHttp, percent, size, stale, statusTone, value } from './format';
+import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '@/ui/table';
+import { linkButton, outlineButton, tone as badge } from '@/ui/tone';
+import { ConfigSections } from './config-sections';
 
 /** `gpuSource`: where the instance's GPU processes are reported — the Docker host itself, or for a pod the
  * node-local source (kubernetes-node) of its node; absent when no node agent reports that node. */
@@ -16,6 +19,20 @@ export function placeInstances(sources: Source[]): Placed[] {
     ...i, source: s,
     gpuSource: i.runtime === 'docker' ? s : i.node ? nodeGpuSource(sources, s.source_id, i.node) : undefined,
   })));
+}
+
+/** Server address of an instance: the Docker host, or the node a pod runs on; hostname/node name until the agent reports IPs. */
+export function serverAddress(i: Placed): string {
+  if (i.runtime === 'docker') return i.source.ip || i.source.hostname;
+  return i.source.nodes?.find(n => n.name === i.node)?.internal_ip || i.node;
+}
+
+/** Published ports: the host side of Docker bindings ("0.0.0.0:8080->80/tcp" → 8080), container ports of a pod. */
+export function servicePorts(i: Placed): string[] {
+  const ports = Array.isArray(i.config.ports) ? i.config.ports.map(String) : [];
+  return [...new Set(ports.map(p => i.runtime === 'docker'
+    ? p.split('->')[0].split(':').pop() || p.split('->')[1] || p
+    : p.replace(/\/TCP$/, '')))];
 }
 
 /** Live usage of one instance: Docker by "<host_id>/<container_id>", Kubernetes by the instance ID itself. */
@@ -59,34 +76,38 @@ function Vram({ instance }: { instance: Placed }) {
 }
 
 /** `logs`: Splunk links keyed "<source_id>/<instance_id>"; the column appears only when some row has one. */
+export function instanceHref(i: Placed): string {
+  return `#instances/${encodeURIComponent(i.source.source_id)}/${encodeURIComponent(i.id)}`;
+}
+
 export function InstanceTable({ rows, metrics, logs }: { rows: Placed[]; metrics?: CurrentMetrics | null; logs?: Record<string, string> }) {
   // The VRAM column appears only where some row runs on a host that reports GPUs.
   const withGpu = rows.some(i => (i.gpuSource?.gpus.length ?? 0) > 0);
   const withLogs = rows.some(i => logs?.[`${i.source.source_id}/${i.id}`]);
   return <div className="table-wrap">
-    <table>
-      <thead><tr><th>Экземпляр</th><th>Размещение</th><th>Состояние</th><th>CPU, ядра</th><th>Память</th>
-        {withGpu && <th title="Видеопамять, занятая процессами контейнера (nvidia-smi). Не загрузка GPU.">VRAM процессов</th>}
-        <th>Рестарты</th><th>Создан / запущен</th>{withLogs && <th>Логи</th>}</tr></thead>
-      <tbody>{rows.map(i => { const usage = instanceUsage(i, metrics); return <tr key={i.source.source_id + i.id}>
-        <td><b>{i.name}</b><small>{i.environment} · {i.runtime}{i.controller && ` · ${i.controller}`}</small></td>
-        <td>{i.node || i.source.hostname}<small>{i.namespace}</small></td>
-        <td>
+    <Table>
+      <TableHeader><TableRow><TableHead>Экземпляр</TableHead><TableHead>Размещение</TableHead><TableHead>Состояние</TableHead><TableHead>CPU, ядра</TableHead><TableHead>Память</TableHead>
+        {withGpu && <TableHead title="Видеопамять, занятая процессами контейнера (nvidia-smi). Не загрузка GPU.">VRAM процессов</TableHead>}
+        <TableHead>Рестарты</TableHead><TableHead>Создан / запущен</TableHead>{withLogs && <TableHead>Логи</TableHead>}</TableRow></TableHeader>
+      <TableBody>{rows.map(i => { const usage = instanceUsage(i, metrics); return <TableRow key={i.source.source_id + i.id}>
+        <TableCell><a className={linkButton()} href={instanceHref(i)}>{i.name} ↗</a><small>{i.environment} · {i.runtime}{i.controller && ` · ${i.controller}`}</small></TableCell>
+        <TableCell>{i.node || i.source.hostname}<small>{i.namespace}</small></TableCell>
+        <TableCell>
           {stale(i.source)
-            ? <span className="badge warn">Данные устарели</span>
-            : <span className={`badge ${statusTone(i)}`}>{describeStatus(i)}</span>}
+            ? <span className={badge('warn')}>Данные устарели</span>
+            : <span className={badge(statusTone(i))}>{describeStatus(i)}</span>}
           {i.last_termination_reason && <small>Прошлое завершение: {i.last_termination_reason}</small>}
           {i.last_oom_at && <small>Последний OOM: {date(i.last_oom_at)}</small>}
-        </td>
-        <td><Consumption used={usage?.cpu_cores} limit={i.config.cpu_limit} show={cores} /></td>
-        <td><Consumption used={usage?.memory_bytes} limit={i.config.memory_limit_bytes} show={size} /></td>
-        {withGpu && <td><Vram instance={i} /></td>}
-        <td>{i.restarts}</td>
-        <td>{date(i.created_at)}<small>Старт: {date(i.started_at)}</small></td>
-        {withLogs && <td>{logs?.[`${i.source.source_id}/${i.id}`]
-          ? <a href={logs[`${i.source.source_id}/${i.id}`]} target="_blank" rel="noopener noreferrer">Логи в Splunk ↗</a> : '—'}</td>}
-      </tr>; })}</tbody>
-    </table>
+        </TableCell>
+        <TableCell><Consumption used={usage?.cpu_cores} limit={i.config.cpu_limit} show={cores} /></TableCell>
+        <TableCell><Consumption used={usage?.memory_bytes} limit={i.config.memory_limit_bytes} show={size} /></TableCell>
+        {withGpu && <TableCell><Vram instance={i} /></TableCell>}
+        <TableCell>{i.restarts}</TableCell>
+        <TableCell>{date(i.created_at)}<small>Старт: {date(i.started_at)}</small></TableCell>
+        {withLogs && <TableCell>{logs?.[`${i.source.source_id}/${i.id}`]
+          ? <a href={logs[`${i.source.source_id}/${i.id}`]} target="_blank" rel="noopener noreferrer">Логи в Splunk ↗</a> : '—'}</TableCell>}
+      </TableRow>; })}</TableBody>
+    </Table>
     {!rows.length && <div className="empty">Экземпляры еще не обнаружены.</div>}
   </div>;
 }
@@ -114,33 +135,49 @@ const ORIGIN_LABELS: [keyof Instance['origin'], string][] = [
   ['managed_by', 'Управляется'], ['helm_chart', 'Helm chart'], ['field_managers', 'Изменяли объект (field managers)'],
 ];
 
-export function ConfigView({ instance }: { instance: Placed }) {
+/** Pretty-printed JSON with token colors; React escapes the text, no HTML injection. */
+function Json({ value: data }: { value: unknown }) {
+  const text = JSON.stringify(data, null, 2);
+  const parts: ReactNode[] = [];
+  const token = /("(?:\\.|[^"\\])*")(\s*:)?|(-?\d+(?:\.\d+)?(?:[eE][+-]?\d+)?)|\b(true|false|null)\b|([{}[\],])/g;
+  let last = 0;
+  for (const m of text.matchAll(token)) {
+    if (m.index > last) parts.push(text.slice(last, m.index));
+    const [all, str, colon, num, lit] = m;
+    const cls = str ? (colon ? 'tk-key' : 'tk-str') : num ? 'tk-num' : lit ? 'tk-lit' : 'tk-punct';
+    parts.push(<span key={m.index} className={cls}>{str ?? all}</span>);
+    if (colon) parts.push(colon);
+    last = m.index + all.length;
+  }
+  parts.push(text.slice(last));
+  return <>{parts}</>;
+}
+
+export function ConfigView({ instance, expanded = false }: { instance: Placed; expanded?: boolean }) {
   const origin = ORIGIN_LABELS.filter(([k]) => instance.origin?.[k]);
   const held = gpuHoldings(instance);
-  return <details className="event">
+  return <details className="event" open={expanded || undefined}>
     <summary><b>{instance.name}</b><span>{instance.runtime}</span><span className="muted">{instance.node || instance.source.hostname}</span>
-      {held.length > 0 && <span className="badge info" title="Видеопамять процессов контейнера, не загрузка GPU">
+      {held.length > 0 && <span className={badge('info')} title="Видеопамять процессов контейнера, не загрузка GPU">
         VRAM {size(held.reduce((n, h) => n + (h.process.used_memory_bytes ?? 0), 0))} на {new Set(held.map(h => h.gpu.id)).size} GPU</span>}</summary>
     <dl>
       <div><dt>Создан</dt><dd>{date(instance.created_at)}</dd></div>
       <div><dt>Запущен</dt><dd>{date(instance.started_at)}</dd></div>
       {instance.finished_at && <div><dt>Завершен</dt><dd>{date(instance.finished_at)}</dd></div>}
-      {CONFIG_LABELS.map(([key, label, show]) => <div key={key}>
-        <dt>{label}</dt><dd>{(show ?? value)(instance.config[key])}</dd>
-      </div>)}
     </dl>
+    <ConfigSections instance={instance} />
     {held.length > 0 && <>
       <h3 className="subheading">Процессы на GPU</h3>
-      <div className="table-wrap"><table>
-        <thead><tr><th>GPU</th><th>PID</th><th>VRAM процесса</th></tr></thead>
-        <tbody>{held.map(h => <tr key={h.gpu.id + h.process.pid}>
-          <td>{gpuName(h)} · {h.gpu.model}<small>{h.gpu.id}</small></td>
-          <td>{h.process.pid}</td>
-          <td>{h.process.used_memory_bytes == null ? 'н/д' : size(h.process.used_memory_bytes)}
+      <div className="table-wrap"><Table>
+        <TableHeader><TableRow><TableHead>GPU</TableHead><TableHead>PID</TableHead><TableHead>VRAM процесса</TableHead></TableRow></TableHeader>
+        <TableBody>{held.map(h => <TableRow key={h.gpu.id + h.process.pid}>
+          <TableCell>{gpuName(h)} · {h.gpu.model}<small>{h.gpu.id}</small></TableCell>
+          <TableCell>{h.process.pid}</TableCell>
+          <TableCell>{h.process.used_memory_bytes == null ? 'н/д' : size(h.process.used_memory_bytes)}
             {h.gpu.memory_total_bytes != null && h.process.used_memory_bytes != null &&
-              <small>{percent(h.process.used_memory_bytes / h.gpu.memory_total_bytes)} от {size(h.gpu.memory_total_bytes)}</small>}</td>
-        </tr>)}</tbody>
-      </table></div>
+              <small>{percent(h.process.used_memory_bytes / h.gpu.memory_total_bytes)} от {size(h.gpu.memory_total_bytes)}</small>}</TableCell>
+        </TableRow>)}</TableBody>
+      </Table></div>
       <p className="note">Видеопамять, выделенная процессам контейнера, по снимку nvidia-smi от {date((instance.gpuSource ?? instance.source).observed_at)}. Загрузка GPU общая для всех его процессов и контейнеру не приписывается.</p>
     </>}
     {origin.length > 0 && <>
@@ -151,6 +188,11 @@ export function ConfigView({ instance }: { instance: Placed }) {
       </div>)}</dl>
       <p className="note">Метки и field managers показывают, чем создан экземпляр, но не подтверждают, кто его запустил.</p>
     </>}
+    <p className="note">Наблюдаемая конфигурация из снимка агента. Это не исходный Compose-файл или манифест Kubernetes.</p>
+    <details className="raw-config">
+      <summary>Исходный JSON</summary>
+      <pre className="config-code" tabIndex={0} aria-label={`Конфигурация ${instance.name} в JSON`}><code><Json value={instance.config} /></code></pre>
+    </details>
   </details>;
 }
 
@@ -198,11 +240,11 @@ export function EventItem({ e, onRelease }: { e: Audit; onRelease?: (id: number,
     <summary>
       <span className={`dot ${tone(e)}`} /><b>{title(e)}</b>
       {e.type === 'history-gap'
-        ? <span className="badge warn">Данные за период могут быть неполными</span>
+        ? <span className={badge('warn')}>Данные за период могут быть неполными</span>
         : <span>{actorLabel(e)}</span>}
       {e.release_id != null && (onRelease
-        ? <button className="badge info" onClick={ev => { ev.preventDefault(); onRelease(e.release_id!, e.service_id); }}>Релиз #{e.release_id} →</button>
-        : <span className="badge info">Релиз #{e.release_id}</span>)}
+        ? <button className={badge('info', 'cursor-pointer')} onClick={ev => { ev.preventDefault(); onRelease(e.release_id!, e.service_id); }}>Релиз #{e.release_id} →</button>
+        : <span className={badge('info')}>Релиз #{e.release_id}</span>)}
       <time>{date(e.occurred_at)}</time>
     </summary>
     <p>{e.actor_source} · получено {date(e.received_at)}</p>
@@ -227,12 +269,12 @@ export function EventItem({ e, onRelease }: { e: Audit; onRelease?: (id: number,
       <div><dt>Коммит</dt><dd>{e.commit || '—'}</dd></div>
       <div><dt>Image digest</dt><dd>{e.image_digest || '—'}</dd></div>
     </dl>}
-    {e.changes && <div className="table-wrap"><table>
-      <thead><tr><th>Поле</th><th>Было</th><th>Стало</th></tr></thead>
-      <tbody>{Object.entries(e.changes).map(([field, [before, after]]) => <tr key={field}>
-        <td>{field}</td><td>{value(before)}</td><td>{value(after)}</td>
-      </tr>)}</tbody>
-    </table></div>}
+    {e.changes && <div className="table-wrap"><Table>
+      <TableHeader><TableRow><TableHead>Поле</TableHead><TableHead>Было</TableHead><TableHead>Стало</TableHead></TableRow></TableHeader>
+      <TableBody>{Object.entries(e.changes).map(([field, [before, after]]) => <TableRow key={field}>
+        <TableCell>{field}</TableCell><TableCell>{value(before)}</TableCell><TableCell>{value(after)}</TableCell>
+      </TableRow>)}</TableBody>
+    </Table></div>}
     {(e.after || e.before) && <pre>{JSON.stringify(e.after ?? e.before, null, 2)}</pre>}
   </details>;
 }
@@ -276,7 +318,7 @@ export function History({ token, serviceId, refreshKey, onRelease }: {
     {error && <div role="alert" className="alert">{error}</div>}
     {shown.map(e => <EventItem key={[e.received_at, e.source_id, e.instance_id, e.build_id, e.uid, e.service_id, e.type].join('|')} e={e} onRelease={onRelease} />)}
     {!shown.length && <div className="empty">Событий пока нет. История появляется после подключения источников.</div>}
-    {next && <button className="more" onClick={more}>Показать еще</button>}
+    {next && <button className={outlineButton('mt-4')} onClick={more}>Показать еще</button>}
   </div>;
 }
 

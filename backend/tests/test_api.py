@@ -131,3 +131,13 @@ def test_timestamps_and_duplicate_instances(client):
     value = snapshot()
     value["instances"].append(value["instances"][0])
     assert post(client, value).status_code == 422
+
+
+def test_open_access_without_sign_in(client, monkeypatch):
+    assert client.get("/api/overview").status_code == 401
+    monkeypatch.setenv("GMAN_AUTH_DISABLED", "true")
+    assert client.get("/api/auth/info").json()["open"] is True
+    assert client.get("/api/me").json()["auth"] == "open"
+    assert client.get("/api/overview").status_code == 200
+    # An explicit credential is still checked.
+    assert client.get("/api/overview", headers=auth("wrong")).status_code == 401

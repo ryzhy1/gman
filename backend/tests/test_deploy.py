@@ -72,7 +72,7 @@ def test_portal_grafana_links_match_dashboard_variables():
     calls = []
     for path in (DEPLOY.parent / "frontend/src").glob("*.tsx"):
         calls += re.findall(r"grafanaLink\(\w+, '([\w-]+)', \{([^}]*)\}", path.read_text())
-    assert {uid for uid, _ in calls} == {"gman-service", "gman-host", "gman-k8s"}
+    assert {uid for uid, _ in calls} == {"gman-service", "gman-host", "gman-k8s", "gman-gpu", "gman-llm"}
     for uid, body in calls:
         names = set(re.findall(r"(\w+):", body))
         assert names and names <= variables[uid], (uid, names)

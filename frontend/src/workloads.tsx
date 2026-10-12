@@ -1,6 +1,8 @@
 import { useEffect, useState } from 'react';
 import { get } from './api';
 import { grafanaLink } from './format';
+import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '@/ui/table';
+import { tone as badge } from '@/ui/tone';
 
 export type WorkloadStatus = 'ok' | 'rolling' | 'degraded' | 'stuck' | 'unknown';
 /** Kubernetes workload from kube-state-metrics (GET /api/workloads); counters are null when not exported. */
@@ -70,27 +72,27 @@ export function Workloads({ token, serviceId, environment, cluster, grafanaUrl, 
 
   return <div className="workloads">
     <h3 className="subheading">Workloads Kubernetes {rows.length > 0 && <span className="count">{rows.length}</span>}
-      {failing > 0 && <span className="badge warn">требуют внимания: {failing}</span>}</h3>
+      {failing > 0 && <span className={badge('warn')}>требуют внимания: {failing}</span>}</h3>
     {error && <div role="alert" className="alert">Состояние workloads недоступно: {error}</div>}
     {data && !data.enabled && <p className="note">Состояние workloads недоступно: хранилище метрик не настроено (PROMETHEUS_URL).</p>}
     {data?.error && <div role="status" className="alert">Состояние workloads недоступно: {data.error}</div>}
     {data?.enabled && !data.error && !rows.length && <p className="note">kube-state-metrics не передал workloads этого кластера.</p>}
-    {rows.length > 0 && <div className="table-wrap"><table>
-      <thead><tr><th>Статус</th><th>Workload</th><th>{cluster ? 'Сервис' : 'Кластер'}</th><th>Доступно</th><th>Обновлено</th><th>Pending</th><th /></tr></thead>
-      <tbody>{rows.map(w => {
+    {rows.length > 0 && <div className="table-wrap"><Table>
+      <TableHeader><TableRow><TableHead>Статус</TableHead><TableHead>Workload</TableHead><TableHead>{cluster ? 'Сервис' : 'Кластер'}</TableHead><TableHead>Доступно</TableHead><TableHead>Обновлено</TableHead><TableHead>Pending</TableHead><TableHead /></TableRow></TableHeader>
+      <TableBody>{rows.map(w => {
         const [label, tone] = STATUS[w.status];
         const link = grafanaLink(grafanaUrl, 'gman-k8s', { cluster: w.cluster, namespace: w.namespace, node: null, environment: w.environment || null }, range);
-        return <tr key={`${w.cluster}/${w.namespace}/${w.kind}/${w.name}`}>
-          <td><span className={`badge ${tone}`} title={w.alerts.map(a => a.name + (a.reason ? ` (${a.reason})` : '')).join(', ') || undefined}>{label}</span></td>
-          <td>{w.kind} {w.namespace}/{w.name}{w.reasons.length > 0 && <small>{w.reasons.join(' · ')}</small>}</td>
-          <td>{cluster ? (w.service_id || 'не привязан') : w.cluster}<small>{w.environment}</small></td>
-          <td><Replicas w={w} /></td>
-          <td><Rollout w={w} /></td>
-          <td>{w.pending_pods ?? 0}</td>
-          <td>{link && <a href={link} target="_blank" rel="noreferrer">Grafana ↗</a>}</td>
-        </tr>;
-      })}</tbody>
-    </table></div>}
+        return <TableRow key={`${w.cluster}/${w.namespace}/${w.kind}/${w.name}`}>
+          <TableCell><span className={badge(tone)} title={w.alerts.map(a => a.name + (a.reason ? ` (${a.reason})` : '')).join(', ') || undefined}>{label}</span></TableCell>
+          <TableCell>{w.kind} {w.namespace}/{w.name}{w.reasons.length > 0 && <small>{w.reasons.join(' · ')}</small>}</TableCell>
+          <TableCell>{cluster ? (w.service_id || 'не привязан') : w.cluster}<small>{w.environment}</small></TableCell>
+          <TableCell><Replicas w={w} /></TableCell>
+          <TableCell><Rollout w={w} /></TableCell>
+          <TableCell>{w.pending_pods ?? 0}</TableCell>
+          <TableCell>{link && <a href={link} target="_blank" rel="noreferrer">Grafana ↗</a>}</TableCell>
+        </TableRow>;
+      })}</TableBody>
+    </Table></div>}
     {rows.length > 0 && <p className="note">Из kube-state-metrics, обновляется вместе с карточкой. «Застрял» — сработал GManWorkloadRolloutStuck
       или Progressing=False; StatefulSet с OnDelete раскатан, когда все pod-ы на новой ревизии; DaemonSet — по updated/desired узлов.</p>}
   </div>;

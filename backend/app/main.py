@@ -62,10 +62,18 @@ def token_principal(authorization):
     return None
 
 
+def open_access():
+    """GMAN_AUTH_DISABLED=true: local stand without sign-in, every request without credentials acts as admin.
+    Ignored when SSO is configured."""
+    return os.getenv("GMAN_AUTH_DISABLED", "").lower() in ("1", "true", "yes") and not auth.enabled()
+
+
 def principal(request: Request, authorization: str = Header(default=""), session: Session = Depends(db)):
     """An explicit Authorization header is authoritative; otherwise the SSO session cookie is used."""
     if authorization:
         found = token_principal(authorization)
+    elif open_access():
+        found = auth.Principal(kind="token", role="admin", subject="anonymous", name="Локальный стенд")
     else:
         found = auth.from_session(session, request.cookies.get(auth.session_cookie())) if auth.enabled() else None
     if found is None:
@@ -300,6 +308,7 @@ class GPU(Strict):
 class Node(Strict):
     """Kubernetes node with capacity and the requests of pods scheduled on it."""
     name: str = Field(max_length=300)
+    internal_ip: str = Field(default="", max_length=100)
     ready: bool
     unschedulable: bool = False
     pressure: list[str] = Field(default_factory=list, max_length=20)
@@ -374,6 +383,8 @@ class Snapshot(Strict):
     cluster: str = Field(default="", pattern=r"^[a-zA-Z0-9_.-]{0,100}$")
     agent_version: str = Field(default="", max_length=50)
     hostname: str = Field(max_length=300)
+    # docker-host: address of the host, shown with the services running on it.
+    ip: str = Field(default="", max_length=100)
     os: str = Field(default="", max_length=300)
     kernel: str = Field(default="", max_length=300)
     cpu_model: str = Field(default="", max_length=300)
@@ -514,8 +525,8 @@ def drop_cookie(response, name, path="/"):
 
 @app.get("/api/auth/info")
 def auth_info():
-    """Public: tells the portal whether to redirect to SSO or to ask for a token."""
-    return {"oidc": auth.enabled()}
+    """Public: tells the portal whether to redirect to SSO, ask for a token or open without sign-in."""
+    return {"oidc": auth.enabled(), "open": open_access()}
 
 
 @app.get("/api/auth/login")
@@ -575,7 +586,7 @@ def logout(user: auth.Principal = Depends(principal), x_csrf_token: str = Header
 @app.get("/api/me")
 def me(user: auth.Principal = Depends(reader)):
     """Who is signed in and what the portal may offer them; identities are matched against service owners."""
-    return {"auth": "oidc" if user.kind == "session" else "token", "role": user.role, "subject": user.subject,
+    return {"auth": "oidc" if user.kind == "session" else "open" if user.subject == "anonymous" else "token", "role": user.role, "subject": user.subject,
             "email": user.email, "name": user.name or user.username or user.email or user.subject,
             "identities": user.identities() if user.kind == "session" else [],
             "csrf_token": user.csrf_token or None}
@@ -749,22 +760,24 @@ def active_alerts():
 
 
 @app.get("/api/metrics/range", dependencies=[Depends(reader)])
-def metrics_range(scope: Literal["host", "container", "gpu", "k8s_container", "k8s_pod", "k8s_gpu"],
+def metrics_range(scope: Literal["host", "container", "gpu", "k8s_container", "k8s_pod", "k8s_gpu", "llm"],
                   metric: str = Query(max_length=100), range_: str = Query("1h", alias="range", max_length=10),
                   host_id: str | None = Query(None, max_length=300),
                   container_id: str | None = Query(None, max_length=300), uuid: str | None = Query(None, max_length=300),
                   pod_uid: str | None = Query(None, max_length=300),
                   container_name: str | None = Query(None, max_length=300),
-                  namespace: str | None = Query(None, max_length=300), pod_name: str | None = Query(None, max_length=300)):
+                  namespace: str | None = Query(None, max_length=300), pod_name: str | None = Query(None, max_length=300),
+                  service_id: str | None = Query(None, max_length=300), model: str | None = Query(None, max_length=300)):
     """Object parameters by scope: host: host_id; container: host_id, container_id; gpu: host_id, uuid;
-    k8s_container: pod_uid, container_name; k8s_pod: pod_uid; k8s_gpu: namespace, pod_name, container_name.
-    Any other combination is a 422."""
+    k8s_container: pod_uid, container_name; k8s_pod: pod_uid; k8s_gpu: namespace, pod_name, container_name;
+    llm: service_id, model. Any other combination is a 422."""
     if not metrics.base_url():
         raise HTTPException(503, "PROMETHEUS_URL is not configured")
     # DCGM labels pods by name, kubelet_stats by UID: the same container_name parameter maps to either label.
     container_label = "container" if scope == "k8s_gpu" else "k8s_container_name"
     matchers = {"host_id": host_id, "container_id": container_id, "UUID": uuid, "k8s_pod_uid": pod_uid,
-                container_label: container_name, "namespace": namespace, "pod": pod_name}
+                container_label: container_name, "namespace": namespace, "pod": pod_name,
+                "gman_service": service_id, "model_name": model}
     try:
         return metrics.series(scope, metric, {k: v for k, v in matchers.items() if v is not None}, range_)
     except KeyError:

@@ -2,6 +2,8 @@ import { useEffect, useState } from 'react';
 import { get, type ConfigChange, type ConfigDiff, type ConfigVersion, type ConfigVersionPage } from './api';
 import { CONFIG_LABELS, type Placed } from './components';
 import { date, value } from './format';
+import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '@/ui/table';
+import { outlineButton, tone as badge } from '@/ui/tone';
 
 const OPS: Record<ConfigChange['op'], [string, string]> = {
   added: ['Добавлено', ''], removed: ['Удалено', 'bad'], changed: ['Изменено', 'warn'],
@@ -49,21 +51,21 @@ function DiffView({ token, from, to }: { token: string; from: number; to: number
       <span>→</span>
       <b>{short(diff.to)}</b><span className="muted">{instanceName(diff.to)} · {date(diff.to.first_seen_at)}</span>
       {!diff.identical && (Object.keys(OPS) as ConfigChange['op'][]).filter(op => diff.summary[op]).map(op =>
-        <span key={op} className={`badge ${OPS[op][1]}`}>{OPS[op][0]}: {diff.summary[op]}</span>)}
+        <span key={op} className={badge(OPS[op][1])}>{OPS[op][0]}: {diff.summary[op]}</span>)}
     </div>
     {instanceKey(diff.from) !== instanceKey(diff.to) &&
       <p className="note">Версии относятся к разным экземплярам: различия могут быть не изменением, а разной настройкой экземпляров.</p>}
     {diff.identical || !diff.changes.length
       ? <div className="empty">Конфигурации совпадают.</div>
-      : <div className="table-wrap"><table className="dense">
-        <thead><tr><th>Поле</th><th>Изменение</th><th>Было</th><th>Стало</th></tr></thead>
-        <tbody>{diff.changes.map((c, n) => { const [label, show] = field(c.path); return <tr key={c.path + n}>
-          <td>{label}<small>{c.path}</small></td>
-          <td><span className={`badge ${OPS[c.op][1]}`}>{OPS[c.op][0]}</span></td>
-          <td className="diff-value">{c.op === 'added' ? '' : show(c.before)}</td>
-          <td className="diff-value">{c.op === 'removed' ? '' : show(c.after)}</td>
-        </tr>; })}</tbody>
-      </table></div>}
+      : <div className="table-wrap"><Table className="dense">
+        <TableHeader><TableRow><TableHead>Поле</TableHead><TableHead>Изменение</TableHead><TableHead>Было</TableHead><TableHead>Стало</TableHead></TableRow></TableHeader>
+        <TableBody>{diff.changes.map((c, n) => { const [label, show] = field(c.path); return <TableRow key={c.path + n}>
+          <TableCell>{label}<small>{c.path}</small></TableCell>
+          <TableCell><span className={badge(OPS[c.op][1])}>{OPS[c.op][0]}</span></TableCell>
+          <TableCell className="diff-value">{c.op === 'added' ? '' : show(c.before)}</TableCell>
+          <TableCell className="diff-value">{c.op === 'removed' ? '' : show(c.after)}</TableCell>
+        </TableRow>; })}</TableBody>
+      </Table></div>}
   </>;
 }
 
@@ -121,17 +123,17 @@ export function ConfigHistory({ token, serviceId, instances, refreshKey }:
     </div>
     {error && <div role="alert" className="alert">{error}</div>}
     {loaded && !versions.length && <div className="empty">Версий конфигурации пока нет. Они появляются после первого снимка агента.</div>}
-    {versions.length > 0 && <div className="table-wrap"><table className="dense">
-      <thead><tr><th>Было</th><th>Стало</th><th>Версия</th><th>Экземпляр</th><th>Наблюдалась</th></tr></thead>
-      <tbody>{versions.map(v => <tr key={v.id} className={v.id === from || v.id === to ? 'picked' : ''}>
-        <td><input type="radio" name="config-from" aria-label={`Было: ${short(v)}`} checked={v.id === from} onChange={() => setFrom(v.id)} /></td>
-        <td><input type="radio" name="config-to" aria-label={`Стало: ${short(v)}`} checked={v.id === to} onChange={() => setTo(v.id)} /></td>
-        <td><b>{short(v)}</b>{v.current && <span className="badge">Текущая</span>}</td>
-        <td>{instanceName(v)}<small>{v.environment || '—'} · {v.source_id}</small></td>
-        <td>{date(v.first_seen_at)}<small>до {date(v.last_seen_at)}</small></td>
-      </tr>)}</tbody>
-    </table></div>}
-    {next && <button className="more" onClick={more}>Показать еще</button>}
+    {versions.length > 0 && <div className="table-wrap"><Table className="dense">
+      <TableHeader><TableRow><TableHead>Было</TableHead><TableHead>Стало</TableHead><TableHead>Версия</TableHead><TableHead>Экземпляр</TableHead><TableHead>Наблюдалась</TableHead></TableRow></TableHeader>
+      <TableBody>{versions.map(v => <TableRow key={v.id} className={v.id === from || v.id === to ? 'picked' : ''}>
+        <TableCell><input type="radio" name="config-from" aria-label={`Было: ${short(v)}`} checked={v.id === from} onChange={() => setFrom(v.id)} /></TableCell>
+        <TableCell><input type="radio" name="config-to" aria-label={`Стало: ${short(v)}`} checked={v.id === to} onChange={() => setTo(v.id)} /></TableCell>
+        <TableCell><b>{short(v)}</b>{v.current && <span className={badge()}>Текущая</span>}</TableCell>
+        <TableCell>{instanceName(v)}<small>{v.environment || '—'} · {v.source_id}</small></TableCell>
+        <TableCell>{date(v.first_seen_at)}<small>до {date(v.last_seen_at)}</small></TableCell>
+      </TableRow>)}</TableBody>
+    </Table></div>}
+    {next && <button className={outlineButton('mt-4')} onClick={more}>Показать еще</button>}
 
     {versions.length > 0 && <>
       <h3 className="subheading">Различия</h3>

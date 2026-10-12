@@ -1,6 +1,8 @@
 import { useEffect, useState } from 'react';
 import { get, type AlertList } from './api';
 import { date } from './format';
+import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '@/ui/table';
+import { tone as badge } from '@/ui/tone';
 
 /** Runbooks for deploy/alerts/rules.yaml; alert annotations link here as <portal>/#alerts/<name>. */
 const RUNBOOKS: [string, string, string[]][] = [
@@ -70,8 +72,8 @@ const RUNBOOKS: [string, string, string[]][] = [
   ['GManApiMetricsDown', 'API не отдает /metrics', [
     'docker compose ps api; логи API, доступность PostgreSQL.',
     'Алерты по inventory (молчащие источники, OOMKilled, CrashLoopBackOff) в это время не вычисляются.']],
-  ['GManGpuTelemetryAbsent', 'Нет метрик DCGM', [
-    'Проверить контейнер DCGM Exporter на хосте (127.0.0.1:9400/metrics) или pod GPU Operator на узле.',
+  ['GManGpuTelemetryAbsent', 'Нет метрик GPU', [
+    'Метка source=nvidia_gpu_exporter — проверить nvidia_gpu_exporter на хосте (127.0.0.1:9835/metrics), иначе DCGM Exporter (127.0.0.1:9400/metrics) или pod GPU Operator на узле.',
     'nvidia-smi на хосте: GPU мог пропасть с шины (тогда будет и XID 79).']],
   ['GManGpuXidError', 'Ошибка XID', [
     'Найти контекст: dmesg | grep -i xid, nvidia-smi -q на хосте.',
@@ -93,6 +95,24 @@ const RUNBOOKS: [string, string, string[]][] = [
   ['GManGpuHardwareSlowdown', 'Аппаратное снижение частот', [
     'hw_slowdown/hw_power_brake: внешний сигнал от платформы — питание (PSU), перегрев шасси.',
     'Проверить журнал BMC/IPMI и блоки питания сервера.']],
+  ['GManLlmEndpointDown', 'Сервер модели не отвечает', [
+    'docker ps / kubectl get pod: контейнер vLLM запущен? Логи — docker logs или kubectl logs (часто CUDA out of memory при загрузке модели).',
+    'curl http://127.0.0.1:<gman.metrics.port>/metrics на хосте: порт из метки gman.metrics.port (Docker) или аннотации gman.io/metrics-port (Kubernetes).',
+    'Если сервер работает, а метрики не читаются — проверить, что порт опубликован на хосте и совпадает с меткой.']],
+  ['GManLlmSlowFirstToken', 'Долгий первый токен (TTFT)', [
+    'Дашборд GMan · LLM, «Фазы запроса»: если растет очередь — не хватает реплик или KV-кэша; если prefill — длинные промпты.',
+    'Очередь: добавить реплику, поднять --max-num-seqs, освободить KV-кэш (--gpu-memory-utilization, меньший --max-model-len).',
+    'Prefill: включить --enable-chunked-prefill и prefix caching, проверить длину промптов на панели «Длина промпта».',
+    'Порог 5 с задан в deploy/alerts/rules.yaml (GManLlmSlowFirstToken).']],
+  ['GManLlmQueueBacklog', 'Очередь запросов к модели', [
+    'Запросы ждут места в батче дольше 5 с: нагрузка выше пропускной способности сервера.',
+    'Проверить KV-кэш и вытеснения на дашборде GMan · LLM; добавить реплику или GPU, ограничить конкурентность клиентов.']],
+  ['GManLlmKvCacheFull', 'KV-кэш заполнен', [
+    'Новые запросы ждут места, длинные контексты вытесняются (см. «Вытеснения»).',
+    'Увеличить --gpu-memory-utilization, уменьшить --max-model-len или --max-num-seqs, включить квантизацию KV-кэша (--kv-cache-dtype fp8), добавить реплику.']],
+  ['GManLlmPreemptions', 'Вытеснение запросов', [
+    'vLLM выгружает запросы из KV-кэша и пересчитывает их: задержки растут, пропускная способность падает.',
+    'Те же меры, что для GManLlmKvCacheFull; в логах vLLM — предупреждения о preemption.']],
   ['GManInstanceOOMKilled', 'OOMKilled', [
     'Сравнить потребление памяти с лимитом на вкладке «Ресурсы» сервиса.',
     'Поднять лимит или найти утечку; в Kubernetes — kubectl describe pod, раздел Last State.',
@@ -170,17 +190,17 @@ export function Alerts({ token, refreshKey }: { token: string; refreshKey: strin
       <p className="muted">Из Alertmanager, без заглушенных (silence) и подавленных: при падении узла показывается сам узел, а не его GPU и контейнеры.</p>
       {problem && <div role="status" className="alert">Алерты недоступны: {problem}</div>}
       {data && !problem && !data.alerts.length && <div className="empty">Активных алертов нет.</div>}
-      {data && data.alerts.length > 0 && <div className="table-wrap"><table>
-        <thead><tr><th>Важность</th><th>Алерт</th><th>Объект</th><th>С</th><th>Что делать</th></tr></thead>
-        <tbody>{data.alerts.map(a => <tr key={a.name + JSON.stringify(a.labels)}>
-          <td><span className={`badge ${a.labels.severity === 'critical' ? 'bad' : 'warn'}`}>{a.labels.severity ?? '—'}</span></td>
-          <td><b>{a.summary || a.name}</b><small>{a.name}</small><small>{a.description}</small></td>
-          <td>{OBJECT_LABELS.filter(([k]) => a.labels[k]).map(([k, label]) =>
-            <small key={k}>{label}: {a.labels[k]}</small>)}</td>
-          <td>{date(a.starts_at)}</td>
-          <td><a href={`#alerts/${a.name}`}>Runbook</a></td>
-        </tr>)}</tbody>
-      </table></div>}
+      {data && data.alerts.length > 0 && <div className="table-wrap"><Table>
+        <TableHeader><TableRow><TableHead>Важность</TableHead><TableHead>Алерт</TableHead><TableHead>Объект</TableHead><TableHead>С</TableHead><TableHead>Что делать</TableHead></TableRow></TableHeader>
+        <TableBody>{data.alerts.map(a => <TableRow key={a.name + JSON.stringify(a.labels)}>
+          <TableCell><span className={badge(a.labels.severity === 'critical' ? 'bad' : 'warn')}>{a.labels.severity ?? '—'}</span></TableCell>
+          <TableCell><b>{a.summary || a.name}</b><small>{a.name}</small><small>{a.description}</small></TableCell>
+          <TableCell>{OBJECT_LABELS.filter(([k]) => a.labels[k]).map(([k, label]) =>
+            <small key={k}>{label}: {a.labels[k]}</small>)}</TableCell>
+          <TableCell>{date(a.starts_at)}</TableCell>
+          <TableCell><a href={`#alerts/${a.name}`}>Runbook</a></TableCell>
+        </TableRow>)}</TableBody>
+      </Table></div>}
     </section>
     <section>
       <h2>Runbooks</h2>

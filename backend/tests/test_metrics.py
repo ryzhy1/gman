@@ -33,7 +33,7 @@ def test_current_groups_by_object(client, configured):
         query = request.url.params["query"]
         if "container_cpu_usage" in query:
             return httpx.Response(200, json=vector(({"host_id": "h", "container_id": "c1"}, "0.5")))
-        if "DCGM_FI_DEV_GPU_TEMP" in query:
+        if "gman:gpu_temperature_celsius:max" in query:
             return httpx.Response(200, json=vector(({"host_id": "h", "UUID": "GPU-1"}, "61")))
         if "system_cpu_utilization_ratio" in query and "idle" in query:
             return httpx.Response(200, json=vector(({"host_id": "h"}, "NaN")))
@@ -116,3 +116,25 @@ def test_range_kubernetes_scopes(client, configured):
     for value in bad:
         assert client.get("/api/metrics/range", headers=auth("read"), params=value).status_code == 422, value
     assert len(seen) == 2
+
+
+def test_llm_scope_by_service_and_model(client, configured):
+    seen = []
+
+    def handler(request):
+        query = request.url.params["query"]
+        seen.append(query)
+        if request.url.path.endswith("/query") and "gman:llm_ttft_seconds:p95" in query:
+            return httpx.Response(200, json=vector(({"gman_service": "chat", "model_name": "meta-llama/Llama-3.1-8B"}, "0.42")))
+        if request.url.path.endswith("/query_range"):
+            return httpx.Response(200, json={"status": "success", "data": {"resultType": "matrix", "result": []}})
+        return httpx.Response(200, json=vector())
+    prometheus(handler)
+    data = client.get("/api/metrics/current", headers=auth("read")).json()
+    assert data["llm"] == {"chat/meta-llama/Llama-3.1-8B": {"ttft_p95_seconds": 0.42}}
+    params = {"scope": "llm", "metric": "ttft_p95_seconds", "service_id": "chat", "model": "meta-llama/Llama-3.1-8B"}
+    assert client.get("/api/metrics/range", headers=auth("read"), params=params).status_code == 200
+    assert 'gman_service="chat",model_name="meta-llama/Llama-3.1-8B"' in seen[-1]
+    # The model alone does not identify an object.
+    params.pop("service_id")
+    assert client.get("/api/metrics/range", headers=auth("read"), params=params).status_code == 422

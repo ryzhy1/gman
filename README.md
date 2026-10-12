@@ -119,6 +119,27 @@ init_env.py не перезаписывает существующий .env. Н�
 server-01 и cluster-01; для остальных узлов добавьте отдельные токены в
 GMAN_AGENT_TOKENS и пересоздайте API. Не используйте один токен для всех серверов.
 
+## Метрики локального Mac
+
+Compose запускает шлюз OTel, но не сборщик показателей хоста. Для CPU/RAM/диска/сети
+Mac и метрик Docker Desktop запустите **нативный** `otelcol-contrib` 0.162.0 для
+darwin/arm64 с конфигурацией `deploy/otel-local.yaml`:
+
+```sh
+GMAN_HOST_ID=server-01 \
+DOCKER_SOCKET="unix://$HOME/.docker/run/docker.sock" \
+.local/telemetry/otelcol-contrib --config=deploy/otel-local.yaml
+```
+
+Бинарный файл в примере размещён в `.local/telemetry/` (каталог исключён из Git).
+`GMAN_HOST_ID` должен совпадать с `--source-id` inventory-агента, который запускается
+отдельно, как описано в «Подключение inventory». Если используется другой Docker
+context, укажите его локальный socket. Эта конфигурация отправляет данные только в
+локальный шлюз `127.0.0.1:4317`; для удалённого production-хоста используйте TLS-конфигурацию.
+Первые значения появляются примерно через минуту; скорости CPU/сети требуют нескольких
+снимков. Хостовые показатели относятся к Mac, контейнерные — к VM Docker Desktop.
+Нативные процессы нужно запускать снова после перезагрузки Mac.
+
 ## Production-развертывание
 
 Один сервер GMan за nginx с TLS; удаленные узлы отправляют inventory по HTTPS и метрики
@@ -670,7 +691,8 @@ GMAN_EVENT_ID по умолчанию стабилен для повтора т�
 deploy/otel-agent.example.yaml — Collector contrib на Docker-хосте как host process:
 метрики хоста (CPU по состояниям, память, swap, load, ФС, диски, сеть, процессы),
 контейнеров (docker_stats: CPU, память, сеть, block I/O, throttling, pids, рестарты)
-и NVIDIA DCGM Exporter с 127.0.0.1:9400. Нужны OTEL_GATEWAY, GMAN_HOST_ID и клиентские
+NVIDIA DCGM Exporter с 127.0.0.1:9400 и/или nvidia_gpu_exporter с 127.0.0.1:9835, а также
+серверы vLLM в контейнерах (см. «Метрики LLM»). Нужны OTEL_GATEWAY, GMAN_HOST_ID и клиентские
 TLS-сертификаты. **GMAN_HOST_ID должен совпадать с --source-id inventory-агента**:
 по нему портал связывает метрики с хостом, а по ID контейнера — с экземпляром.
 Docker labels gman.service/gman.environment попадают в метрики как gman_service/
@@ -781,6 +803,62 @@ dcgmExporter:
 
 Отдельный chart dcgm-exporter: тот же ConfigMap смонтировать в /etc/dcgm-exporter и
 передать `arguments: ["-f", "/etc/dcgm-exporter/dcgm-metrics.csv"]`.
+
+### nvidia_gpu_exporter
+
+Вместо DCGM (или вместе с ним) Collector читает
+[nvidia_gpu_exporter](https://github.com/utkuozdemir/nvidia_gpu_exporter) с 127.0.0.1:9835 —
+если он уже стоит на хосте, ничего ставить не нужно. Правила записи `gman:gpu_*`
+(deploy/alerts/rules.yaml, группа gman-recording) сводят оба источника в одни ряды по
+`host_id` и `UUID` (uuid экспортера дополняется префиксом `GPU-`, как у DCGM и nvidia-smi),
+DCGM для одной карты предпочтительнее. На этих рядах построены дашборд «GMan · GPU»
+(ссылка «GPU ↗» в карточке хоста), GPU-панели «GMan · Хост», значения GPU в портале и алерты
+перегрева, троттлинга, ECC и XID.
+
+```sh
+docker run -d --name nvidia-gpu-exporter --restart unless-stopped --gpus all \
+  -p 127.0.0.1:9835:9835 utkuozdemir/nvidia_gpu_exporter:<версия> --collect.compute-apps
+```
+
+`--collect.compute-apps` дает VRAM процессов на дашборде. XID, энергия и PCIe отдаются только
+бэкендом nvml экспортера; с бэкендом по умолчанию (exec, nvidia-smi) этих панелей нет. Мощность
+от лимита, вентилятор и P-state есть только у nvidia_gpu_exporter, температура памяти и код XID
+в портале — только у DCGM.
+
+### Метрики LLM (vLLM)
+
+Collector читает `/metrics` серверов vLLM на своем хосте (Kubernetes — на своем узле); имена
+`vllm:*` проходят gateway и Prometheus без изменений. Правила группы gman-llm считают по сервису каталога
+(`gman_service`) и модели (`model_name` = `--served-model-name`) за 5 минут: TTFT p50/p95/p99,
+время на токен (TPOT) p50/p95, полное время запроса, ожидание в очереди, запросы/с,
+токены/с, запросы в работе и в очереди, заполненность KV-кэша, вытеснения и попадания в
+prefix cache. Поддерживаются имена vLLM до 0.10 и после (inter_token_latency,
+kv_cache_usage_perc).
+
+Docker — метки контейнера (порт — опубликованный на хосте, с `network_mode: host` — свой):
+
+```sh
+docker run -d --name llama --gpus all -p 8000:8000 \
+  --label gman.service=chat --label gman.environment=prod \
+  --label gman.metrics=vllm --label gman.metrics.port=8000 \
+  vllm/vllm-openai:<версия> --model meta-llama/Llama-3.1-8B-Instruct --served-model-name llama-3.1-8b
+```
+
+Kubernetes — метка шаблона Pod `gman.service: chat` и аннотации
+`gman.io/metrics: vllm`, `gman.io/metrics-port: "8000"` (порт контейнера).
+
+Где видно: на странице сервиса — блок «Модели (vLLM)» на «Обзоре» (TTFT, TPOT, запросы,
+токены, KV-кэш) и графики на «Ресурсах»; дашборд «GMan · LLM» (`var-service`, `var-model`) —
+задержки по перцентилям и фазам (очередь, prefill, decode), распределение TTFT, причины
+завершения запросов, токены, очередь, KV-кэш по репликам, длины промптов и ответов, загрузка
+и VRAM GPU хостов модели. Алерты: GManLlmEndpointDown (сервер не отвечает 3 минуты),
+GManLlmSlowFirstToken (TTFT p95 > 5 с 10 минут), GManLlmQueueBacklog (ожидание p95 > 5 с),
+GManLlmKvCacheFull (> 95% 15 минут), GManLlmPreemptions (> 0,1/с). Пороги — в
+deploy/alerts/rules.yaml.
+
+Проверено: правила и алерты — promtool на синтетических рядах (deploy/alerts/rules.test.yaml),
+конфигурации Collector — `otelcol-contrib validate` 0.162.0. На настоящих vLLM и
+nvidia_gpu_exporter еще не проверено.
 
 ### kube-state-metrics
 

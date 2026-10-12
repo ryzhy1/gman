@@ -2,7 +2,8 @@
 
 Clients pick from fixed query templates; they never send PromQL. Metric and label
 names match deploy/otel-agent.example.yaml and deploy/otel-k8s.yaml through the gateway's
-Prometheus exporter (verified against otelcol-contrib 0.162.0) and the DCGM Exporter's own names.
+Prometheus exporter (verified against otelcol-contrib 0.162.0), the DCGM Exporter's own names and the
+recording rules of deploy/alerts/rules.yaml (gman:*).
 """
 import os
 import re
@@ -36,16 +37,18 @@ CONTAINER = {
     "block_io_bytes_per_second": lambda s: f'sum by (host_id, container_id) (rate(container_blockio_io_service_bytes_recursive_total{s()}[2m]))',
     "pids": lambda s: f'max by (host_id, container_id) (container_pids_count{s()})',
 }
+# GPU series of deploy/alerts/rules.yaml (group gman-recording): DCGM Exporter or nvidia_gpu_exporter, whichever
+# the host runs; memory temperature and the last XID code only come from DCGM.
 GPU = {
-    "utilization_percent": lambda s: f'max by (host_id, UUID) (DCGM_FI_DEV_GPU_UTIL{s()})',
-    "memory_copy_utilization_percent": lambda s: f'max by (host_id, UUID) (DCGM_FI_DEV_MEM_COPY_UTIL{s()})',
-    "memory_used_bytes": lambda s: f'max by (host_id, UUID) (DCGM_FI_DEV_FB_USED{s()}) * 1048576',
-    "memory_total_bytes": lambda s: f'(max by (host_id, UUID) (DCGM_FI_DEV_FB_USED{s()}) + max by (host_id, UUID) (DCGM_FI_DEV_FB_FREE{s()})) * 1048576',
-    "temperature_c": lambda s: f'max by (host_id, UUID) (DCGM_FI_DEV_GPU_TEMP{s()})',
+    "utilization_percent": lambda s: f'max by (host_id, UUID) (gman:gpu_utilization:ratio{s()}) * 100',
+    "memory_copy_utilization_percent": lambda s: f'max by (host_id, UUID) (gman:gpu_memory_activity:ratio{s()}) * 100',
+    "memory_used_bytes": lambda s: f'max by (host_id, UUID) (gman:gpu_memory_used_bytes:max{s()})',
+    "memory_total_bytes": lambda s: f'max by (host_id, UUID) (gman:gpu_memory_total_bytes:max{s()})',
+    "temperature_c": lambda s: f'max by (host_id, UUID) (gman:gpu_temperature_celsius:max{s()})',
     "memory_temperature_c": lambda s: f'max by (host_id, UUID) (DCGM_FI_DEV_MEMORY_TEMP{s()})',
-    "power_w": lambda s: f'max by (host_id, UUID) (DCGM_FI_DEV_POWER_USAGE{s()})',
-    "sm_clock_mhz": lambda s: f'max by (host_id, UUID) (DCGM_FI_DEV_SM_CLOCK{s()})',
-    "memory_clock_mhz": lambda s: f'max by (host_id, UUID) (DCGM_FI_DEV_MEM_CLOCK{s()})',
+    "power_w": lambda s: f'max by (host_id, UUID) (gman:gpu_power_watts:max{s()})',
+    "sm_clock_mhz": lambda s: f'max by (host_id, UUID) (gman:gpu_sm_clock_hertz:max{s()}) / 1e6',
+    "memory_clock_mhz": lambda s: f'max by (host_id, UUID) (gman:gpu_memory_clock_hertz:max{s()}) / 1e6',
     "last_xid_error": lambda s: f'max by (host_id, UUID) (DCGM_FI_DEV_XID_ERRORS{s()})',
 }
 # Kubernetes (deploy/otel-k8s.yaml, kubelet_stats receiver). Keyed like the inventory agent's instance id
@@ -75,12 +78,28 @@ K8S_GPU = {
     "gpu_utilization_percent": lambda s: f'max by ({K8S_G}) (DCGM_FI_DEV_GPU_UTIL{s(pod__ne="")})',
     "gpu_memory_used_bytes": lambda s: f'sum by ({K8S_G}) (max by ({K8S_G}, UUID) (DCGM_FI_DEV_FB_USED{s(pod__ne="")})) * 1048576',
 }
+# vLLM servers per catalog service and model over all replicas (rules.yaml, group gman-llm; 5-minute windows).
+# Latency quantiles are absent while a model serves no requests.
+LLM_K = "gman_service, model_name"
+LLM = {
+    "ttft_p50_seconds": lambda s: f'max by ({LLM_K}) (gman:llm_ttft_seconds:p50{s()})',
+    "ttft_p95_seconds": lambda s: f'max by ({LLM_K}) (gman:llm_ttft_seconds:p95{s()})',
+    "tpot_p95_seconds": lambda s: f'max by ({LLM_K}) (gman:llm_tpot_seconds:p95{s()})',
+    "e2e_p95_seconds": lambda s: f'max by ({LLM_K}) (gman:llm_e2e_seconds:p95{s()})',
+    "requests_per_second": lambda s: f'max by ({LLM_K}) (gman:llm_requests:rate5m{s()})',
+    "generation_tokens_per_second": lambda s: f'max by ({LLM_K}) (gman:llm_generation_tokens:rate5m{s()})',
+    "prompt_tokens_per_second": lambda s: f'max by ({LLM_K}) (gman:llm_prompt_tokens:rate5m{s()})',
+    "requests_running": lambda s: f'max by ({LLM_K}) (gman:llm_requests_running:sum{s()})',
+    "requests_waiting": lambda s: f'max by ({LLM_K}) (gman:llm_requests_waiting:sum{s()})',
+    "kv_cache_usage": lambda s: f'max by ({LLM_K}) (gman:llm_kv_cache_usage:max{s()})',
+}
 # scope: (templates, object key labels, separator of the key in current()).
 SCOPES = {"host": (HOST, ("host_id",), "/"), "container": (CONTAINER, ("host_id", "container_id"), "/"),
           "gpu": (GPU, ("host_id", "UUID"), "/"),
           "k8s_container": (K8S_CONTAINER, ("k8s_pod_uid", "k8s_container_name"), ":"),
           "k8s_pod": (K8S_POD, ("k8s_pod_uid",), "/"),
-          "k8s_gpu": (K8S_GPU, ("namespace", "pod", "container"), "/")}
+          "k8s_gpu": (K8S_GPU, ("namespace", "pod", "container"), "/"),
+          "llm": (LLM, ("gman_service", "model_name"), "/")}
 
 # Tests replace this with a client on a mock transport.
 client = httpx.Client(timeout=10)
@@ -128,7 +147,7 @@ def number(value):
 def current():
     """Latest value of every template, keyed by scope and then by object: "host_id/object_id" for
     Docker hosts, "pod_uid:container_name" (the inventory instance id) and "pod_uid" for Kubernetes,
-    "namespace/pod/container" for GPUs allocated to Kubernetes containers."""
+    "namespace/pod/container" for GPUs allocated to Kubernetes containers, "service/model" for LLM servers."""
     jobs = [(scope, name, template(selector({})), keys, sep)
             for scope, (templates, keys, sep) in SCOPES.items() for name, template in templates.items()]
     with ThreadPoolExecutor(max_workers=8) as pool:
