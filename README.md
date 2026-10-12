@@ -137,7 +137,8 @@ PostgreSQL и администратора Grafana создает `python3 deplo
 
 ```sh
 tar xzf gman-host.tar.gz && cd gman-host
-GMAN_SERVER=10.0.0.5 GMAN_SOURCE_ID=server-02 docker compose -f deploy/host/compose.yaml up -d --build
+cp deploy/host/.env.example deploy/host/.env   # заполнить GMAN_SERVER и GMAN_SOURCE_ID
+docker compose -f deploy/host/compose.yaml up -d --build
 ```
 
 Если порты сервера GMan изменены, добавьте GMAN_PORT (портал) и GMAN_OTLP_PORT (OTLP gRPC).

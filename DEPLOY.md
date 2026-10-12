@@ -81,9 +81,23 @@ scp gman-host.tar.gz user@server-02:
 
 ```sh
 tar xzf gman-host.tar.gz && cd gman-host
-GMAN_SERVER=10.0.0.5 GMAN_SOURCE_ID=server-02 \
-  docker compose -f deploy/host/compose.yaml up -d --build
+cp deploy/host/.env.example deploy/host/.env
+nano deploy/host/.env                     # GMAN_SERVER и GMAN_SOURCE_ID, при необходимости порты
+docker compose -f deploy/host/compose.yaml up -d --build
 ```
+
+Пример `deploy/host/.env`:
+
+```sh
+GMAN_SERVER=10.0.0.5
+GMAN_SOURCE_ID=server-02
+#GMAN_PORT=8080
+#GMAN_OTLP_PORT=4317
+#GMAN_HOST_IP=
+```
+
+Переменные можно передать и в команде, без файла:
+`GMAN_SERVER=10.0.0.5 GMAN_SOURCE_ID=server-02 docker compose -f deploy/host/compose.yaml up -d --build`.
 
 | Переменная | Значение |
 | --- | --- |
@@ -92,8 +106,6 @@ GMAN_SERVER=10.0.0.5 GMAN_SOURCE_ID=server-02 \
 | `GMAN_PORT` | порт портала сервера GMan, если менялся (8080) |
 | `GMAN_OTLP_PORT` | OTLP-порт сервера GMan, если менялся (4317) |
 | `GMAN_HOST_IP` | адрес для портала, если нужен не адрес маршрута по умолчанию |
-
-Чтобы не передавать их в каждой команде, запишите их в `gman-host/deploy/host/.env`.
 
 С сервера должны быть доступны `GMAN_PORT` и `GMAN_OTLP_PORT` сервера GMan. Сервер появится в
 «Серверы и GPU» через несколько секунд, метрики — примерно через минуту. Если сервер не появился:

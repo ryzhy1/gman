@@ -1,7 +1,8 @@
 # Connects one more Docker host to a GMan server: containers (with env and .env files), host info, host and container
 # metrics. Run on that host from a copy of this repository:
 #   GMAN_SERVER=10.0.0.5 GMAN_SOURCE_ID=server-02 docker compose -f deploy/host/compose.yaml up -d --build
-# or put both variables into deploy/host/.env and run `docker compose -f deploy/host/compose.yaml up -d --build`.
+# or copy deploy/host/.env.example to deploy/host/.env, fill it in and run
+# `docker compose -f deploy/host/compose.yaml up -d --build`.
 #   GMAN_SERVER     address of the GMan server (its portal and OTLP ports must be reachable from this host).
 #   GMAN_SOURCE_ID  unique name of this host in GMan, e.g. its hostname.
 #   GMAN_PORT       portal port of the GMan server, default 8080.
