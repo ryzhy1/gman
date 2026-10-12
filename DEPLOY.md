@@ -64,15 +64,33 @@ docker compose down -v                     # остановка с удален�
 
 Production с TLS и mTLS для метрик, бэкапами и nginx — README, «Production-развертывание».
 
+### Видеокарты NVIDIA
+
+Если на сервере GMan есть NVIDIA, раскомментируйте в `.env`:
+
+```sh
+COMPOSE_FILE=compose.yaml:deploy/compose.nvidia.yaml
+```
+
+и выполните `docker compose up --build -d`. Добавятся:
+
+- доступ агента к GPU — модель, загрузка, VRAM, температура, мощность, частоты, ECC, а также какой
+  контейнер и сколько VRAM занимает на карте (`nvidia-smi`);
+- контейнер `dcgm-exporter` (NVIDIA DCGM Exporter) — графики GPU в портале и Grafana, алерты по GPU.
+
+На хосте должны быть драйвер NVIDIA и NVIDIA Container Toolkit
+(`docker run --rm --gpus all ubuntu nvidia-smi` должен показать карты). Без них контейнеры с GPU
+не запустятся, поэтому на серверах без NVIDIA эту строку не включайте.
+
 ## 2. Остальные серверы
 
-На каждом сервере работают два контейнера:
+На каждом сервере работают два контейнера (и `dcgm-exporter` на серверах с NVIDIA):
 
 - `agent` — контейнеры с конфигурацией, переменными окружения и `.env`-файлами, сведения о
-  сервере (ОС, ядро, CPU, память, аптайм);
-- `node-otel` — загрузка CPU, памяти, дисков и сети сервера и каждого контейнера.
+  сервере (ОС, ядро, CPU, память, аптайм), видеокарты;
+- `node-otel` — загрузка CPU, памяти, дисков и сети сервера и каждого контейнера, метрики GPU.
 
-Оба в сети хоста, поэтому портал показывает настоящий IP сервера.
+Все в сети хоста, поэтому портал показывает настоящий IP сервера.
 
 ### Архив
 
@@ -85,14 +103,16 @@ scp gman-host.tar.gz user@server-02:
 
 ### Запуск на сервере
 
+Все команды — из каталога `gman-host/deploy/host`:
+
 ```sh
-tar xzf gman-host.tar.gz && cd gman-host
-cp deploy/host/.env.example deploy/host/.env
-vi deploy/host/.env                       # GMAN_SERVER и GMAN_SOURCE_ID, при необходимости порты
-docker compose -f deploy/host/compose.yaml up -d --build
+tar xzf gman-host.tar.gz && cd gman-host/deploy/host
+cp .env.example .env
+vi .env                                   # GMAN_SERVER и GMAN_SOURCE_ID, при необходимости порты и GPU
+docker compose up -d --build
 ```
 
-Пример `deploy/host/.env`:
+Пример `.env`:
 
 ```sh
 GMAN_SERVER=10.0.0.5
@@ -100,39 +120,39 @@ GMAN_SOURCE_ID=server-02
 #GMAN_PORT=8080
 #GMAN_OTLP_PORT=4317
 #GMAN_HOST_IP=
+# сервер с NVIDIA (драйвер и NVIDIA Container Toolkit, как выше):
+#COMPOSE_FILE=compose.yaml:compose.nvidia.yaml
 ```
-
-Переменные можно передать и в команде, без файла:
-`GMAN_SERVER=10.0.0.5 GMAN_SOURCE_ID=server-02 docker compose -f deploy/host/compose.yaml up -d --build`.
 
 | Переменная | Значение |
 | --- | --- |
-| `GMAN_SERVER` | адрес сервера GMan |
+| `GMAN_SERVER` | адрес сервера GMan (IP или домен, без порта) |
 | `GMAN_SOURCE_ID` | уникальное имя сервера в портале, например его hostname |
 | `GMAN_PORT` | порт портала сервера GMan, если менялся (8080) |
 | `GMAN_OTLP_PORT` | OTLP-порт сервера GMan, если менялся (4317) |
 | `GMAN_HOST_IP` | адрес для портала, если нужен не адрес маршрута по умолчанию |
+| `COMPOSE_FILE` | `compose.yaml:compose.nvidia.yaml` — включить видеокарты NVIDIA |
 
 С сервера должны быть доступны `GMAN_PORT` и `GMAN_OTLP_PORT` сервера GMan. Сервер появится в
 «Серверы и GPU» через несколько секунд, метрики — примерно через минуту. Если сервер не появился:
-`docker compose -f deploy/host/compose.yaml logs agent` — при успехе там строки
-`200 {"accepted":true}`.
+`docker compose logs agent` — при успехе там строки `200 {"accepted":true}`. Метрики GPU:
+`docker compose logs dcgm-exporter`.
 
 ### Обновление и отключение
 
 ```sh
 # после изменений агента: пересобрать архив, скопировать, распаковать поверх и
-docker compose -f deploy/host/compose.yaml up -d --build
+docker compose up -d --build
 # отключить сервер
-docker compose -f deploy/host/compose.yaml down -v
+docker compose down -v
 ```
 
 Данные отключенного сервера остаются в портале с отметкой «Устарело».
 
 ## Ограничения
 
-- GPU не собираются ни с сервера GMan, ни с подключенных серверов: в контейнеры агента и
-  Collector не проброшены nvidia-smi и DCGM Exporter.
+- Видеокарты AMD агент показывает по sysfs (модель, загрузка, VRAM, температуры, частоты) без
+  графиков: метрики GPU в Prometheus есть только для NVIDIA (DCGM).
 - Kubernetes-кластеры подключаются отдельно: агент с `--runtime kubernetes` и
   `deploy/otel-k8s.yaml` (README, «Подключение inventory»).
 - Данные с серверов идут по HTTP и OTLP без шифрования. Через интернет — VPN или

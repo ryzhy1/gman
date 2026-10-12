@@ -1,0 +1,24 @@
+# NVIDIA GPUs of the GMan server. Needs the NVIDIA driver and NVIDIA Container Toolkit on the host. Enable it in .env:
+#   COMPOSE_FILE=compose.yaml:deploy/compose.nvidia.yaml
+# then `docker compose up --build -d`. Adds GPU access for the agent (nvidia-smi: GPUs and which container holds
+# them), DCGM Exporter and its scraping by node-otel (charts, dashboards, GPU alerts).
+x-nvidia: &nvidia
+  deploy:
+    resources:
+      reservations:
+        devices:
+          - {driver: nvidia, count: all, capabilities: [gpu, utility]}
+services:
+  agent:
+    <<: *nvidia
+    environment:
+      NVIDIA_DRIVER_CAPABILITIES: utility
+  dcgm-exporter:
+    <<: *nvidia
+    build: {context: deploy, dockerfile: images/dcgm.Dockerfile}
+    cap_add: [SYS_ADMIN]
+    restart: unless-stopped
+  node-otel:
+    command: ["--config=/etc/otelcol/node.yaml", "--config=/etc/otelcol/node-gpu.yaml"]
+    environment:
+      GMAN_DCGM_TARGET: dcgm-exporter:9400

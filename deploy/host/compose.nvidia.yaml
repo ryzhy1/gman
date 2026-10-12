@@ -1,0 +1,28 @@
+# NVIDIA GPUs of a connected host. Needs the NVIDIA driver and NVIDIA Container Toolkit. Enable it in
+# deploy/host/.env:
+#   COMPOSE_FILE=compose.yaml:compose.nvidia.yaml
+# and run docker compose from deploy/host. Adds GPU access for the agent (nvidia-smi: GPUs and which container
+# holds them), DCGM Exporter on 127.0.0.1:9400 and its scraping by node-otel.
+x-nvidia: &nvidia
+  deploy:
+    resources:
+      reservations:
+        devices:
+          - {driver: nvidia, count: all, capabilities: [gpu, utility]}
+services:
+  agent:
+    <<: *nvidia
+    environment:
+      NVIDIA_DRIVER_CAPABILITIES: utility
+  dcgm-exporter:
+    <<: *nvidia
+    build: {context: .., dockerfile: images/dcgm.Dockerfile}
+    environment:
+      DCGM_EXPORTER_LISTEN: 127.0.0.1:9400
+    network_mode: host
+    cap_add: [SYS_ADMIN]
+    restart: unless-stopped
+  node-otel:
+    command: ["--config=/etc/otelcol/node.yaml", "--config=/etc/otelcol/node-gpu.yaml"]
+    environment:
+      GMAN_DCGM_TARGET: 127.0.0.1:9400

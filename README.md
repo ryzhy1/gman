@@ -132,26 +132,36 @@ PostgreSQL и администратора Grafana меняйте до перв�
 ### Подключение других серверов
 
 На каждом Docker-хосте, который должен попасть в GMan, нужен только Docker. Архив с нужными файлами
-(агент и Collector, ~30 КБ) собирается в репозитории: `deploy/host/pack.sh` → gman-host.tar.gz.
-На хосте:
+(агент, Collector, DCGM Exporter, ~30 КБ) собирается в репозитории: `deploy/host/pack.sh` →
+gman-host.tar.gz. На хосте, из каталога gman-host/deploy/host:
 
 ```sh
-tar xzf gman-host.tar.gz && cd gman-host
-cp deploy/host/.env.example deploy/host/.env   # заполнить GMAN_SERVER и GMAN_SOURCE_ID
-docker compose -f deploy/host/compose.yaml up -d --build
+tar xzf gman-host.tar.gz && cd gman-host/deploy/host
+cp .env.example .env     # заполнить GMAN_SERVER и GMAN_SOURCE_ID
+docker compose up -d --build
 ```
 
-Если порты сервера GMan изменены, добавьте GMAN_PORT (портал) и GMAN_OTLP_PORT (OTLP gRPC).
+GMAN_SERVER — адрес сервера GMan, GMAN_SOURCE_ID — уникальное имя хоста (например, hostname). Если
+порты сервера GMan изменены, добавьте GMAN_PORT (портал) и GMAN_OTLP_PORT (OTLP gRPC). Поднимаются
+агент inventory (контейнеры, env и .env-файлы, сведения о хосте, GPU) и Collector метрик хоста и
+контейнеров; оба в сети хоста, поэтому портал показывает настоящий IP хоста. С хоста должны быть
+доступны порт портала (GMAN_PORT, 8080) и OTLP (GMAN_OTLP_PORT, 4317) сервера GMan. Хост появляется
+в «Серверы и GPU» через несколько секунд, метрики — через минуту. Отключить: `docker compose down -v`.
+Kubernetes-кластеры подключаются агентом с `--runtime kubernetes` («Подключение inventory») и
+deploy/otel-k8s.yaml.
+
 Порты сервера GMan задаются в его .env: GMAN_PORT, GMAN_OTLP_PORT, GMAN_OTLP_HTTP_PORT,
 GMAN_PROMETHEUS_PORT, GMAN_ALERTMANAGER_PORT, GMAN_GRAFANA_PORT (последние три — только 127.0.0.1).
 
-GMAN_SERVER — адрес сервера GMan, GMAN_SOURCE_ID — уникальное имя хоста (например, hostname);
-их можно записать в deploy/host/.env. Поднимаются агент inventory (контейнеры, env и .env-файлы,
-сведения о хосте) и Collector метрик хоста и контейнеров; оба в сети хоста, поэтому портал
-показывает настоящий IP хоста. С хоста должны быть доступны порт портала (GMAN_PORT, 8080) и
-OTLP (GMAN_OTLP_PORT, 4317) сервера GMan. Хост появляется в «Серверы и GPU» через несколько секунд, метрики — через
-минуту. Отключить: `docker compose -f deploy/host/compose.yaml down -v`. Kubernetes-кластеры
-подключаются агентом с `--runtime kubernetes` («Подключение inventory») и deploy/otel-k8s.yaml.
+### Видеокарты NVIDIA в контейнерах
+
+На хостах с драйвером NVIDIA и NVIDIA Container Toolkit GPU включаются строкой в .env:
+`COMPOSE_FILE=compose.yaml:deploy/compose.nvidia.yaml` на сервере GMan,
+`COMPOSE_FILE=compose.yaml:compose.nvidia.yaml` в deploy/host/.env подключаемого хоста. Агент получает
+GPU (nvidia-smi, процессы GPU → контейнеры через host PID), добавляется dcgm-exporter
+(deploy/images/dcgm.Dockerfile: nvcr.io/nvidia/k8s/dcgm-exporter 4.5.2-4.8.1 с deploy/dcgm-counters.csv),
+node-otel опрашивает его (deploy/otel-node-gpu.yaml) и отправляет ряды DCGM с host_id хоста — для
+графиков, дашборда «GMan · GPU» и алертов GPU.
 
 ## Метрики локального Mac
 

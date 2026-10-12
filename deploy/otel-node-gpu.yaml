@@ -1,0 +1,15 @@
+# Added to otel-node.yaml (second --config) on NVIDIA hosts: scrapes DCGM Exporter, labelled with host.id like the
+# host metrics, so the portal, dashboards and GPU alert rules see this host's GPUs.
+#   GMAN_DCGM_TARGET  host:port of DCGM Exporter (dcgm-exporter:9400 on the GMan server, 127.0.0.1:9400 on hosts).
+receivers:
+  prometheus/gpu:
+    config:
+      scrape_configs:
+        - job_name: dcgm
+          scrape_interval: 15s
+          static_configs:
+            - targets: ['${env:GMAN_DCGM_TARGET}']
+service:
+  pipelines:
+    metrics:
+      receivers: [host_metrics, docker_stats, prometheus/gpu]
