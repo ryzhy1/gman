@@ -13,6 +13,8 @@ ORIGIN_LABELS = {
     "app.kubernetes.io/version": "app_version",
     "app.kubernetes.io/managed-by": "managed_by",
     "helm.sh/chart": "helm_chart",
+    # Кто создал контейнер: значение задает запускающий (например, ${USER} в compose), оно не проверяется.
+    "gman.started-by": "started_by",
 }
 ORIGIN_VALUE_LIMIT = 2000
 # Переменные выбора GPU: сообщаются вместе с запросами GPU, в них индексы или UUID GPU.

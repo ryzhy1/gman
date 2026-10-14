@@ -138,6 +138,7 @@ const ORIGIN_LABELS: [keyof Instance['origin'], string][] = [
   ['image_created', 'Образ собран'], ['compose_project', 'Compose-проект'], ['compose_service', 'Compose-сервис'],
   ['compose_working_dir', 'Каталог compose'], ['app_name', 'Приложение'], ['app_version', 'Версия приложения'],
   ['managed_by', 'Управляется'], ['helm_chart', 'Helm chart'], ['field_managers', 'Изменяли объект (field managers)'],
+  ['started_by', 'Запустил (метка gman.started-by, не проверяется)'],
 ];
 
 /** Pretty-printed JSON with token colors; React escapes the text, no HTML injection. */
@@ -236,7 +237,7 @@ function tone(e: Audit) {
 const LAUNCHES = ['instance-appeared', 'config-changed'];
 
 function actorLabel(e: Audit) {
-  if (e.actor !== 'unknown') return `${e.actor} (${e.actor_kind})`;
+  if (e.actor !== 'unknown') return e.actor_kind && e.actor_kind !== 'unknown' ? `${e.actor} (${e.actor_kind})` : e.actor;
   return LAUNCHES.includes(e.type) ? 'Ручной запуск / инициатор неизвестен' : 'Автор неизвестен';
 }
 

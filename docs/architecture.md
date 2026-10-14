@@ -349,6 +349,7 @@ gman_service/gman_environment, k8s.namespace/pod; command, env, пользова
 | runtime-event | новое повторение Kubernetes Event pod-а или узла: kind, node, reason, event_type, count, occurrences, detail; у события узла service_id пуст, если OOM не сопоставлен с pod-ом | unknown, Kubernetes Event |
 | history-gap | источник молчал дольше GMAN_HISTORY_GAP_SECONDS или агент отбросил снимки (spool overflow): gap_from/gap_to, reasons, dropped_snapshots; по событию на каждый затронутый сервис | unknown |
 | deployment | Bamboo | из CI, actor_source = Bamboo integration assertion; release_id |
+| instance-appeared / config-changed с меткой gman.started-by | разница снимков; метка экземпляра | значение метки, actor_source = container label gman.started-by (not verified) |
 | instance-appeared / config-changed, связанные с релизом | разница снимков + сверка с релизом | инициатор релиза, actor_source = Bamboo, correlated by digest/version |
 | service-created / service-updated | изменение каталога через API | неизвестен (actor_source = portal) |
 
@@ -358,8 +359,9 @@ OCI source/revision/version, app.kubernetes.io/*, helm chart, Kubernetes field m
 
 Docker events не дают надежного человека-инициатора; для Kubernetes нужен audit log control
 plane, а не Events. Ни то, ни другое не реализовано: автор runtime-изменения — «неизвестно»,
-кроме изменений, сопоставленных с релизом Bamboo (см. ниже); в портале несопоставленные
-появления и изменения конфигурации показываются как «ручной запуск / инициатор неизвестен».
+кроме изменений, сопоставленных с релизом Bamboo (см. ниже), и экземпляров с меткой
+gman.started-by (см. «Ручные запуски»); в портале остальные появления и изменения
+конфигурации показываются как «ручной запуск / инициатор неизвестен».
 
 ### Релизы: сверка Bamboo и runtime
 
@@ -399,7 +401,8 @@ app.kubernetes.io/version против version/release/тега image из Bambo
 runtime раньше события Bamboo) до завершения или тайм-аута. Если первым пришло
 финальное событие, окно начинается за тайм-аут до него. Runtime-события окна
 связываются с релизом: появление экземпляра и изменение конфигурации на целевой
-версии получают инициатора релиза с actor_source «Bamboo, correlated by digest|version»;
+версии получают инициатора релиза с actor_source «Bamboo, correlated by digest|version»
+(если инициатор релиза неизвестен, имя из метки gman.started-by остается);
 удаление прежней версии, перезапуски и изменения состояния связываются без смены
 автора. События вне окна или без совпадения остаются «ручной запуск / инициатор
 неизвестен». Связь с более новым релизом не перезаписывает уже связанные события.
@@ -418,7 +421,16 @@ advisory lock `release:<service>|<env>` на PostgreSQL; тайм-ауты — �
 Перевод в Bamboo, CI build ID и ссылка Bamboo не требуются; репозиторий, команда и ссылки
 задаются в каталоге независимо от способа запуска.
 
-Для атрибуции ручных запусков нужен отдельный механизм (не реализован):
+Метка `gman.started-by` подписывает запуск именем, которое указал запускающий: в compose —
+`gman.started-by: ${USER:-unknown}` (Compose подставляет переменную при `up`), в `docker run` —
+`--label gman.started-by=$USER`, в Kubernetes — метка pod-а. Агент передает ее как
+`origin.started_by`; появление и изменение конфигурации экземпляра получают actor из метки с
+actor_source «container label gman.started-by (not verified)», портал показывает его в «Кем запущен».
+Метка не подтверждает личность (ее может задать кто угодно) и фиксируется при создании
+контейнера: перезапуск того же контейнера оставляет прежнее имя. Событие Bamboo, сопоставленное с
+изменением, заменяет имя своим инициатором, если тот известен.
+
+Для подтвержденной атрибуции ручных запусков нужен отдельный механизм (не реализован):
 
 - Аутентифицированный CLI/посредник запуска, фиксирующий пользователя и результат
   Docker/Kubernetes API. Имя из переменной окружения или `--actor` само по себе личность не

@@ -1,10 +1,12 @@
 """События истории из сравнения снимков: подключение источника и изменения экземпляров."""
-from inventory.entity import HistoryEvent, ObservationContext, ObservedInstance
-from inventory.services.field_changes import FieldChangeDetector
+from inventory.entity import STARTED_BY_LABEL, UNKNOWN, HistoryEvent, JsonObject, ObservationContext, ObservedInstance
+from inventory.services.field_changes import CONFIG_CHANGED, FieldChangeDetector
 
 SOURCE_CONNECTED = "source-connected"
 INSTANCE_APPEARED = "instance-appeared"
 INSTANCE_REMOVED = "instance-removed"
+# Изменения, которые вызывает запуск: им приписывается автор из метки gman.started-by.
+LAUNCHES = (INSTANCE_APPEARED, CONFIG_CHANGED)
 
 
 class SnapshotHistoryBuilder:
@@ -47,5 +49,13 @@ class SnapshotHistoryBuilder:
         else:
             changes = self._changes.changes(before.document, after.document)
             data.update(type=self._changes.classify(changes), changes=changes)
+        if after is not None:
+            _attribute_launch(data, after)
         event = HistoryEvent(data=data, received_at=context.received_at, occurred_at=context.observed_at)
         return event
+
+
+def _attribute_launch(data: JsonObject, after: ObservedInstance) -> None:
+    """Запуск приписывается имени из метки gman.started-by; событие деплоя Bamboo позже его перекроет."""
+    if data["type"] in LAUNCHES and after.started_by:
+        data.update(actor=after.started_by, actor_kind=UNKNOWN, actor_source=STARTED_BY_LABEL)

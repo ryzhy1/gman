@@ -330,7 +330,7 @@ function App() {
                 <InstanceTable rows={own} metrics={metrics} logs={splunk?.instances} />
                 <Workloads serviceId={service.id} environment={environment === ALL ? undefined : environment}
                   grafanaUrl={grafana} range={range} refreshKey={data.server_time} />
-                <p className="note">Сервисы обнаруживаются независимо от способа запуска. Владелец сервиса и инициатор деплоя — разные роли. Bamboo сообщает автора деплоя; для ручных запусков без отдельного аудита автор неизвестен. CPU — в ядрах (1.0 = одно ядро), процент — от лимита контейнера. VRAM — видеопамять процессов контейнера, а не загрузка GPU.</p>
+                <p className="note">Сервисы обнаруживаются независимо от способа запуска. Владелец сервиса и инициатор деплоя — разные роли. Bamboo сообщает автора деплоя; ручной запуск подписывает метка gman.started-by (имя не проверяется), без нее автор неизвестен. CPU — в ядрах (1.0 = одно ядро), процент — от лимита контейнера. VRAM — видеопамять процессов контейнера, а не загрузка GPU.</p>
               </>}
               {tab === 'Ресурсы' && <>
                 <Resources instances={own} grafanaLink={links!.grafana} range={range} onRange={setRange}

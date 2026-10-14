@@ -55,6 +55,11 @@ def test_docker_allowlist_and_cpu_quota():
     assert result["origin"] == {"image_revision": "deadbeef", "compose_project": "shop", "compose_service": "api"}
 
 
+def test_docker_started_by_label_is_reported_as_origin():
+    result = docker_instance({"Id": "x", "Config": {"Image": "app", "Labels": {"gman.started-by": "petrov"}},
+                              "State": {"Status": "running"}})
+    assert result["origin"] == {"started_by": "petrov"}
+
 def test_docker_state_is_not_masked_by_stale_health():
     result = docker_instance({"Id":"x", "Created":"2026-10-10T10:00:00Z",
                               "State":{"Status":"exited", "ExitCode":137, "OOMKilled":True,

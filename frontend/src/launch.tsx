@@ -18,6 +18,7 @@ export function LaunchDetails({ instance, events, expanded = false, grafanaUrl =
   instance: Placed; events: Audit[]; expanded?: boolean; grafanaUrl?: string; range?: string; serviceGrafana?: string;
 }) {
   const event = launchEvent(instance, events);
+  const labelled = instance.origin?.started_by ?? '';
   const serviceUrl = serviceGrafana || (instance.service_id
     ? grafanaLink(grafanaUrl, 'gman-service', { service: instance.service_id, environment: instance.environment }, range) : '');
   const hostUrl = instance.runtime === 'docker'
@@ -33,8 +34,9 @@ export function LaunchDetails({ instance, events, expanded = false, grafanaUrl =
     {stale(instance.source) && <p className={badge('warn')}>Данные устарели</p>}
     <dl>
       <div><dt>Последний запуск</dt><dd>{instance.started_at ? date(instance.started_at) : 'Время запуска не получено'}</dd></div>
-      <div><dt>Кем запущен</dt><dd>{event ? event.actor : 'Инициатор неизвестен'}</dd></div>
+      <div><dt>Кем запущен</dt><dd>{event ? event.actor : labelled || 'Инициатор неизвестен'}</dd></div>
       <div><dt>Основание</dt><dd>{event ? `${event.actor_source} · релиз #${event.release_id}`
+        : labelled ? 'Метка gman.started-by: имя указал запускающий при создании контейнера, GMan его не проверяет.'
         : 'В последних событиях нет подтверждения автора этого запуска. Docker и Kubernetes сами по себе не сообщают имя человека.'}</dd></div>
       <div><dt>Где запущен</dt><dd>{instance.node || instance.source.hostname} · {instance.environment}</dd></div>
       <div><dt>Конфигурация получена</dt><dd>{date(instance.source.observed_at)}</dd></div>

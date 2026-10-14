@@ -111,7 +111,10 @@ class Config(Strict):
 
 
 class Origin(Strict):
-    """Разрешенные подсказки о происхождении; ни одна не доказывает, кто запустил экземпляр."""
+    """Разрешенные подсказки о происхождении; ни одна не доказывает, кто запустил экземпляр.
+
+    started_by — метка gman.started-by: имя, которое указал сам запускающий (без проверки).
+    """
 
     compose_project: str = _text(LONG_TEXT)
     compose_service: str = _text(LONG_TEXT)
@@ -125,6 +128,7 @@ class Origin(Strict):
     managed_by: str = _text(LONG_TEXT)
     helm_chart: str = _text(LONG_TEXT)
     field_managers: str = _text(LONG_TEXT)
+    started_by: str = _text(LONG_TEXT)
 
 
 class Instance(Strict):

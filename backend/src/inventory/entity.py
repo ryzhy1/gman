@@ -11,6 +11,7 @@ from typing import Any
 JsonObject = dict[str, Any]
 UNKNOWN = "unknown"
 RUNTIME_OBSERVATION = "runtime observation"
+STARTED_BY_LABEL = "container label gman.started-by (not verified)"
 
 
 class InventoryError(Exception):
@@ -88,6 +89,12 @@ class ObservedInstance:
         """Конфигурация запуска (сохраняется версиями)."""
         config = self.document["config"]
         return config
+
+    @property
+    def started_by(self) -> str:
+        """Кто создал экземпляр по метке gman.started-by (пусто — метки нет); значение не проверяется."""
+        started_by = (self.document.get("origin") or {}).get("started_by", "")
+        return started_by
 
     @property
     def last_oom_at(self) -> str | None:

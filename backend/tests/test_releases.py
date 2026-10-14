@@ -266,3 +266,25 @@ def test_metrics_expose_latest_release_status(client):
     assert status == ['gman_release_status{service_id="api",environment="prod",status="failed"} 1.0',
                       'gman_release_status{service_id="api",environment="stage",status="started"} 1.0']
     assert text.count("gman_release_started_timestamp_seconds{") == 2
+
+
+def test_started_by_label_attributes_manual_launch(client):
+    agent = Agent(client)
+    agent.send(instance("old"))
+    agent.send(instance("manual", origin={"started_by": "petrov"}))
+    appeared = next(e for e in events(client) if e["type"] == "instance-appeared")
+    assert (appeared["actor"], appeared["actor_source"]) == ("petrov", "container label gman.started-by (not verified)")
+
+
+def test_bamboo_initiator_replaces_label_but_unknown_does_not(client):
+    agent = Agent(client)
+    agent.send(instance("old"))
+    agent.send(instance("new", "registry/api:3.0", NEW, ago(seconds=30), origin={"started_by": "petrov"}))
+    agent.send(instance("new", "registry/api:3.0", NEW, ago(seconds=30), origin={"started_by": "petrov"}),
+               instance("other", "registry/api:4.0", OTHER, ago(seconds=20), origin={"started_by": "sidorov"}))
+    deploy(client, image_digest=NEW, occurred_at=ago(minutes=1))
+    deploy(client, run="bamboo-deploy-2", image_digest=OTHER, occurred_at=ago(minutes=1),
+           actor="unknown", actor_kind="unknown")
+    appeared = {e["instance_id"]: e for e in events(client) if e["type"] == "instance-appeared"}
+    assert (appeared["new"]["actor"], appeared["new"]["actor_source"]) == ("ivanov", "Bamboo, correlated by digest")
+    assert (appeared["other"]["actor"], appeared["other"]["release_id"]) == ("sidorov", releases(client)[0]["id"])

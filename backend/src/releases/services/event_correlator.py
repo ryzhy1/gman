@@ -1,7 +1,7 @@
 """Связывание событий runtime из окна релиза с релизом и атрибуция изменений инициатору деплоя."""
 from datetime import datetime, timedelta
 
-from releases.entity import RUNTIME_TYPES, Release, RolloutInstance, RuntimeEvent
+from releases.entity import RUNTIME_TYPES, UNKNOWN, Release, RolloutInstance, RuntimeEvent
 from releases.services.image_matcher import ImageMatcher, image_repository
 
 INSTANCE_REMOVED = "instance-removed"
@@ -63,9 +63,13 @@ class EventCorrelator:
 
 
 def _link(event: RuntimeEvent, release: Release, method: str | None) -> None:
-    """Связывает событие с релизом; изменение, вызванное деплоем, приписывает инициатору."""
+    """Связывает событие с релизом; изменение, вызванное деплоем, приписывает инициатору.
+
+    Неизвестный инициатор Bamboo не стирает имя из метки gman.started-by.
+    """
     data = {**event.data, "release_id": release.id}
-    if method and event.type in ATTRIBUTED:
+    known = release.initiator != UNKNOWN or event.data.get("actor", UNKNOWN) == UNKNOWN
+    if method and event.type in ATTRIBUTED and known:
         data.update(actor=release.initiator, actor_kind=release.initiator_kind,
                     actor_source=f"Bamboo, correlated by {method}")
     event.data = data

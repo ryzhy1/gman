@@ -6,7 +6,8 @@ export type Service = {
 
 export type Origin = Partial<Record<
   'compose_project' | 'compose_service' | 'compose_working_dir' | 'image_source' | 'image_revision' |
-  'image_version' | 'image_created' | 'app_name' | 'app_version' | 'managed_by' | 'helm_chart' | 'field_managers',
+  'image_version' | 'image_created' | 'app_name' | 'app_version' | 'managed_by' | 'helm_chart' | 'field_managers' |
+  'started_by',
   string>>;
 
 export type Instance = {

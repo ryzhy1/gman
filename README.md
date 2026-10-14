@@ -30,7 +30,8 @@ NVIDIA на серверах, Bitbucket/GitLab для исходного код�
   последнего OOM kill (last_oom_at), которое сохраняется и после перезапуска контейнера.
 - Происхождение по allowlist меток: compose project/service/working dir, OCI image
   source/revision/version, app.kubernetes.io/*, helm chart, Kubernetes field managers.
-  Это подсказки о способе запуска, а не доказательство автора.
+  Это подсказки о способе запуска, а не доказательство автора. Метка gman.started-by —
+  имя того, кто создал контейнер, со слов запускающего (см. «Сервисы, запущенные вручную»).
 - Ошибки частичного сбора (например, сбой nvidia-smi) передаются в снимке и видны в UI.
 - Подробный снимок GPU на Docker-хосте. NVIDIA (nvidia-smi): модель, PCI, драйвер,
   pstate, загрузка GPU и памяти, VRAM, температуры GPU/памяти, мощность и лимит, частоты
@@ -52,7 +53,8 @@ NVIDIA на серверах, Bitbucket/GitLab для исходного код�
   меток NVIDIA GPU feature discovery.
 - История наблюдаемых изменений: появление/удаление экземпляра, изменение конфигурации,
   перезапуск, изменение состояния, OOM kill — с таблицей «было/стало». Первый снимок источника
-  записывается одним событием source-connected. Автор runtime-изменения неизвестен.
+  записывается одним событием source-connected. Автор runtime-изменения — инициатор
+  сопоставленного релиза Bamboo или имя из метки gman.started-by, иначе неизвестен.
 - Kubernetes Events pod-ов сервисов каталога (BackOff, FailedScheduling, Unhealthy, Killing,
   Failed, Evicted, OOMKilling и др.) в истории — без текста сообщения, один раз на новое
   повторение (uid + count/время).
@@ -134,7 +136,7 @@ PostgreSQL и администратора Grafana меняйте до перв�
 ### Подключение других серверов
 
 На каждом Docker-хосте, который должен попасть в GMan, нужен только Docker. Архив с нужными файлами
-(агент, Collector, DCGM Exporter, ~30 КБ) собирается в репозитории: `deploy/host/pack.sh` →
+(агент, Collector, DCGM Exporter, ~60 КБ) собирается в репозитории: `deploy/host/pack.sh` →
 gman-host.tar.gz. На хосте, из каталога gman-host/deploy/host:
 
 ```sh
@@ -307,8 +309,8 @@ API видит новый файл со следующего опроса /metri
 Клиентские сертификаты узлов на сервере не лежат: их срок (CERT_DAYS) отслеживайте по
 выводу issue.sh; истекший сертификат узла виден как GManHostTelemetryAbsent.
 
-Healthcheck есть у db, api, portal, prometheus, grafana и backup (свежий бэкап моложе двух
-интервалов). Образ otelcol distroless, проверки внутри контейнера нет: следите за
+Healthcheck есть у db, api, portal, prometheus, alertmanager, grafana и backup (свежий бэкап
+моложе двух интервалов). Образ otelcol distroless, проверки внутри контейнера нет: следите за
 up{job="otel"} в Prometheus.
 
 ### Узлы
@@ -429,10 +431,28 @@ docker compose или kubectl не требует CI-события для по�
 
 Для наблюдения ручных запусков достаточно inventory-агента: конфигурация и
 доступное время старта приходят из runtime. Автор остается неизвестным,
-если нет подтверждения отдельного аудита. Отсутствие события CI само по себе
+если нет подтверждения отдельного аудита или метки gman.started-by. Отсутствие события CI само по себе
 не означает, что запуск ручной. Ссылка на Bamboo необязательна.
 Атрибуция ручных действий через аудит сервера или аутентифицированный посредник
 пока не реализована; детали — docs/architecture.md, «Ручные запуски».
+
+Кто запустил контейнер, можно указать меткой gman.started-by: Compose подставит имя
+пользователя при `docker compose up`, `docker run` — через `--label gman.started-by=$USER`.
+
+```yaml
+services:
+  api:
+    labels:
+      gman.service: example-api
+      gman.environment: prod
+      gman.started-by: ${SUDO_USER:-${USER:-unknown}}   # при запуске через sudo — исходный пользователь
+```
+
+Появление контейнера в журнале получает это имя как автора (источник — «container label
+gman.started-by (not verified)»), карточка запуска показывает его в «Кем запущен». Имя не
+проверяется и сохраняется при перезапусках того же контейнера; известный инициатор Bamboo,
+сопоставленный с изменением, его заменяет. Метку понимают агент и API одной версии: старый
+API отклонит снимок с ней (422), поэтому сначала обновите сервер GMan.
 
 ## Подключение inventory
 
@@ -1169,9 +1189,12 @@ Frontend: npm run dev, /api проксируется на 8000.
 данных с API на SQLite; bamboo_event.py против локального API. Тест test_deploy.py сверяет
 имена DCGM с deploy/dcgm-counters.csv, allowlist kube-state-metrics с правилами, дашбордами и шаблонами /api/workloads,
 runbook каждого алерта, переменные дашбордов в ссылках портала, очередь Collector на диске и
-маршрут GManWatchdog, Events узлов Kubernetes. Тесты проходят на SQLite
-(231 passed, 1 skipped) и PostgreSQL 17 (232 passed). Docker end-to-end, Kubernetes, NVIDIA/DCGM
-и настоящий Bamboo еще не проверены.
+маршрут GManWatchdog, Events узлов Kubernetes. Тесты проходят на SQLite: API — 93 passed,
+1 skipped (тест конкурентной записи под advisory lock идет только на PostgreSQL —
+GMAN_TEST_DATABASE_URL),
+агент — 102 passed. Стенд `docker compose up --build -d` проверен end-to-end на Docker Desktop
+(Linux) и на сервере Ubuntu 24.04: все сервисы healthy, inventory, история, метрики хоста и
+контейнеров сервера GMan. Kubernetes, NVIDIA/DCGM и настоящий Bamboo еще не проверены.
 
 ## Хранилище
 
@@ -1196,8 +1219,8 @@ GMAN_RETENTION_DAYS (по умолчанию 180, 0 — отключить) уд
 ## Границы пилота
 
 Это основа для развития, не завершенный production PaaS. Все компоненты реализованы и
-проверены тестами и на эмуляторах, но не на реальной инфраструктуре: Docker daemon и
-compose end-to-end, nginx и systemd на Linux, NVIDIA/DCGM, Kubernetes/CRI-O, настоящие IdP,
+проверены тестами и на эмуляторах; на реальном Docker проверен только стенд сервера GMan
+(раздел «Проверка»). nginx и systemd на Linux, NVIDIA/DCGM, Kubernetes/CRI-O, настоящие IdP,
 Bamboo, Splunk и SMTP еще не проверены (полный список — docs/next-steps.md, «Не проверено»).
 
 Ограничения реализации:
@@ -1207,8 +1230,8 @@ Bamboo, Splunk и SMTP еще не проверены (полный список
   короткие события между опросами могут быть пропущены; перезапуски по restart policy видны
   по счетчику, но промежуточное состояние exited — нет. Watch Kubernetes и сбор Events
   проверены только на записанных потоках (fixtures), не на настоящем кластере.
-- Автор ручного запуска неизвестен: аудит сервера или аутентифицированный посредник не
-  реализованы. События Bamboo не коррелируются с runtime автоматически.
+- Автор ручного запуска не подтверждается: метка gman.started-by не проверяется, а аудит
+  сервера или аутентифицированный посредник не реализованы.
 - Controllers и nodes не нормализованы в базе; состояние workloads в портале читается из
   Prometheus (kube-state-metrics) на момент запроса, истории состояний в базе нет. Пороги перегрева заданы
   только для A100 SXM4, остальные модели — 85/90 °C.
