@@ -256,7 +256,7 @@ class Node(Strict):
     created_at: datetime | None = None
 
 
-# Same allowlists as agent/collect.py KUBE_EVENT_REASONS and NODE_EVENT_REASONS; anything else is rejected
+# Same allowlists as agent/gman_agent/kubernetes.py KUBE_EVENT_REASONS and NODE_EVENT_REASONS; anything else is rejected
 # rather than stored.
 KUBE_EVENT_REASONS = {"OOMKilling", "BackOff", "FailedScheduling", "Unhealthy", "Killing", "Failed", "Evicted",
                       "FailedMount", "FailedCreatePodSandBox", "Preempting"}
@@ -266,7 +266,7 @@ NODE_EVENT_REASONS = {"OOMKilling", "SystemOOM", "NodeNotReady", "NodeHasDiskPre
 
 
 class RuntimeEvent(Strict):
-    """A Kubernetes Event of a pod or a node, without its free-text message (agent/collect.py kube_event,
+    """A Kubernetes Event of a pod or a node, without its free-text message (agent/gman_agent/kubernetes.py kube_event,
     kube_node_event). A node Event carries a pod and service only when the agent mapped an OOM kill to a pod."""
     uid: str = Field(pattern=r"^[a-zA-Z0-9_.:-]{1,100}$")
     kind: Literal["Pod", "Node"] = "Pod"

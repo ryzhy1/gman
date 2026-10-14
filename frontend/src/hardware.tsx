@@ -213,7 +213,7 @@ function Meter({ label, used, total, show, capacity }: {
   </div>;
 }
 
-// Node Events (agent/collect.py NODE_EVENT_REASONS): label and tone.
+// Node Events (agent/gman_agent/kubernetes.py NODE_EVENT_REASONS): label and tone.
 const NODE_EVENTS: Record<string, [string, 'warn' | 'bad']> = {
   OOMKilling: ['OOM kill (node-problem-detector)', 'bad'], SystemOOM: ['Память узла исчерпана (System OOM)', 'bad'],
   NodeNotReady: ['Переход в NotReady', 'bad'], NodeHasDiskPressure: ['Нехватка диска', 'warn'],

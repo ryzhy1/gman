@@ -5,8 +5,8 @@ from datetime import datetime, timedelta, timezone
 
 import pytest
 
-from agent import collect
-from agent.collect import KubeWatcher
+from agent.gman_agent import cli, docker, kubernetes as k8s
+from agent.gman_agent.watch import KubeWatcher
 from backend.tests.test_alerts import find, samples
 from backend.tests.test_api import client, post  # noqa: F401  (pytest fixture)
 from backend.tests.test_kube_watch import node_ev, pod
@@ -24,7 +24,7 @@ def gpu_pod(uid=UID, node="node-1", cid=CID):
 
 
 def refs(*pods):
-    return {p["metadata"]["uid"]: collect.pod_ref(p) for p in pods}
+    return {p["metadata"]["uid"]: k8s.pod_ref(p) for p in pods}
 
 
 # NPD kernel-monitor: the default rule matches the "Killed process" line (process name and pid are workload data).
@@ -43,8 +43,8 @@ KUBELET_SYSTEM_OOM = "System OOM encountered, victim process: java, pid: 31337"
 # --- Agent: mapping -------------------------------------------------------------------------------
 
 def test_npd_oom_without_identifiers_is_attributed_to_the_node_only():
-    mapped = collect.kube_node_event(node_ev("n1", "OOMKilling", NPD_KILLED, component="kernel-monitor"),
-                                     refs(gpu_pod()))
+    mapped = k8s.kube_node_event(node_ev("n1", "OOMKilling", NPD_KILLED, component="kernel-monitor"),
+                                 refs(gpu_pod()))
     assert mapped == {"uid": "n1", "kind": "Node", "node": "node-1", "reason": "OOMKilling", "type": "Warning",
                       "count": 1, "first_at": "2026-10-11T10:00:00Z", "last_at": "2026-10-11T10:03:00Z",
                       "service_id": "", "environment": "unknown", "namespace": "", "pod": "", "container": "",
@@ -53,8 +53,8 @@ def test_npd_oom_without_identifiers_is_attributed_to_the_node_only():
 
 
 def test_npd_oom_with_container_id_is_mapped_to_the_instance():
-    mapped = collect.kube_node_event(node_ev("n2", "OOMKilling", NPD_MEMCG, component="kernel-monitor"),
-                                     refs(gpu_pod()))
+    mapped = k8s.kube_node_event(node_ev("n2", "OOMKilling", NPD_MEMCG, component="kernel-monitor"),
+                                 refs(gpu_pod()))
     assert (mapped["service_id"], mapped["instance_id"], mapped["instance_name"], mapped["namespace"]) == (
         "trainer", UID + ":app", "trainer-1/app", "prod")
     assert mapped["detail"] == "memory cgroup limit"
@@ -64,19 +64,19 @@ def test_npd_oom_with_container_id_is_mapped_to_the_instance():
 
 def test_npd_oom_with_pod_uid_only_is_mapped_to_the_pod():
     message = "Memory cgroup out of memory: task_memcg=/kubepods/burstable/pod" + UID + " killed"
-    mapped = collect.kube_node_event(node_ev("n3", "OOMKilling", message), refs(gpu_pod(cid=OTHER)))
+    mapped = k8s.kube_node_event(node_ev("n3", "OOMKilling", message), refs(gpu_pod(cid=OTHER)))
     assert (mapped["pod"], mapped["container"], mapped["instance_id"], mapped["service_id"]) == (
         "trainer-1", "", "", "trainer")
     assert mapped["instance_name"] == "trainer-1"
 
 
 def test_oom_naming_a_pod_of_another_node_is_not_mapped():
-    mapped = collect.kube_node_event(node_ev("n4", "OOMKilling", NPD_MEMCG), refs(gpu_pod(node="node-2")))
+    mapped = k8s.kube_node_event(node_ev("n4", "OOMKilling", NPD_MEMCG), refs(gpu_pod(node="node-2")))
     assert mapped["pod"] == "" and mapped["service_id"] == ""
 
 
 def test_kubelet_system_oom_is_node_level():
-    mapped = collect.kube_node_event(node_ev("n5", "SystemOOM", KUBELET_SYSTEM_OOM), refs(gpu_pod()))
+    mapped = k8s.kube_node_event(node_ev("n5", "SystemOOM", KUBELET_SYSTEM_OOM), refs(gpu_pod()))
     assert (mapped["reason"], mapped["detail"], mapped["pod"]) == ("SystemOOM", "node out of memory", "")
     assert "java" not in json.dumps(mapped) and "31337" not in json.dumps(mapped)
 
@@ -92,7 +92,7 @@ def test_kubelet_system_oom_is_node_level():
     ("OOMKilling", "Out of memory: Killed process 1 (init)", "node out of memory"),
 ])
 def test_node_event_detail_keeps_only_fixed_phrases(reason, message, detail):
-    assert collect.node_event_detail(reason, message) == detail
+    assert k8s.node_event_detail(reason, message) == detail
 
 
 def test_node_events_filtered_by_kind_reason_and_name():
@@ -103,7 +103,7 @@ def test_node_events_filtered_by_kind_reason_and_name():
               {**node_ev("n5", "NodeNotReady", component="node-controller"), "type": "Normal",
                "lastTimestamp": None, "eventTime": "2026-10-11T10:04:00.5Z"},
               {**node_ev("n6", "SystemOOM"), "involvedObject": {"kind": "Pod", "name": "x", "uid": "p"}}]
-    mapped = collect.kube_events(events, {})
+    mapped = k8s.kube_events(events, {})
     assert [(m["uid"], m["type"], m["kind"]) for m in mapped] == [("n5", "Normal", "Node"), ("n1", "Warning", "Node")]
 
 
@@ -140,8 +140,8 @@ def test_one_shot_docker_reads_oom_events_since_the_previous_run(tmp_path):
         return "\n".join([oom_line("c1", 1_000_000_100), oom_line("c1", 1_000_000_200), "garbage",
                           oom_line("gone", 1_000_000_150)])
 
-    data = collect.with_docker_ooms(docker_snapshot(), mark, clock=lambda: 1_000_000_300.7, run=run)
-    assert calls[0][:6] == ["docker", "events", "--since", str(1_000_000_300 - collect.OOM_LOOKBACK),
+    data = docker.with_docker_ooms(docker_snapshot(), mark, clock=lambda: 1_000_000_300.7, run=run)
+    assert calls[0][:6] == ["docker", "events", "--since", str(1_000_000_300 - docker.OOM_LOOKBACK),
                             "--until", "1000000300"]
     assert "event=oom" in calls[0]
     c1, c2 = data["instances"]
@@ -149,10 +149,10 @@ def test_one_shot_docker_reads_oom_events_since_the_previous_run(tmp_path):
     assert c2["last_oom_at"] is None and not data["errors"]
     assert mark.read_text() == "1000000300"
     # The next run continues from the previous one, never further back than the look-back.
-    collect.with_docker_ooms(docker_snapshot(), mark, clock=lambda: 1_000_000_360, run=run)
+    docker.with_docker_ooms(docker_snapshot(), mark, clock=lambda: 1_000_000_360, run=run)
     assert calls[1][2:6] == ["--since", "1000000300", "--until", "1000000360"]
     # Within the same second nothing is asked.
-    collect.with_docker_ooms(docker_snapshot(), mark, clock=lambda: 1_000_000_360.9, run=run)
+    docker.with_docker_ooms(docker_snapshot(), mark, clock=lambda: 1_000_000_360.9, run=run)
     assert len(calls) == 2
 
 
@@ -163,7 +163,7 @@ def test_one_shot_docker_oom_failure_keeps_the_mark(tmp_path):
     def run(args):
         raise subprocess.CalledProcessError(1, args)
 
-    data = collect.with_docker_ooms(docker_snapshot(), mark, clock=lambda: 1_000_000_060, run=run)
+    data = docker.with_docker_ooms(docker_snapshot(), mark, clock=lambda: 1_000_000_060, run=run)
     assert data["errors"] == ["docker oom events unavailable: CalledProcessError"]
     assert mark.read_text() == "1000000000"
 
@@ -171,10 +171,10 @@ def test_one_shot_docker_oom_failure_keeps_the_mark(tmp_path):
 def test_one_shot_docker_send_uses_the_oom_mark(tmp_path, monkeypatch):
     seen = []
     monkeypatch.setenv("GMAN_URL", "https://gman.example")
-    monkeypatch.setattr(collect, "collect", lambda *a: {"errors": [], "instances": []})
-    monkeypatch.setattr(collect, "with_docker_ooms", lambda data, mark: seen.append(mark) or data)
-    monkeypatch.setattr(collect, "run_once", lambda snapshot, spool, deliver: snapshot())
-    collect.main(["--runtime", "docker", "--source-id", "server-01", "--send", "--state-dir", str(tmp_path)])
+    monkeypatch.setattr(cli, "collect", lambda *a: {"errors": [], "instances": []})
+    monkeypatch.setattr(docker, "with_docker_ooms", lambda data, mark: seen.append(mark) or data)
+    monkeypatch.setattr(cli, "run_once", lambda snapshot, spool, deliver: snapshot())
+    cli.main(["--runtime", "docker", "--source-id", "server-01", "--send", "--state-dir", str(tmp_path)])
     assert seen == [tmp_path / "docker-oom-server-01.since"]
 
 

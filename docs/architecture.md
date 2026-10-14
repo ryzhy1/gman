@@ -25,7 +25,7 @@ Kubernetes, число workloads, модели GPU, действующие Grafa
 ```mermaid
 flowchart LR
   subgraph dhost[Docker-хост]
-    agent[agent/collect.py<br/>timer или --watch]
+    agent[agent/gman_agent<br/>timer или --watch]
     otelN[otelcol-contrib<br/>host_metrics, docker_stats, DCGM]
     dcgm[DCGM Exporter]
   end
@@ -67,7 +67,7 @@ flowchart LR
 
 | Компонент | Реализация | Назначение |
 | --- | --- | --- |
-| Inventory agent | agent/collect.py, Python stdlib | Снимок Docker-хоста, кластера или GPU-узла; spool, retry, flock, `--watch` |
+| Inventory agent | agent/gman_agent, Python stdlib; на узлы — один файл gman-agent.pyz (agent/build.py) | Снимок Docker-хоста, кластера или GPU-узла; spool, retry, flock, `--watch` |
 | Bamboo hook | agent/bamboo_event.py | Событие деплоя из deployment job |
 | API | backend/app (FastAPI, SQLAlchemy, Alembic) | Прием inventory и деплоев, каталог, история, конфигурации, вход, чтение метрик и алертов |
 | Портал | frontend (React/TypeScript, Vite), nginx | Каталог, карточки, серверы и GPU, алерты, аудит |
@@ -109,7 +109,7 @@ flowchart LR
 разрыва потока событий — полная сверка. Пропущенные во время разрыва короткие события не
 восстанавливаются.
 
-Kubernetes `--watch` (KubeWatcher в agent/collect.py): три потока — pods, Events pod-ов и Events
+Kubernetes `--watch` (KubeWatcher в agent/gman_agent/watch.py): три потока — pods, Events pod-ов и Events
 узлов (field selector involvedObject.kind не умеет «или», а список всех Events принес бы весь
 шум Normal). Каждый
 делает list (`kubectl get --raw`, чтобы сохранить resourceVersion списка; без kubectl — API с

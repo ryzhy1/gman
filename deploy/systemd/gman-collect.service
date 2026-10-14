@@ -1,5 +1,5 @@
 # GMan inventory agent: one collection + submission per activation (started by gman-collect.timer).
-# Install: agent/collect.py -> /opt/gman/agent/collect.py, deploy/systemd/agent.env.example ->
+# Install: agent/dist/gman-agent.pyz (python3 agent/build.py) -> /opt/gman/agent/gman-agent.pyz, deploy/systemd/agent.env.example ->
 # /etc/gman/agent.env (mode 0600, root). See README «Production-развертывание».
 [Unit]
 Description=GMan inventory snapshot
@@ -9,7 +9,7 @@ After=network-online.target docker.service
 [Service]
 Type=oneshot
 EnvironmentFile=/etc/gman/agent.env
-ExecStart=/usr/bin/python3 /opt/gman/agent/collect.py --runtime ${GMAN_RUNTIME} --source-id ${GMAN_SOURCE_ID} --send
+ExecStart=/usr/bin/python3 /opt/gman/agent/gman-agent.pyz --runtime ${GMAN_RUNTIME} --source-id ${GMAN_SOURCE_ID} --send
 # A oneshot unit is not started again while it is still running, so runs never overlap;
 # a hung docker/kubectl call is killed before the next tick.
 TimeoutStartSec=55s

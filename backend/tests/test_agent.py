@@ -3,8 +3,11 @@ import json
 import subprocess
 import tarfile
 
-from agent import bamboo_event, collect
-from agent.collect import docker_instance, pod_instances, quantity
+from agent import bamboo_event
+from agent.gman_agent import common, docker, gpu, host, kubernetes as k8s
+from agent.gman_agent.common import quantity
+from agent.gman_agent.docker import docker_instance
+from agent.gman_agent.kubernetes import pod_instances
 
 
 def test_docker_allowlist_and_cpu_quota():
@@ -45,8 +48,8 @@ def test_container_removed_during_collection(monkeypatch):
             raise subprocess.CalledProcessError(1, args)
         return json.dumps([{"Id": "a"}])
     calls = []
-    monkeypatch.setattr(collect, "command", fake)
-    assert [c["Id"] for c in collect.inspect_containers()] == ["a"]
+    monkeypatch.setattr(common, "command", fake)
+    assert [c["Id"] for c in docker.inspect_containers()] == ["a"]
 
 
 def test_daemon_failure_is_not_a_removal(monkeypatch):
@@ -54,9 +57,9 @@ def test_daemon_failure_is_not_a_removal(monkeypatch):
         if args[:2] == ["docker", "ps"]:
             return "a\n"
         raise subprocess.CalledProcessError(1, args)
-    monkeypatch.setattr(collect, "command", fake)
+    monkeypatch.setattr(common, "command", fake)
     try:
-        collect.inspect_containers()
+        docker.inspect_containers()
         assert False, "partial snapshot must not be produced"
     except RuntimeError:
         pass
@@ -65,9 +68,9 @@ def test_daemon_failure_is_not_a_removal(monkeypatch):
 def test_nvidia_failure_is_reported(monkeypatch):
     def fake(args):
         raise subprocess.CalledProcessError(9, args)
-    monkeypatch.setattr(collect, "command", fake)
+    monkeypatch.setattr(common, "command", fake)
     errors = []
-    assert not [g for g in collect.gpus(errors) if g["vendor"] == "NVIDIA"]
+    assert not [g for g in gpu.gpus(errors) if g["vendor"] == "NVIDIA"]
     assert errors == ["nvidia-smi failed with exit code 9"]
 
 
@@ -146,20 +149,20 @@ def test_nvidia_details_and_process_attribution(monkeypatch, tmp_path):
         if args[1].startswith("--query-gpu"):
             return base + extended + "\n"
         return "GPU-1, 4242, 1024\nGPU-1, 77, [N/A]\n"
-    monkeypatch.setattr(collect, "command", fake)
-    monkeypatch.setattr(collect, "cgroup_of", lambda pid: {"container_id": "c" * 64 if pid == "4242" else "", "pod_uid": ""})
+    monkeypatch.setattr(common, "command", fake)
+    monkeypatch.setattr(gpu, "cgroup_of", lambda pid: {"container_id": "c" * 64 if pid == "4242" else "", "pod_uid": ""})
     errors = []
-    gpu = collect.nvidia_gpus(errors)[0]
+    card = gpu.nvidia_gpus(errors)[0]
     assert errors == []
-    assert (gpu["model"], gpu["driver_version"], gpu["pstate"]) == ("NVIDIA A100-SXM4-80GB", "550.54.15", "P0")
-    assert gpu["memory_used_bytes"] == 40960 * 1024**2 and gpu["memory_temperature_c"] == 70
-    assert gpu["fan_percent"] is None  # [N/A] is absence, not zero.
-    assert gpu["throttle_reasons"] == ["sw_power_cap", "hw_thermal"]
-    assert (gpu["pcie_generation"], gpu["pcie_width"], gpu["ecc_uncorrected_errors"]) == (4, 16, 0)
-    assert gpu["processes"] == [{"pid": 4242, "container_id": "c" * 64, "used_memory_bytes": 1024**3},
-                                {"pid": 77, "container_id": "", "used_memory_bytes": None}]
+    assert (card["model"], card["driver_version"], card["pstate"]) == ("NVIDIA A100-SXM4-80GB", "550.54.15", "P0")
+    assert card["memory_used_bytes"] == 40960 * 1024**2 and card["memory_temperature_c"] == 70
+    assert card["fan_percent"] is None  # [N/A] is absence, not zero.
+    assert card["throttle_reasons"] == ["sw_power_cap", "hw_thermal"]
+    assert (card["pcie_generation"], card["pcie_width"], card["ecc_uncorrected_errors"]) == (4, 16, 0)
+    assert card["processes"] == [{"pid": 4242, "container_id": "c" * 64, "used_memory_bytes": 1024**3},
+                                 {"pid": 77, "container_id": "", "used_memory_bytes": None}]
     from backend.app.main import GPU
-    GPU(**gpu)
+    GPU(**card)
 
 
 def test_nvidia_old_driver_falls_back_to_base_fields(monkeypatch):
@@ -169,10 +172,10 @@ def test_nvidia_old_driver_falls_back_to_base_fields(monkeypatch):
         if args[1].startswith("--query-gpu"):
             return "GPU-1, Tesla T4, 00000000:3B:00.0, 470.1, P8, 0, 0, 15360, 0, 30, 9.5\n"
         return ""
-    monkeypatch.setattr(collect, "command", fake)
+    monkeypatch.setattr(common, "command", fake)
     errors = []
-    gpu = collect.nvidia_gpus(errors)[0]
-    assert gpu["model"] == "Tesla T4" and gpu["power_w"] == 9.5 and "sm_clock_mhz" not in gpu
+    card = gpu.nvidia_gpus(errors)[0]
+    assert card["model"] == "Tesla T4" and card["power_w"] == 9.5 and "sm_clock_mhz" not in card
     assert errors == ["nvidia-smi: extended GPU fields unsupported by this driver"]
 
 
@@ -181,9 +184,9 @@ def test_container_of_reads_cgroup(monkeypatch, tmp_path):
     cgroup.write_text("0::/system.slice/docker-" + "ab" * 32 + ".scope\n")
     (tmp_path / "1").mkdir()
     cgroup.rename(tmp_path / "1" / "cgroup")
-    monkeypatch.setattr(collect, "PROC_ROOT", str(tmp_path))
-    assert collect.container_of("1") == "ab" * 32
-    assert collect.container_of("2") == ""  # Exited process.
+    monkeypatch.setattr(gpu, "PROC_ROOT", str(tmp_path))
+    assert gpu.container_of("1") == "ab" * 32
+    assert gpu.container_of("2") == ""  # Exited process.
 
 
 def test_node_capacity_and_requests():
@@ -197,7 +200,7 @@ def test_node_capacity_and_requests():
         return {"spec": {"nodeName": "gpu-1", "containers": [{"resources": {"requests": {"cpu": cpu, "memory": "1Gi"},
                                                                             "limits": {"nvidia.com/gpu": gpu}}}]},
                 "status": {"phase": phase}}
-    result = collect.nodes([node], [pod("Running", "500m", "2"), pod("Succeeded", "4", "4")])[0]
+    result = k8s.nodes([node], [pod("Running", "500m", "2"), pod("Succeeded", "4", "4")])[0]
     assert (result["ready"], result["pressure"], result["roles"], result["taints"]) == (True, ["DiskPressure"], ["worker"], ["gpu:NoSchedule"])
     assert (result["cpu_capacity"], result["cpu_allocatable"], result["cpu_requested"]) == (64, 63.5, 0.5)
     assert (result["gpu_capacity"], result["gpu_requested"], result["memory_requested_bytes"]) == (8, 2, 1024**3)
@@ -207,19 +210,19 @@ def test_node_capacity_and_requests():
 
 def test_host_ip_override(monkeypatch):
     monkeypatch.setenv('GMAN_HOST_IP', '203.0.113.7')
-    assert collect.host_ip() == '203.0.113.7'
+    assert host.host_ip() == '203.0.113.7'
 
 
 def test_node_internal_ip():
     node = {'metadata': {'name': 'n1'}, 'status': {'addresses': [
         {'type': 'Hostname', 'address': 'n1'}, {'type': 'InternalIP', 'address': '10.0.0.5'}]}}
-    assert collect.nodes([node], [])[0]['internal_ip'] == '10.0.0.5'
+    assert k8s.nodes([node], [])[0]['internal_ip'] == '10.0.0.5'
 
 
 def test_parse_dotenv():
     text = "# comment\n\nENV=local\nexport TIMEOUT=5s\nREDIS_PASSWORD=\nQUOTED=\"a b # c\"\nSINGLE='x'\n" \
            "POSTGRES_CONN=postgres://u:p@db:5432/db?sslmode=disable\nNOTE=value # trailing\nnot a variable\n"
-    assert collect.parse_dotenv(text) == [
+    assert docker.parse_dotenv(text) == [
         "ENV=local", "TIMEOUT=5s", "REDIS_PASSWORD=", "QUOTED=a b # c", "SINGLE=x",
         "POSTGRES_CONN=postgres://u:p@db:5432/db?sslmode=disable", "NOTE=value"]
 
@@ -241,13 +244,13 @@ def test_read_container_file_uses_docker_cp():
         found = args[2] == "abc:/app/.env.local"
         return subprocess.CompletedProcess(args, 0 if found else 1, tar_of(".env.local", b"A=1\n") if found else b"")
 
-    assert collect.read_container_file("abc", "/app/.env.local", run=run) == "A=1\n"
-    assert collect.read_container_file("abc", "/app/.env", run=run) is None
+    assert docker.read_container_file("abc", "/app/.env.local", run=run) == "A=1\n"
+    assert docker.read_container_file("abc", "/app/.env", run=run) is None
     assert calls[0] == ["docker", "cp", "abc:/app/.env.local", "-"]
 
 
 def test_env_files_from_working_dir_read_once_per_start(monkeypatch):
-    monkeypatch.setattr(collect, "env_file_cache", {})
+    monkeypatch.setattr(docker, "env_file_cache", {})
     reads = []
 
     def read(cid, path):
@@ -255,10 +258,10 @@ def test_env_files_from_working_dir_read_once_per_start(monkeypatch):
         return "JWT_SECRET=s\nKAFKA=kafka:9092\n" if path == "/app/.env.local" else None
 
     c = {"Id": "abc", "Config": {"WorkingDir": "/app/"}, "State": {"StartedAt": "t1"}}
-    assert collect.env_files(c, read=read) == {"/app/.env.local": ["JWT_SECRET=s", "KAFKA=kafka:9092"]}
-    assert len(reads) == len(collect.ENV_FILES) and reads[0] == "/app/.env"
-    collect.env_files(c, read=read)
-    assert len(reads) == len(collect.ENV_FILES)  # cached while the container keeps running
-    collect.env_files({**c, "State": {"StartedAt": "t2"}}, read=read)
-    assert len(reads) == 2 * len(collect.ENV_FILES)  # restarted: read again
-    assert collect.env_files({"Id": "x", "Config": {}, "State": {}}, read=lambda cid, path: None) == {}
+    assert docker.env_files(c, read=read) == {"/app/.env.local": ["JWT_SECRET=s", "KAFKA=kafka:9092"]}
+    assert len(reads) == len(docker.ENV_FILES) and reads[0] == "/app/.env"
+    docker.env_files(c, read=read)
+    assert len(reads) == len(docker.ENV_FILES)  # cached while the container keeps running
+    docker.env_files({**c, "State": {"StartedAt": "t2"}}, read=read)
+    assert len(reads) == 2 * len(docker.ENV_FILES)  # restarted: read again
+    assert docker.env_files({"Id": "x", "Config": {}, "State": {}}, read=lambda cid, path: None) == {}

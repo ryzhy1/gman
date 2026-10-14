@@ -317,7 +317,8 @@ up{job="otel"} в Prometheus.
 sudo useradd --system --no-create-home --shell /usr/sbin/nologin gman-agent
 sudo useradd --system --no-create-home --shell /usr/sbin/nologin gman-otel
 sudo install -d -m 0755 /opt/gman/agent /etc/gman
-sudo install -m 0644 agent/collect.py /opt/gman/agent/
+python3 agent/build.py   # agent/dist/gman-agent.pyz: агент одним файлом, на хосте нужен только python3
+sudo install -m 0644 agent/dist/gman-agent.pyz /opt/gman/agent/
 sudo install -m 0600 deploy/systemd/agent.env.example /etc/gman/agent.env     # заполнить
 sudo install -m 0644 deploy/systemd/otelcol.env.example /etc/gman/otelcol.env # заполнить
 sudo install -m 0644 deploy/otel-agent.example.yaml /etc/gman/otel-agent.yaml
@@ -439,6 +440,11 @@ docker compose или kubectl не требует CI-события для по�
 python3 agent/collect.py --runtime docker --source-id server-01
 ```
 
+Код агента — пакет agent/gman_agent (только stdlib): common, docker, kubernetes, gpu, host,
+transport (доставка, spool, блокировка), watch (`--watch`), cli. agent/collect.py запускает его
+из репозитория. На узлы ставится сборка одним файлом: `python3 agent/build.py` →
+agent/dist/gman-agent.pyz, запуск `python3 gman-agent.pyz` с теми же аргументами.
+
 Без --send выводится нормализованный JSON, без отправки в сеть. Для доставки
 задайте GMAN_URL (например, http://<сервер GMan>:8080) и добавьте --send.
 Запуск раз в минуту без пересечений — systemd timer из deploy/systemd (раздел
@@ -558,7 +564,8 @@ hex ID контейнера — и сверяет их с pod-ами класт�
 ### Процессы GPU в Kubernetes
 
 Агент кластера работает через kubectl, часто вне узлов, и не видит PID узла. Поэтому
-на каждом GPU-узле запускается отдельный экземпляр агента в режиме kubernetes-node:
+на каждом GPU-узле запускается отдельный экземпляр агента в режиме kubernetes-node
+(в кластере — DaemonSet deploy/gpu-attribution-k8s.yaml с gman-agent.pyz в ConfigMap):
 
 ```sh
 python3 agent/collect.py --runtime kubernetes-node --cluster cluster-01 --node gpu-1 \

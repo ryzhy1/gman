@@ -12,7 +12,7 @@ rules:
   - apiGroups: ['']
     resources: ['pods', 'nodes']
     verbs: ['get', 'list']
-  # collect.py --watch: watch API for pods; pod and node Events (reason/count/time only, messages are not sent).
+  # Agent --watch: watch API for pods; pod and node Events (reason/count/time only, messages are not sent).
   # Node Events live in the namespace "default": a ClusterRole bound cluster-wide (below) covers it; a namespaced
   # Role would not see them.
   - apiGroups: ['']

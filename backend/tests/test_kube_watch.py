@@ -1,4 +1,4 @@
-"""Kubernetes --watch, pod Events and Docker OOM capture in agent/collect.py (fixtures, no cluster needed)."""
+"""Kubernetes --watch, pod Events and Docker OOM capture in the agent (fixtures, no cluster needed)."""
 import io
 import json
 import queue
@@ -8,8 +8,9 @@ from urllib.error import HTTPError
 
 import pytest
 
-from agent import collect
-from agent.collect import KubeWatcher, Spool, Watcher
+from agent.gman_agent import cli, common, docker, kubernetes as k8s, watch
+from agent.gman_agent.watch import KubeWatcher, Watcher
+from agent.gman_agent.transport import Spool
 from backend.tests.test_agent_reliability import Clock, FakeLines, event as docker_event, snap
 
 
@@ -43,12 +44,12 @@ def node_ev(uid, reason, message="", node="node-1", component="kubelet", last="2
 # --- Events mapping -------------------------------------------------------------------------------
 
 def refs(*pods):
-    return {p["metadata"]["uid"]: collect.pod_ref(p) for p in pods}
+    return {p["metadata"]["uid"]: k8s.pod_ref(p) for p in pods}
 
 
 def test_event_is_mapped_to_instance_without_message():
     secret = "Liveness probe failed: HTTP probe failed with statuscode: 500, body: password=hunter2"
-    mapped = collect.kube_event(kube_ev("e1", "Unhealthy", "p1", secret, count=4), refs(pod("p1")))
+    mapped = k8s.kube_event(kube_ev("e1", "Unhealthy", "p1", secret, count=4), refs(pod("p1")))
     assert mapped == {"uid": "e1", "reason": "Unhealthy", "type": "Warning", "count": 4,
                       "first_at": "2026-10-11T10:00:00Z", "last_at": "2026-10-11T10:05:00Z",
                       "service_id": "api", "environment": "prod", "namespace": "prod", "pod": "api-1",
@@ -69,7 +70,7 @@ def test_event_is_mapped_to_instance_without_message():
     ("OOMKilling", "Memory cgroup out of memory: Killed process 1234 (python)", ""),
 ])
 def test_event_detail_keeps_only_fixed_phrases(reason, message, detail):
-    assert collect.event_detail(reason, message) == detail
+    assert k8s.event_detail(reason, message) == detail
 
 
 def test_events_filtered_by_reason_kind_and_known_service():
@@ -82,7 +83,7 @@ def test_events_filtered_by_reason_kind_and_known_service():
                "eventTime": "2026-10-11T10:07:00.123456Z", "series": {"count": 7,
                                                                     "lastObservedTime": "2026-10-11T10:09:00.5Z"}},
               {**kube_ev("e6", "Evicted", "p1"), "involvedObject": {"kind": "Node", "name": "node-1"}}]
-    mapped = collect.kube_events(events, refs(p1, unlabeled))
+    mapped = k8s.kube_events(events, refs(p1, unlabeled))
     assert [(m["uid"], m["count"], m["instance_id"]) for m in mapped] == [("e5", 7, ""), ("e1", 1, "p1:app")]
     assert mapped[0]["last_at"] == "2026-10-11T10:09:00.5Z" and mapped[0]["instance_name"] == "api-1"
 
@@ -99,23 +100,23 @@ def test_one_shot_kubernetes_collects_events_and_tolerates_missing_rbac(monkeypa
             return json.dumps({"items": [kube_ev("e1", "BackOff", "p1")] if kind == "Pod" else [node_ev("n1", "Rebooted")]})
         return json.dumps({"items": [pod("p1")] if args[2] == "pods" else []})
 
-    monkeypatch.setattr(collect, "command", kubectl)
-    data = collect.collect("kubernetes", "cluster-01")
+    monkeypatch.setattr(common, "command", kubectl)
+    data = cli.collect("kubernetes", "cluster-01")
     assert [e["uid"] for e in data["events"]] == ["e1", "n1"] and not data["errors"]
     assert "involvedObject.kind=Pod" in calls[2] and "involvedObject.kind=Node" in calls[3]
     forbidden.add("Node")
-    data = collect.collect("kubernetes", "cluster-01")
+    data = cli.collect("kubernetes", "cluster-01")
     assert [e["uid"] for e in data["events"]] == ["e1"]
     assert data["errors"] == ["kubernetes node events unavailable: CalledProcessError"]
     forbidden.add("Pod")
-    data = collect.collect("kubernetes", "cluster-01")
+    data = cli.collect("kubernetes", "cluster-01")
     assert data["events"] == [] and len(data["errors"]) == 2 and len(data["instances"]) == 1
 
 
 def test_pod_last_oom_from_termination_state():
     oom = {"reason": "OOMKilled", "exitCode": 137, "finishedAt": "2026-10-11T10:04:00Z"}
-    assert collect.pod_instances(pod("p1", last=oom))[0]["last_oom_at"] == "2026-10-11T10:04:00Z"
-    assert collect.pod_instances(pod("p1", last={**oom, "reason": "Error"}))[0]["last_oom_at"] is None
+    assert k8s.pod_instances(pod("p1", last=oom))[0]["last_oom_at"] == "2026-10-11T10:04:00Z"
+    assert k8s.pod_instances(pod("p1", last={**oom, "reason": "Error"}))[0]["last_oom_at"] is None
 
 
 # --- Watch stream ---------------------------------------------------------------------------------
@@ -151,8 +152,8 @@ def test_kube_watch_list_watch_bookmark_410_and_backoff():
         yield from item
 
     items = queue.Queue()
-    collect.kube_watch("pods", "/api/v1/pods", items, list_=list_, stream=stream, sleep=sleeps.append,
-                       timeout=300, rng=lambda: 0.0, attempts=4)
+    watch.kube_watch("pods", "/api/v1/pods", items, list_=list_, stream=stream, sleep=sleeps.append,
+                     timeout=300, rng=lambda: 0.0, attempts=4)
     got = [items.get_nowait() for _ in range(items.qsize())]
     assert [g and (g["type"], g.get("object", {}).get("metadata", {}).get("resourceVersion")) for g in got] == [
         ("SYNC", None), ("ADDED", "11"), ("MODIFIED", "12"), ("DELETED", "16"),
@@ -184,27 +185,27 @@ def test_kube_stream_parses_kubectl_output_and_fails_on_exit_code(monkeypatch):
         return Process(json.dumps(watch_line("ADDED", {"a": 1})) + "\n\n" +
                        json.dumps(watch_line("BOOKMARK", {})) + "\n", len(runs) - 1)
 
-    monkeypatch.setattr(collect.subprocess, "Popen", popen)
-    assert [e["type"] for e in collect.kube_stream("/api/v1/pods?watch=1", 300)] == ["ADDED", "BOOKMARK"]
+    monkeypatch.setattr(k8s.subprocess, "Popen", popen)
+    assert [e["type"] for e in k8s.kube_stream("/api/v1/pods?watch=1", 300)] == ["ADDED", "BOOKMARK"]
     assert runs[0] == ["kubectl", "get", "--raw", "/api/v1/pods?watch=1"]
     with pytest.raises(subprocess.CalledProcessError):
-        list(collect.kube_stream("/api/v1/pods?watch=1", 300))
+        list(k8s.kube_stream("/api/v1/pods?watch=1", 300))
 
 
 def test_kube_stream_in_cluster_410_is_gone(monkeypatch, tmp_path):
     (tmp_path / "token").write_text("t")
     (tmp_path / "ca.crt").write_text("")
-    monkeypatch.setattr(collect, "SERVICE_ACCOUNT", tmp_path)
+    monkeypatch.setattr(k8s, "SERVICE_ACCOUNT", tmp_path)
     monkeypatch.setenv("KUBERNETES_SERVICE_HOST", "10.0.0.1")
-    monkeypatch.setattr(collect.subprocess, "Popen", lambda *a, **k: (_ for _ in ()).throw(FileNotFoundError("kubectl")))
-    monkeypatch.setattr(collect.ssl, "create_default_context", lambda cafile: None)
+    monkeypatch.setattr(k8s.subprocess, "Popen", lambda *a, **k: (_ for _ in ()).throw(FileNotFoundError("kubectl")))
+    monkeypatch.setattr(k8s.ssl, "create_default_context", lambda cafile: None)
 
     def urlopen(request, timeout, context):
         raise HTTPError(request.full_url, 410, "Gone", {}, io.BytesIO(b""))
 
-    monkeypatch.setattr(collect, "urlopen", urlopen)
-    with pytest.raises(collect.Gone):
-        list(collect.kube_stream("/api/v1/pods?watch=1", 300))
+    monkeypatch.setattr(k8s, "urlopen", urlopen)
+    with pytest.raises(k8s.Gone):
+        list(k8s.kube_stream("/api/v1/pods?watch=1", 300))
 
 
 # --- KubeWatcher ----------------------------------------------------------------------------------
@@ -226,7 +227,7 @@ def test_kube_watcher_reports_pod_deleted_between_snapshots_and_its_events():
     assert w.deadline() == 8
     seen = w.take(8)
     data = {"source_id": "cluster-01", "observed_at": datetime.now(timezone.utc).isoformat(),
-            "instances": [i for p in w.pod_list() for i in collect.pod_instances(p)], "events": []}
+            "instances": [i for p in w.pod_list() for i in k8s.pod_instances(p)], "events": []}
     interim, final = w.snapshots(data, seen)
     assert [i["id"] for i in interim["instances"]] == ["p1:app", "j1:app"]
     assert [i["id"] for i in final["instances"]] == ["p1:app"]
@@ -248,15 +249,15 @@ def test_kube_watcher_forgets_deleted_pods_after_a_while():
 
 def test_kube_watch_loop_sends_snapshots_from_cache(tmp_path, monkeypatch):
     nodes_listed = []
-    monkeypatch.setattr(collect, "kube_list", lambda args, path: nodes_listed.append(args) or {"items": []})
+    monkeypatch.setattr(k8s, "kube_list", lambda args, path: nodes_listed.append(args) or {"items": []})
     clock = Clock()
     w = KubeWatcher(0, debounce=2, interval=60)
     lines = FakeLines(clock, [(1, {"resource": "pods", "type": "SYNC", "items": [pod("p1")]}),
                               (4, {"resource": "pods", "type": "MODIFIED", "object": pod("p1", phase="Failed")}),
                               (4.5, {"resource": "events", "type": "ADDED", "object": kube_ev("e1", "BackOff", "p1")})])
     sent = []
-    collect.watch(lambda: collect.collect("kubernetes", "cluster-01", pods=w.pod_list(), events=[]), Spool(tmp_path),
-                  sent.append, w, lines=lines, clock=clock, cycles=3)
+    watch.watch(lambda: cli.collect("kubernetes", "cluster-01", pods=w.pod_list(), events=[]), Spool(tmp_path),
+                sent.append, w, lines=lines, clock=clock, cycles=3)
     # t=0: no cache yet -> pods listed; t=3: from the SYNC; t=6.5: change + Event
     assert nodes_listed[0] == ["get", "pods", "--all-namespaces"]
     assert all(args == ["get", "nodes"] for args in nodes_listed[1:]) and len(nodes_listed) == 4
@@ -289,16 +290,16 @@ def test_docker_oom_event_sets_last_oom_at_after_restart():
 def test_docker_inspect_oom_killed_sets_last_oom_at():
     c = {"Id": "c1", "Name": "/w", "Config": {"Image": "w", "Labels": {}}, "HostConfig": {},
          "State": {"Status": "exited", "OOMKilled": True, "ExitCode": 137, "FinishedAt": "2026-10-11T10:00:00.5Z"}}
-    assert collect.docker_instance(c)["last_oom_at"] == "2026-10-11T10:00:00.5Z"
+    assert docker.docker_instance(c)["last_oom_at"] == "2026-10-11T10:00:00.5Z"
     c["State"].update(OOMKilled=False)
-    assert collect.docker_instance(c)["last_oom_at"] is None
+    assert docker.docker_instance(c)["last_oom_at"] is None
 
 
 def test_parse_time_and_newest():
-    assert collect.parse_time("2026-10-11T10:00:00.123456789Z") == datetime(2026, 10, 11, 10, 0, 0, 123456,
-                                                                             tzinfo=timezone.utc)
-    assert collect.parse_time("0001-01-01T00:00:00Z") is None and collect.parse_time("bogus") is None
-    assert collect.newest(None, "2026-10-11T10:00:00Z", "2026-10-11T12:00:00+02:00") == "2026-10-11T10:00:00Z"
-    assert collect.newest(None, "") is None
+    assert common.parse_time("2026-10-11T10:00:00.123456789Z") == datetime(2026, 10, 11, 10, 0, 0, 123456,
+                                                                           tzinfo=timezone.utc)
+    assert common.parse_time("0001-01-01T00:00:00Z") is None and common.parse_time("bogus") is None
+    assert common.newest(None, "2026-10-11T10:00:00Z", "2026-10-11T12:00:00+02:00") == "2026-10-11T10:00:00Z"
+    assert common.newest(None, "") is None
     later = (datetime(2026, 10, 11, 10, 0, tzinfo=timezone.utc) + timedelta(seconds=1)).isoformat()
-    assert collect.newest("2026-10-11T10:00:00Z", later) == later
+    assert common.newest("2026-10-11T10:00:00Z", later) == later

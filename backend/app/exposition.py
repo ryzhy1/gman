@@ -30,7 +30,7 @@ log = logging.getLogger(__name__)
 # Reasons safe to use as label values: a fixed set keeps cardinality bounded and drops free-form errors.
 STATE_REASONS = {"OOMKilled", "CrashLoopBackOff", "ImagePullBackOff", "ErrImagePull", "CreateContainerConfigError",
                  "CreateContainerError", "RunContainerError", "ContainerCannotRun", "Error", "Completed"}
-# Same bits as nvidia-smi clocks_throttle_reasons and DCGM_FI_DEV_CLOCKS_EVENT_REASONS (agent/collect.py).
+# Same bits as nvidia-smi clocks_throttle_reasons and DCGM_FI_DEV_CLOCKS_EVENT_REASONS (agent/gman_agent/gpu.py).
 # Same threshold as GManSourceSilent: readings older than this are not exported as current GPU state.
 GPU_FRESH_SECONDS = 300
 THROTTLE_BITS = {"gpu_idle": 0x1, "applications_clocks": 0x2, "sw_power_cap": 0x4, "hw_slowdown": 0x8,

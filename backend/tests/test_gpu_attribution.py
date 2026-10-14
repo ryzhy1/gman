@@ -9,7 +9,7 @@ from pathlib import Path
 import httpx
 import pytest
 
-from agent import collect
+from agent.gman_agent import cli, common, gpu, kubernetes as k8s
 from backend.app import metrics
 from backend.tests.test_api import client  # noqa: F401  (fixture)
 from backend.tests.test_metrics import configured, prometheus  # noqa: F401  (fixture)
@@ -72,7 +72,7 @@ CGROUPS = [
 
 @pytest.mark.parametrize("case,text,container,pod", CGROUPS, ids=[c[0] for c in CGROUPS])
 def test_parse_cgroup_variants(case, text, container, pod):
-    assert collect.parse_cgroup(text) == {"container_id": container, "pod_uid": pod}
+    assert gpu.parse_cgroup(text) == {"container_id": container, "pod_uid": pod}
 
 
 def pod_json(uid, name, namespace, statuses, annotations=None):
@@ -111,7 +111,7 @@ def node(monkeypatch, tmp_path):
     for pid, text in CGROUP_BY_PID.items():
         (tmp_path / pid).mkdir()
         (tmp_path / pid / "cgroup").write_text(text)
-    monkeypatch.setattr(collect, "PROC_ROOT", str(tmp_path))  # PID 600 exited: no /proc entry.
+    monkeypatch.setattr(gpu, "PROC_ROOT", str(tmp_path))  # PID 600 exited: no /proc entry.
     calls = []
     def fake(args):
         calls.append(args)
@@ -120,12 +120,12 @@ def node(monkeypatch, tmp_path):
         if "clocks_throttle_reasons.active" in args[1]:
             raise subprocess.CalledProcessError(2, args)
         return QUERY + "\n" if args[1].startswith("--query-gpu") else APPS
-    monkeypatch.setattr(collect, "command", fake)
+    monkeypatch.setattr(common, "command", fake)
     return calls
 
 
 def test_node_snapshot_attributes_processes_to_pods(node):
-    data = collect.collect("kubernetes-node", "cluster-01.gpu-1", "gpu-1", "cluster-01")
+    data = cli.collect("kubernetes-node", "cluster-01.gpu-1", "gpu-1", "cluster-01")
     assert ["kubectl", "get", "pods", "--all-namespaces", "--field-selector", "spec.nodeName=gpu-1", "-o", "json"] in node
     assert (data["source_type"], data["hostname"], data["cluster"], data["instances"]) == (
         "kubernetes-node", "gpu-1", "cluster-01", [])
@@ -145,14 +145,14 @@ def test_node_snapshot_attributes_processes_to_pods(node):
 
 
 def test_node_snapshot_without_pod_list_keeps_cgroup_ids(node, monkeypatch):
-    real = collect.command
+    real = common.command
     def no_kubectl(args):
         if args[0] == "kubectl":
             raise FileNotFoundError("kubectl")
         return real(args)
-    monkeypatch.setattr(collect, "command", no_kubectl)
+    monkeypatch.setattr(common, "command", no_kubectl)
     monkeypatch.delenv("KUBERNETES_SERVICE_HOST", raising=False)
-    data = collect.collect("kubernetes-node", "cluster-01.gpu-1", "gpu-1", "cluster-01")
+    data = cli.collect("kubernetes-node", "cluster-01.gpu-1", "gpu-1", "cluster-01")
     assert "pods of the node unavailable: FileNotFoundError" in data["errors"]
     process = data["gpus"][0]["processes"][0]
     assert (process["container_id"], process["pod_uid"], "pod" in process) == (CID, UID, False)
@@ -161,11 +161,11 @@ def test_node_snapshot_without_pod_list_keeps_cgroup_ids(node, monkeypatch):
 def test_kube_get_falls_back_to_in_cluster_api(monkeypatch, tmp_path):
     (tmp_path / "token").write_text("sa-token\n")
     (tmp_path / "ca.crt").write_text("")
-    monkeypatch.setattr(collect, "SERVICE_ACCOUNT", tmp_path)
+    monkeypatch.setattr(k8s, "SERVICE_ACCOUNT", tmp_path)
     monkeypatch.setenv("KUBERNETES_SERVICE_HOST", "10.0.0.1")
     monkeypatch.setenv("KUBERNETES_SERVICE_PORT", "6443")
-    monkeypatch.setattr(collect, "command", lambda args: (_ for _ in ()).throw(FileNotFoundError(args[0])))
-    monkeypatch.setattr(collect.ssl, "create_default_context", lambda cafile: ("context", cafile))
+    monkeypatch.setattr(common, "command", lambda args: (_ for _ in ()).throw(FileNotFoundError(args[0])))
+    monkeypatch.setattr(k8s.ssl, "create_default_context", lambda cafile: ("context", cafile))
     seen = {}
 
     class Response:
@@ -179,8 +179,8 @@ def test_kube_get_falls_back_to_in_cluster_api(monkeypatch, tmp_path):
     def fake_urlopen(request, timeout, context):
         seen.update(url=request.full_url, auth=request.get_header("Authorization"), context=context)
         return Response()
-    monkeypatch.setattr(collect, "urlopen", fake_urlopen)
-    assert len(collect.node_pods("gpu-1")) == 3
+    monkeypatch.setattr(k8s, "urlopen", fake_urlopen)
+    assert len(k8s.node_pods("gpu-1")) == 3
     assert seen["url"] == "https://10.0.0.1:6443/api/v1/pods?fieldSelector=spec.nodeName%3Dgpu-1"
     assert seen["auth"] == "Bearer sa-token" and seen["context"] == ("context", str(tmp_path / "ca.crt"))
 
@@ -254,7 +254,7 @@ def test_systemd_unit_runs_node_mode_from_environment(tmp_path, monkeypatch):
         seen.append(args)
         raise RuntimeError("stop before sending")
 
-    monkeypatch.setattr(collect, "collect", fake)
+    monkeypatch.setattr(cli, "collect", fake)
     with pytest.raises(RuntimeError, match="stop"):
-        collect.main(argv)
+        cli.main(argv)
     assert seen == [("kubernetes-node", "cluster-01.gpu-1", "gpu-1", "cluster-01")]

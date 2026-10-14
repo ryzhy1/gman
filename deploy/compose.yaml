@@ -57,7 +57,7 @@ services:
       timeout: 5s
       retries: 3
     restart: unless-stopped
-  # Inventory of this server's own Docker containers. Other hosts run agent/collect.py with GMAN_URL pointing here.
+  # Inventory of this server's own Docker containers. Other hosts run the same agent with GMAN_URL pointing here.
   agent:
     build: ../agent
     command: ["--runtime", "docker", "--source-id", "${GMAN_SOURCE_ID:-gman-server}", "--send", "--watch"]

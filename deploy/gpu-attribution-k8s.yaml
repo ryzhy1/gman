@@ -1,11 +1,12 @@
 # Node-local GPU agent for Kubernetes: which pod holds which GPU process (PID -> cgroup -> container -> pod).
 # The cluster inventory agent (--runtime kubernetes) may run anywhere via kubectl and cannot see node PIDs;
-# this DaemonSet runs agent/collect.py --runtime kubernetes-node on every GPU node in the host PID namespace.
+# this DaemonSet runs gman-agent.pyz --runtime kubernetes-node on every GPU node in the host PID namespace.
 # Each node is its own GMan source "<cluster>.<node>" without instances: pods stay with the cluster source.
 #
 # Before applying (namespace gman-gpu):
 #   kubectl create namespace gman-gpu
-#   kubectl -n gman-gpu create configmap gman-agent --from-file=collect.py=agent/collect.py
+#   python3 agent/build.py   # -> agent/dist/gman-agent.pyz, the agent as one file
+#   kubectl -n gman-gpu create configmap gman-agent --from-file=gman-agent.pyz=agent/dist/gman-agent.pyz
 # Set GMAN_URL and GMAN_CLUSTER (the cluster agent's --source-id) below.
 apiVersion: v1
 kind: ServiceAccount
@@ -66,7 +67,7 @@ spec:
           args:
             - >-
               while true; do
-              python3 -I /agent/collect.py --runtime kubernetes-node --cluster "$GMAN_CLUSTER" --node "$NODE_NAME"
+              python3 -I /agent/gman-agent.pyz --runtime kubernetes-node --cluster "$GMAN_CLUSTER" --node "$NODE_NAME"
               --source-id "$GMAN_CLUSTER.$NODE_NAME" --send;
               sleep 60; done
           env:
