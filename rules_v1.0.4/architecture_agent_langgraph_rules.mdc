@@ -1,0 +1,577 @@
+---
+description: Архитектура доменного модуля, если участвует агент LangGraph. Базовое architecture_rules.mdc не менять.
+alwaysApply: true
+---
+
+# Архитектура модуля с агентом LangGraph
+
+Это **версия** @architecture_rules.mdc для случая, когда в доменном модуле
+участвует агент (LangGraph).
+
+- Нет агента — действовать только @architecture_rules.mdc.
+- Есть агент — для дерева домена, оркестратора, зависимостей и DI действовать
+  **этому** файлу. Не смешивать: не копировать рёбра графа в оркестратор и не
+  вносить правки в базовое правило «на всякий случай».
+
+Слои без изменений относительно базы: `entrypoint`, `api/`, `config/`,
+`task_retry_policy.py`, `entity.py`, `mappers.py`, `adapters/`. Их обязанности
+как в @architecture_rules.mdc, плюс запреты ниже.
+
+Тематические агенты располагаются в `agents/<agent_name>/`. Имя директории
+конкретного агента отражает его задачу в `snake_case`.
+
+---
+
+## Структура модуля
+
+Как в базовом правиле, внутри `domain_module/` добавляется `agents/`.
+В `docs/` добавляется схема агента.
+
+```text
+microservice name
+  ├── docs/
+  │   ├── service_structure.md
+  │   ├── orchestrator_flow.md   # или facade_flow.md
+  │   ├── agents/
+  │   │   └── <agent_name>_flow.md # публичный метод агента + узлы графа
+  │   └── retry_policy.md        # если есть Celery
+  └── src/
+      ├── <entrypoint>.py
+      ├── config/
+      ├── api/                   # только если есть HTTP
+      └── domain_module/
+          ├── container.py
+          ├── orchestrator.py    # use-case приложения; единственный вход снаружи
+          ├── entity.py
+          ├── mappers.py         # внешняя граница HTTP/CLI ↔ DTO доменного модуля
+          ├── agents/
+          │   └── <agent_name>/  # отдельный тематический агент
+          │       ├── agent.py   # тонкая обёртка: DTO → graph.invoke → DTO
+          │       ├── state_mapper.py # DTO из entity.py ↔ внутренний GraphState
+          │       ├── prompts/   # сборщики и шаблоны задач для LLM
+          │       │   └── <task_name>/
+          │       │       ├── builder.py # данные шага → LlmPrompt
+          │       │       ├── system.md  # системный шаблон
+          │       │       └── user.md    # пользовательский шаблон
+          │       ├── skills/    # инструкции поведения LLM, доступные агенту
+          │       │   ├── registry.py
+          │       │   └── <skill_name>/
+          │       │       └── instructions.md
+          │       └── graph/
+          │           ├── builder.py # только сборка StateGraph
+          │           ├── state.py   # внутренний контракт workflow
+          │           ├── routing.py # какой node следующий
+          │           └── nodes/     # один шаг workflow = один callable-класс
+          │               ├── <workflow_step>.py # имя отражает действие шага
+          │               ├── <next_step>.py # вызывает сервис и обновляет state
+          │               └── ...            # набор зависит от графа
+          ├── services/          # доменные правила и алгоритмы; не знают LangGraph
+          └── adapters/          # внешние системы; не знают агента и граф
+              ├── <external_system>.py # пример: llm, embedding, vector_store
+              ├── database_client.py # соединение/пул БД; используют репозитории
+              ├── repositories/
+              │   ├── session_repository.py # если есть сессии
+              │   ├── history_repository.py # если есть история
+              │   └── <domain>_repository.py # другие предметные данные сервиса
+              └── adapter_config.py # DTO узких конфигураций адаптеров; значения создаёт container
+```
+
+`prompts/` и `skills/` принадлежат агенту, не `services/` и не `adapters/`.
+Пока тексты лежат в `src/config/*_prompts.py` — это долг переноса, не норма.
+Имена файлов в `nodes/` не фиксированы правилом: использовать предметные
+`snake_case`-имена шагов текущего графа.
+
+Состав `adapters/` зависит от сервиса: `llm.py`, `embedding.py`, `reranker.py`,
+`vector_store.py` — примеры для FAQ/RAG, а не обязательный набор каждого
+агентного модуля.
+
+Слой `tools/` заранее не создавать. Если LLM/LangGraph tools появятся,
+добавлять их у агента как `agents/<agent_name>/tools/<action>_tool.py`:
+тонкая обёртка над сервисом без адаптера, контейнера, HTTP-схем и без
+бизнес-логики. Выбор tool — поведение агента/графа, не оркестратора.
+
+---
+
+## Поток runtime
+
+```text
+entrypoint / api
+    → orchestrator          # map, сессия если есть, вызов агента, ответ
+        → agent             # скрывает LangGraph
+            → graph         # nodes + routing
+                → services  # доменные правила и алгоритмы
+                    → adapters
+```
+
+Startup (только `container.py`):
+
+```text
+Settings → адаптеры → сервисы → nodes/graph → агент → оркестратор
+```
+
+Тест: если убрать LangGraph, доменные правила и алгоритмы остаются в сервисах.
+
+---
+
+## Обязанности компонентов
+
+### container.py
+
+Как в базовом правиле, плюс:
+
+- Собирает адаптеры, сервисы, nodes, компилирует граф, создаёт агента,
+  отдаёт оркестратору уже готовый агент в `ModuleDependencies`
+- Граф компилируется один раз на процесс
+- Опциональный checkpointer создаёт контейнер и передаёт builder только
+  при реальной необходимости resume незавершённого graph run
+- НЕ отдаёт контейнер в runtime-слои
+- При изменении состава модулей / DI — `docs/service_structure.md`
+  (@doc_flow_service_structure.mdc)
+
+### orchestrator.py (допустимо facade.py)
+
+По-прежнему единственная точка входа домена снаружи. Не distributed workflow
+и не замена Celery.
+
+В этой версии оркестратор координирует **use-case приложения**, а не шаги
+агента.
+
+В оркестраторе:
+
+- маппинг сырого входа в DTO
+- загрузка/сохранение сессии, если это часть use-case
+- выбор тематического агента через отдельный сервис маршрутизации
+- вызов агента
+- возврат DTO ответа
+- короткие комментарии на русском перед каждым шагом
+
+Не в оркестраторе:
+
+- `StateGraph`, nodes, routing, graph state
+- сборка prompt / skill
+- бизнес-пороги и алгоритмы шагов workflow
+
+Метод отражает шаги приложения (map → агент → ответ).
+Цепочка шагов агента живёт в графе.
+
+- НЕ содержит низкоуровневую обработку и прямые вызовы внешних библиотек
+- Оркестрирует делегированием агенту и сервисам вне агента (например сессия),
+  не алгоритмами inline
+- НЕ выбирает агента через inline-условия и НЕ использует LLM-агента-диспетчера,
+  пока обычного сервиса маршрутизации достаточно
+- НЕ service locator (`self._container.*`)
+- При изменении — `docs/orchestrator_flow.md` (@doc_flow_facade_orchestrator.mdc).
+  Там шаги приложения, не рёбра графа
+
+### Сессия и checkpoint
+
+Сессия и conversation history — use-case приложения:
+
+```text
+оркестратор → сервис сессий → репозиторий
+```
+
+Агент не загружает и не сохраняет историю самостоятельно. Каждый ход
+пользователя — новый запуск графа с контекстом из истории по `session_id`.
+Ответ со статусом ожидания ответа пользователя завершает текущий run на
+`END`; следующий message приходит как новый запрос приложения.
+
+Checkpoint LangGraph — опциональная инфраструктура незавершённого graph run
+(`interrupt` / resume по `thread_id`). Это не история чата и не замена
+`session_id`. Если checkpointer нужен, его создаёт контейнер и передаёт в
+`graph/builder` при `compile`. Не смешивать `session_id` и `thread_id`.
+Не добавлять checkpointer, пока нет требования продолжать тот же run после
+паузы внутри графа.
+
+### agent.py
+
+Тонкая обёртка над скомпилированным графом.
+
+- Зависимости через конструктор (граф уже собран контейнером)
+- Публичный метод принимает доменный DTO из `entity.py`
+- Вызывает `state_mapper.to_initial_state`, затем `graph.invoke` / `ainvoke`
+- Вызывает `state_mapper.to_domain_result` и возвращает доменный DTO
+- Ожидаемый error-path workflow: финальное error-state преобразуется в
+  выходной доменный DTO через `state_mapper`
+- НЕ маппит HTTP/CLI (оркестратор + `mappers.py`)
+- НЕ реализует преобразование DTO ↔ GraphState inline
+- НЕ реализует доменные алгоритмы и бизнес-пороги шагов workflow
+- НЕ импортирует адаптеры и `Settings`
+- НЕ глотает неожиданные исключения «молча»: они логируются на границе
+  entrypoint / оркестратора (`logger.exception`) и превращаются в
+  контрактный ответ приложения
+
+При создании или существенном изменении `agent.py` / `graph/builder.py` —
+`docs/agents/<agent_name>_flow.md`: карта метода агента, узлы графа, routing,
+какие сервисы зовёт каждая node. Формат — @doc_flow_agent.mdc.
+
+### state_mapper.py
+
+Внутренняя граница между доменными DTO и LangGraph.
+
+- `to_initial_state`: входной DTO из `entity.py` → начальный GraphState
+- `to_domain_result`: финальный GraphState → выходной DTO из `entity.py`
+- Функции вызывает `agent.py`, до и после запуска графа
+- Знает `entity.py` и `graph/state.py`
+- НЕ вызывается оркестратором, node, сервисом или адаптером
+- НЕ содержит бизнес-правила, внешние вызовы и чтение env
+
+Не использовать корневой `mappers.py` для GraphState: он отвечает за внешнюю
+границу HTTP/CLI ↔ DTO доменного модуля.
+
+Каждый тематический агент имеет собственные `state_mapper.py`, graph, prompts
+и skills. Агенты не импортируют и не выбирают друг друга.
+
+### graph/builder.py
+
+Только `add_node`, `add_edge`, `add_conditional_edges`, `compile`.
+Без prompt, без вызовов сервисов, без порогов, без чтения env.
+
+### graph/state.py
+
+Внутренний контракт workflow. Это не `entity.py`, не HTTP, не argv.
+
+- `TypedDict` или pydantic-модель агента
+- Все прикладные поля имеют явные типы; `Any` запрещён
+- Необязательность поля задаётся явно через `NotRequired` или `Type | None`
+- State содержит только данные workflow: зависимости, клиенты, сервисы,
+  настройки, builders, registry, фабрики и контейнер запрещены
+- Reducer задаётся явно через `Annotated` только для полей, которые
+  объединяют параллельные обновления; формула слияния живёт в reducer,
+  а не в node или routing
+- Reducer детерминирован и без побочных эффектов; не использовать его,
+  чтобы скрыть конфликт обычных одиночных полей
+- Если используется checkpointing, поля GraphState должны быть
+  сериализуемыми данными workflow
+- Доменный DTO не кладётся в state целиком без необходимости: хранить
+  только поля, которые реально читают nodes и routing
+- Сервисы **не** принимают graph state: node передаёт DTO / поля сущности
+- Сырой внешний payload и универсальные `dict[str, Any]` в state не класть
+
+### graph/nodes/
+
+Callable-класс. LangGraph вызывает node как `node(state)`, поэтому шаг
+живёт в `__call__`, а не в методе `run` / `execute` с обёрткой.
+
+- `__init__` — все зависимости node: сервисы, prompt-builder и другие
+  разрешённые компоненты. Контейнер создаёт экземпляр один раз при старте
+- `__call__(self, state)` — один шаг: поля state → DTO → сервис →
+  partial update. Может быть `async`, если шаг `await`-ит сервис
+- `state` передаёт LangGraph в runtime, не при создании объекта
+- Node не мутирует полученный state и возвращает только partial update с
+  изменёнными полями, а не весь state
+- В `graph.add_node` передают **экземпляр** класса, не функцию и не lambda
+
+Запрещено в node: бизнес-пороги и алгоритмы шага, импорт классов адаптеров,
+клиенты, env, контейнер, тексты prompt inline.
+
+Бизнес-решения и fallback возвращает сервис типизированным результатом.
+Node записывает это решение в partial update и не перехватывает общий
+`Exception`, чтобы угадать бизнес-ветку.
+
+```python
+class GenerateAnswerNode:
+    """Генерирует ответ по уже собранному контексту."""
+
+    def __init__(self, generator: AnswerGenerationService) -> None:
+        """Сохраняет сервис генерации."""
+        self._generator = generator
+
+    def __call__(self, state: GraphState) -> dict[str, object]:
+        """Выполняет один шаг workflow: state → сервис → partial update."""
+        request = AnswerRequest(
+            message=state["message"],
+            retrieved=state["retrieved"],
+        )
+        decision = self._generator.generate(request)
+        update = _decision_to_update(decision)
+        return update
+
+
+def _decision_to_update(decision: AnswerDecision) -> dict[str, object]:
+    """Преобразует решение сервиса в partial update state."""
+    update: dict[str, object] = {
+        "result_type": decision.result_type,
+        "text": decision.text,
+    }
+    return update
+```
+
+Асинхронный шаг — тот же класс, `__call__` объявляют `async`:
+
+```python
+async def __call__(self, state: GraphState) -> dict[str, object]:
+    """Выполняет один шаг workflow с await сервиса."""
+    prompt = self._prompt_builder.build(state["message"])
+    decision = await self._planner.plan(prompt)
+    update = _decision_to_update(decision)
+    return update
+```
+
+Регистрация в `graph/builder.py` — экземпляр, уже собранный контейнером:
+
+```python
+# контейнер / assembly
+generate_answer = GenerateAnswerNode(generator)
+
+# graph/builder.py
+graph.add_node("generate_answer", generate_answer)
+```
+
+```text
+# плохо: порог в node, мутация state, свободная функция
+def generate_answer(state):
+    if state["attempt_count"] > 1:
+        state["result_type"] = "fallback"
+        return state
+
+# плохо: обёртка вместо __call__
+graph.add_node("generate_answer", lambda state: node.run(state))
+
+# хорошо: решение принимает сервис, node только записывает update
+decision = self._policy.decide(plan, attempt_used)
+update = _decision_to_update(decision)
+return update
+```
+
+### graph/routing.py
+
+Какой node следующий. Читает уже принятое решение. Без бизнес-порогов.
+
+Повтор шага по смыслу workflow принадлежит routing: переход снова к
+предыдущему шагу или к `END` по типизированному результату в state. Это не
+технический retry внешнего вызова.
+
+Для каждого цикла графа обязательны счётчик попыток в GraphState и
+именованный предел. Routing читает счётчик и при исчерпании лимита ведёт
+к терминальному пути, а не оставляет цикл открытым.
+
+У каждого пути — успех, fallback, исчерпание лимита цикла, error-state —
+есть явный терминальный переход к `END`. Не оставлять висящие рёбра и
+routing, который может вернуть несуществующую node.
+
+Встроенный `recursion_limit` LangGraph — аварийный предохранитель на весь
+run, а не предметный лимит цикла. На него нельзя опираться вместо
+именованных счётчиков: при срабатывании путь обычно обрывается без
+контролируемого fallback. Именованный предел цикла задаёт осмысленное
+завершение; `recursion_limit` остаётся страховкой сверху.
+
+Тест: условие останется без LangGraph → `services/`. Нужно только графу → routing.
+
+### prompts/ и skills/
+
+- graph / nodes / routing — **что делать дальше**
+- prompts / skills — **как LLM должен себя вести**
+
+Skill — данные (инструкции), не сервис и не node. Не класть `skills/` в `nodes/`.
+
+- `prompts/` — каркас задачи
+- `skills/` — подключаемый профиль поведения
+- Каждый PromptBuilder получает при сборке фиксированный набор skills своей
+  LLM-задачи
+- Граф косвенно определяет набор skills переходом на специализированную node,
+  которая использует соответствующий PromptBuilder
+- Node, routing, PromptBuilder и внешний запрос не выбирают имена skills во
+  время выполнения
+- Сборку prompt делает отдельный PromptBuilder для каждой задачи агента
+- Сервисы не импортируют prompt/skill-модули: готовый `LlmPrompt` передаёт node
+  как runtime DTO
+- Settings могут переопределять тексты из env; файлы-источники — у агента
+
+Точка расширения на будущее: если одной node потребуется выбирать профиль по
+данным запроса, добавить отдельную `SkillSelectionPolicy`. Она выбирает имена
+только из allowlist агента по типизированным данным GraphState и передаёт выбор
+builder. Не добавлять такую динамику заранее; builder и routing по-прежнему не
+выбирают и не загружают skills.
+
+### PromptBuilder
+
+PromptBuilder — детерминированная граница между поведением агента и сервисом,
+который вызывает LLM.
+
+Поток:
+
+```text
+GraphState
+  → node
+  → <Task>PromptBuilder.build(...)
+  → LlmPrompt из entity.py
+  → service
+  → LLM adapter
+```
+
+- Node берёт из GraphState только данные текущего шага и вызывает builder
+- Builder соединяет системный и пользовательский шаблоны с инструкциями
+  закреплённых за ним skills
+- SkillRegistry передаёт инструкции через
+  `compose_instructions(skill_names)`; неизвестное имя skill отклоняется
+- Builder возвращает типизированный `LlmPrompt` с отдельными `system` и `user`,
+  а не payload конкретного LLM-провайдера
+- Сервис получает готовый `LlmPrompt`, выполняет операцию и преобразует ответ
+  модели в доменный DTO
+- Адаптер преобразует `LlmPrompt` в сообщения конкретного HTTP/SDK API
+
+Шаблоны и registry загружаются контейнером один раз при старте. Контейнер
+передаёт builder через конструктор registry и фиксированные имена skills.
+Builder не читает файлы и env во время запроса.
+
+PromptBuilder НЕ должен:
+
+- читать GraphState напрямую
+- выбирать skills или выполнять routing
+- вызывать LLM / адаптер
+- разбирать ответ модели
+- содержать бизнес-правила
+
+### entity.py / mappers.py / adapters/
+
+Как в @architecture_rules.mdc.
+
+Дополнительно: `entity` не знает LangGraph и LLM-провайдера.
+`adapters` не знают агента, graph, prompts.
+Node и агент не импортируют классы адаптеров.
+Сервисы вызывают предметные репозитории; репозитории используют общий клиент
+БД. Оркестратор определяет, когда загрузить или сохранить данные до/после
+агента. Агент репозитории и клиент БД не вызывает. Не создавать универсальный
+`database_repository.py`: каждый репозиторий именуется по данным, которыми
+владеет.
+
+Технический retry внешнего вызова принадлежит адаптеру или отдельной
+технической retry-политике: повторы из‑за сети, таймаута, 429/5xx и других
+временных сбоев провайдера. Это не шаг workflow и не выражается через
+routing графа.
+
+`ABC` / `Protocol` на каждый адаптер не обязателен.
+
+### services/
+
+Как в базовом правиле: DTO, правила, координация адаптеров.
+
+Дополнительно:
+
+- НЕ знают LangGraph, graph state, nodes, routing, prompt/skill-модули
+- Их вызывают nodes (и оркестратор — только шаги вне агента, например сессия)
+- Прямой вызов адаптера из node запрещён, если для шага уже есть сервис
+- Для шага с доменной логикой или интерпретацией внешнего ответа сервис
+  обязателен; прямой вызов адаптера из node — исключение без своей логики
+
+### entrypoint / api / config
+
+Как в @architecture_rules.mdc.
+Внешний код входит только в оркестратор, не в агента и не в graph.
+
+---
+
+## Правила зависимостей
+
+Разрешено:
+
+```text
+entrypoint / api → orchestrator, config
+container        → config, mappers, конкретные классы сборки
+                  (адаптеры, сервисы, nodes, builder, агент)
+orchestrator     → agent, services, mappers
+agent            → entity, state mapper, graph builder
+state mapper     → entity, graph state
+graph builder    → nodes, routing, state
+nodes            → services, entity, prompts / prompt-builder
+services         → adapters, entity
+mappers          → entity
+adapters         → entity
+```
+
+Запрещено:
+
+```text
+orchestrator     → container, api, langgraph, nodes, routing, graph state, prompts
+services         → orchestrator, mappers, api, langgraph, agent, graph, prompts, skills
+adapters         → services, orchestrator, mappers, api, agent, prompts
+nodes / agent    → adapters (конкретные классы), container, api, orchestrator
+state mapper     → services, adapters, container, api, orchestrator
+prompts / skills → adapters, services, orchestrator, langgraph
+entity           → services, adapters, mappers, langgraph, agent
+entrypoint / api → agent, graph, services, adapters
+config           → orchestrator, services, adapters, agent
+```
+
+---
+
+## Внедрение зависимостей
+
+Как в базовом правиле: всё создаётся в `container.py`, в конструкторы,
+без service locator.
+
+Дополнительно:
+
+- Агент, nodes и граф — runtime-слой: ссылку на контейнер не хранить
+- Оркестратор получает готовый агент в `ModuleDependencies` (данные, не фабрики)
+- Запрещено создавать адаптеры внутри node или сервиса
+
+Пример потока:
+
+```text
+entrypoint / api → orchestrator → mappers → DTO → agent → graph → services → adapters
+```
+
+---
+
+## Правило маппинга
+
+Как в базовом правиле: сырой ввод маппится один раз на границе оркестратора.
+Сервисы работают только с DTO.
+
+Дополнительно:
+
+- Graph state — не замена DTO. Node маппит поля state в DTO до вызова сервиса
+- Корневой `mappers.py` преобразует HTTP/CLI ↔ DTO доменного модуля
+- `agents/<agent_name>/state_mapper.py` преобразует DTO из `entity.py` ↔ GraphState
+- Функции `state_mapper` вызывает `agent.py`, не оркестратор и не node
+
+---
+
+## Тесты и документация
+
+При создании или существенном изменении агента обязательны:
+
+- unit-тесты `state_mapper`
+- unit-тест каждой node с fake-сервисом
+- unit-тест каждой функции routing
+- тесты успешных и терминальных путей скомпилированного графа
+- тест лимита каждого цикла
+- тест публичного контракта `agent.py`
+- обновление `docs/agents/<agent_name>_flow.md` и `docs/service_structure.md`
+
+Формат `docs/agents/<agent_name>_flow.md` — @doc_flow_agent.mdc.
+
+---
+
+## Не делать
+
+- править @architecture_rules.mdc, чтобы «вписать» агента
+- второй публичный вход в домен через агента или graph
+- доменные алгоритмы и бизнес-пороги внутри nodes
+- `Settings` в node / graph / агенте
+- skill как Python-обёртку над capability / адаптером
+- слой `tools/`, пока LLM/LangGraph tools реально не используются
+- искусственный top-level `application/` вместо пакета домена
+
+---
+
+## Примеры для FAQ/RAG-сервиса
+
+Ниже — иллюстрации, не обязательный состав каждого агентного модуля.
+
+Примеры имён nodes: `plan_request.py`, `generate_answer.py`,
+`validate_answer.py`. Образец callable-класса с `__call__` — в разделе
+`graph/nodes/` выше.
+
+Примеры бизнес-решений в сервисах: лимит clarification → `contact_form`,
+`invalid_input`, агрегация частей ответа.
+
+Пример цепочки шагов графа: plan → execute → aggregate.
+
+Примеры адаптеров: `llm.py`, `embedding.py`, `reranker.py`,
+`vector_store.py`.
+
+Тест для этого сервиса: если убрать LangGraph, правила FAQ остаются в
+`services/`.

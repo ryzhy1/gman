@@ -18,7 +18,9 @@ NVIDIA на серверах, Bitbucket/GitLab для исходного код�
   сети и network/pid/ipc mode, user, capabilities, ulimits, log driver, restart policy,
   probes/healthcheck (без команд), GPU requests и все переменные окружения со значениями (env;
   в Kubernetes для valueFrom/envFrom — источник: Secret, ConfigMap, поле pod-а). Значения не
-  маскируются и могут содержать секреты. Commands и команды проверок не отправляются.
+  маскируются и могут содержать секреты. Параметры запуска (агент 0.8+): Docker — ENTRYPOINT и CMD
+  контейнера, Kubernetes — command/args, переопределенные в Pod (пусто — команда образа); показываются
+  как есть, тоже могут содержать секреты. Команды проверок здоровья не отправляются.
   Docker: dotenv-файлы, которые приложение читает само (godotenv, python-dotenv и т. п.), —
   .env, .env.local, .env.dev(elopment), .env.prod(uction), .env.staging, .env.test в WorkingDir
   контейнера; агент читает их через `docker cp` (без exec, до 256 КБ) один раз на запуск
@@ -317,7 +319,7 @@ up{job="otel"} в Prometheus.
 sudo useradd --system --no-create-home --shell /usr/sbin/nologin gman-agent
 sudo useradd --system --no-create-home --shell /usr/sbin/nologin gman-otel
 sudo install -d -m 0755 /opt/gman/agent /etc/gman
-python3 agent/build.py   # agent/dist/gman-agent.pyz: агент одним файлом, на хосте нужен только python3
+python3 agent/scripts/build_pyz.py   # agent/dist/gman-agent.pyz: агент одним файлом, на хосте нужен только python3
 sudo install -m 0644 agent/dist/gman-agent.pyz /opt/gman/agent/
 sudo install -m 0600 deploy/systemd/agent.env.example /etc/gman/agent.env     # заполнить
 sudo install -m 0644 deploy/systemd/otelcol.env.example /etc/gman/otelcol.env # заполнить
@@ -437,13 +439,15 @@ docker compose или kubectl не требует CI-события для по�
 На Docker-хосте нужны Python 3 и Docker CLI с правом чтения runtime:
 
 ```sh
-python3 agent/collect.py --runtime docker --source-id server-01
+python3 agent/src/collect.py --runtime docker --source-id server-01
 ```
 
-Код агента — пакет agent/gman_agent (только stdlib): common, docker, kubernetes, gpu, host,
-transport (доставка, spool, блокировка), watch (`--watch`), cli. agent/collect.py запускает его
-из репозитория. На узлы ставится сборка одним файлом: `python3 agent/build.py` →
-agent/dist/gman-agent.pyz, запуск `python3 gman-agent.pyz` с теми же аргументами.
+Код агента — agent/src (только stdlib): модули collection (снимки Docker, Kubernetes, GPU-узла),
+watching (`--watch`), delivery (spool, повторы, блокировка) и deployment_report (событие Bamboo),
+общий доступ к runtime runtime_access; точки входа agent/src/collect.py и agent/src/bamboo_event.py.
+Структура — agent/docs/service_structure.md. На узлы ставится сборка одним файлом:
+`python3 agent/scripts/build_pyz.py` → agent/dist/gman-agent.pyz, запуск `python3 gman-agent.pyz` с теми же
+аргументами.
 
 Без --send выводится нормализованный JSON, без отправки в сеть. Для доставки
 задайте GMAN_URL (например, http://<сервер GMan>:8080) и добавьте --send.
@@ -470,7 +474,7 @@ agent/dist/gman-agent.pyz, запуск `python3 gman-agent.pyz` с теми ж�
 Режим наблюдения для Docker-хоста вместо таймера:
 
 ```sh
-python3 agent/collect.py --runtime docker --source-id server-01 --send --watch
+python3 agent/src/collect.py --runtime docker --source-id server-01 --send --watch
 ```
 
 Агент читает `docker events` и отправляет снимок через --debounce (2 с) тишины после
@@ -500,7 +504,7 @@ gman_instance_last_oom_timestamp_seconds для алерта GManInstanceOOMKill
 Для Kubernetes нужен kubectl с отдельным read-only kubeconfig:
 
 ```sh
-python3 agent/collect.py --runtime kubernetes --source-id cluster-01 --send
+python3 agent/src/collect.py --runtime kubernetes --source-id cluster-01 --send
 ```
 
 Минимальный пример прав — deploy/kubernetes-rbac.yaml (pods и nodes: get/list; pods и events:
@@ -514,7 +518,7 @@ valueFrom/envFrom — только ссылку на Secret/ConfigMap (сами 
 Режим наблюдения для кластера вместо таймера:
 
 ```sh
-python3 agent/collect.py --runtime kubernetes --source-id cluster-01 --send --watch
+python3 agent/src/collect.py --runtime kubernetes --source-id cluster-01 --send --watch
 ```
 
 Агент делает list pods, pod Events и Events узлов (`kubectl get --raw`, без kubectl — API с
@@ -568,7 +572,7 @@ hex ID контейнера — и сверяет их с pod-ами класт�
 (в кластере — DaemonSet deploy/gpu-attribution-k8s.yaml с gman-agent.pyz в ConfigMap):
 
 ```sh
-python3 agent/collect.py --runtime kubernetes-node --cluster cluster-01 --node gpu-1 \
+python3 agent/src/collect.py --runtime kubernetes-node --cluster cluster-01 --node gpu-1 \
   --source-id cluster-01.gpu-1 --send
 ```
 
@@ -599,7 +603,7 @@ time-slicing/MPS они общие для pod-ов на ней.
 
 ## Bamboo
 
-В deployment job добавьте Script task `python3 agent/bamboo_event.py`. Обязательны
+В deployment job добавьте Script task `python3 agent/src/bamboo_event.py`. Обязательны
 GMAN_URL, GMAN_SERVICE_ID и GMAN_DEPLOYMENT_STATUS
 (started/succeeded/failed: отдельные tasks в начале и в final tasks).
 
@@ -806,8 +810,12 @@ docker run -d --name nvidia-gpu-exporter --restart unless-stopped --gpus all \
 
 ### Метрики LLM (vLLM)
 
-Collector читает `/metrics` серверов vLLM на своем хосте (Kubernetes — на своем узле); имена
-`vllm:*` проходят gateway и Prometheus без изменений. Правила группы gman-llm считают по сервису каталога
+Collector читает `/metrics` серверов vLLM на своем хосте (Kubernetes — на своем узле): node-otel
+сервера GMan и подключаемых хостов (deploy/otel-node.yaml), systemd-Collector (otel-agent.example.yaml)
+и DaemonSet (otel-k8s.yaml). Собираются все метрики `vllm:*` без списка имен, они проходят gateway и
+Prometheus без изменений. На сервере GMan node-otel работает в сети Compose и обращается к опубликованному
+порту vLLM через host.docker.internal: порт должен слушать не только 127.0.0.1 (`-p 8000:8000`, не
+`-p 127.0.0.1:8000:8000`); на подключаемых хостах node-otel в сети хоста, подходит любой. Правила группы gman-llm считают по сервису каталога
 (`gman_service`) и модели (`model_name` = `--served-model-name`) за 5 минут: TTFT p50/p95/p99,
 время на токен (TPOT) p50/p95, полное время запроса, ожидание в очереди, запросы/с,
 токены/с, запросы в работе и в очереди, заполненность KV-кэша, вытеснения и попадания в
@@ -830,7 +838,12 @@ Kubernetes — метка шаблона Pod `gman.service: chat` и аннот�
 токены, KV-кэш) и графики на «Ресурсах»; дашборд «GMan · LLM» (`var-service`, `var-model`) —
 задержки по перцентилям и фазам (очередь, prefill, decode), распределение TTFT, причины
 завершения запросов, токены, очередь, KV-кэш по репликам, длины промптов и ответов, загрузка
-и VRAM GPU хостов модели. Алерты: GManLlmEndpointDown (сервер не отвечает 3 минуты),
+и VRAM GPU хостов модели; дашборд «GMan · vLLM · все метрики» — все `vllm:*`, которые есть в Prometheus,
+без списка имен (панели строятся по найденным метрикам, новые метрики новых версий vLLM появляются сами):
+таблицы серверов (отвечает ли /metrics) и моделей с числом реплик, info-метрики с параметрами серверов
+(cache_config_info и др.), график на каждый gauge, rate на каждый счетчик, p50/p95/p99 и среднее на
+каждую гистограмму (дашборды «все метрики» генерирует deploy/grafana/model_servers.py). Алерты:
+GManLlmEndpointDown (сервер vLLM или Triton не отвечает 3 минуты),
 GManLlmSlowFirstToken (TTFT p95 > 5 с 10 минут), GManLlmQueueBacklog (ожидание p95 > 5 с),
 GManLlmKvCacheFull (> 95% 15 минут), GManLlmPreemptions (> 0,1/с). Пороги — в
 deploy/alerts/rules.yaml.
@@ -838,6 +851,31 @@ deploy/alerts/rules.yaml.
 Проверено: правила и алерты — promtool на синтетических рядах (deploy/alerts/rules.test.yaml),
 конфигурации Collector — `otelcol-contrib validate` 0.162.0. На настоящих vLLM и
 nvidia_gpu_exporter еще не проверено.
+
+### Метрики Triton
+
+Серверы NVIDIA Triton Inference Server подключаются так же, как vLLM, тем же Collector-ом: собираются все
+метрики `nv_*` с порта метрик Triton (8002, не HTTP API), отдельным заданием `triton` (exported_job). Счетчики
+Triton приходят в Prometheus с суффиксом `_total` (nv_inference_request_success_total, длительности в
+микросекундах — nv_inference_request_duration_us_total).
+
+Docker:
+
+```sh
+docker run -d --name vision --gpus all -p 8000:8000 -p 8001:8001 -p 8002:8002 \
+  --label gman.service=vision --label gman.environment=prod \
+  --label gman.metrics=triton --label gman.metrics.port=8002 \
+  nvcr.io/nvidia/tritonserver:<версия>-py3 tritonserver --model-repository=/models
+```
+
+Kubernetes — метка `gman.service` и аннотации `gman.io/metrics: triton`, `gman.io/metrics-port: "8002"`.
+
+Где видно: дашборд «GMan · Triton» — серверы и модели с версиями и числом реплик; сводка: запросы/с
+(успешные и ошибки по причине), среднее время запроса по фазам (очередь, вход, инференс, выход),
+запросы в очереди, батчинг (инференсов на одно исполнение), загрузка и VRAM GPU по данным Triton; затем все
+`nv_*`, найденные в Prometheus, как на дашборде «все метрики» vLLM. Недоступность сервера — алерт
+GManLlmEndpointDown. Проверено на имитации /metrics Triton через всю цепочку (Collector → gateway →
+Prometheus → Grafana); на настоящем Triton еще не проверено.
 
 ### kube-state-metrics
 
@@ -869,7 +907,7 @@ Collector-ов (DCGM, kube-state-metrics) с меткой exported_job; цель
 
 Портал читает состояние workloads через GET /api/workloads?service_id=&environment= (карточка
 сервиса) или ?cluster= (карточка кластера); нужен хотя бы service_id или
-cluster. API выполняет фиксированные шаблоны PromQL (backend/app/workloads.py, произвольный
+cluster. API выполняет фиксированные шаблоны PromQL (backend/src/telemetry/services/workload_templates.py, произвольный
 PromQL клиент не передает): ряды kube_* приводятся к ключу recording rules (source_id,
 namespace, workload_kind, workload) и фильтруются через gman:kube_workload_service:info.
 Ответ — `{enabled, error, workloads: [...]}`; у каждого Deployment, StatefulSet, DaemonSet и
@@ -940,7 +978,7 @@ Prometheus rules + Alertmanager, а не Grafana alerting: правила леж
 | deploy/alerts/rules.test.yaml | unit-тесты правил для promtool |
 | deploy/alerts/alertmanager.yaml | маршрутизация, группировка, inhibition |
 | deploy/alerts/alertmanager.sh | entrypoint: добавляет получателей из GMAN_ALERT_* и запускает Alertmanager |
-| backend/app/exposition.py | /metrics API: состояние inventory и сроки TLS-файлов для правил |
+| backend/src/exposition | /metrics API: состояние inventory и сроки TLS-файлов для правил |
 
 | Алерт | Условие | Важность |
 | --- | --- | --- |
@@ -1110,17 +1148,20 @@ GMan): `https://<host>/healthz` (сеть, DNS, nginx, сертификат по
 
 ## Проверка
 
+Зависимости API и агента управляются Poetry (backend/pyproject.toml, agent/pyproject.toml);
+у агента зависимостей времени выполнения нет, Poetry ставит только инструменты тестов.
+
 ```sh
-python3 -m venv .venv
-.venv/bin/pip install -r backend/requirements-dev.txt
-.venv/bin/python -m pytest backend/tests -q
+(cd backend && poetry install --no-root && poetry run pytest -q)
+(cd agent && poetry install --no-root && poetry run pytest -q)
 cd frontend
 npm ci
 npm run build
 ```
 
-Для разработки API: python -m uvicorn backend.app.main:app --port 8000;
-без DATABASE_URL применяется SQLite только для локальной разработки/тестов.
+Для разработки API: backend/scripts/run.sh (uvicorn main:create_app --factory --app-dir src --port 8000);
+без DATABASE_URL применяется SQLite только для локальной разработки/тестов. Переменные — backend/env_example,
+структура сервиса — backend/docs/service_structure.md.
 Frontend: npm run dev, /api проксируется на 8000.
 
 Проверено: тесты API/агента/метрик/истории конфигураций/ссылок Splunk/алертов/сроков TLS (включая spool, backoff, flock, debounce `--watch`, watch Kubernetes и Events на fixtures), TypeScript и production build,

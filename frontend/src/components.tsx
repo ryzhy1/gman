@@ -125,6 +125,7 @@ export const CONFIG_LABELS: [string, string, ((v: unknown) => string)?][] = [
   ['restart_policy', 'Restart policy'], ['probes', 'Проверки здоровья'],
   ['ports', 'Порты'], ['networks', 'Сети'], ['network_mode', 'Network mode'],
   ['mounts', 'Тома и mounts'], ['user', 'Пользователь процесса'], ['env', 'Переменные окружения'], ['env_files', 'Переменные из файлов'],
+  ['command', 'Команда (entrypoint)'], ['args', 'Аргументы запуска'],
   ['privileged', 'Privileged'], ['readonly_rootfs', 'Read-only rootfs'],
   ['cap_add', 'Добавленные capabilities'], ['cap_drop', 'Удаленные capabilities'],
   ['pid_mode', 'PID mode'], ['ipc_mode', 'IPC mode'],

@@ -25,7 +25,7 @@ Kubernetes, число workloads, модели GPU, действующие Grafa
 ```mermaid
 flowchart LR
   subgraph dhost[Docker-хост]
-    agent[agent/gman_agent<br/>timer или --watch]
+    agent[agent/src<br/>timer или --watch]
     otelN[otelcol-contrib<br/>host_metrics, docker_stats, DCGM]
     dcgm[DCGM Exporter]
   end
@@ -67,9 +67,9 @@ flowchart LR
 
 | Компонент | Реализация | Назначение |
 | --- | --- | --- |
-| Inventory agent | agent/gman_agent, Python stdlib; на узлы — один файл gman-agent.pyz (agent/build.py) | Снимок Docker-хоста, кластера или GPU-узла; spool, retry, flock, `--watch` |
-| Bamboo hook | agent/bamboo_event.py | Событие деплоя из deployment job |
-| API | backend/app (FastAPI, SQLAlchemy, Alembic) | Прием inventory и деплоев, каталог, история, конфигурации, вход, чтение метрик и алертов |
+| Inventory agent | agent/src, Python stdlib; на узлы — один файл gman-agent.pyz (agent/scripts/build_pyz.py) | Снимок Docker-хоста, кластера или GPU-узла; spool, retry, flock, `--watch` |
+| Bamboo hook | agent/src/bamboo_event.py | Событие деплоя из deployment job |
+| API | backend/src (FastAPI, SQLAlchemy, Alembic, pydantic-settings) | Прием inventory и деплоев, каталог, история, конфигурации, вход, чтение метрик и алертов |
 | Портал | frontend (React/TypeScript, Vite), nginx | Каталог, карточки, серверы и GPU, алерты, аудит |
 | Хранилище каталога | PostgreSQL 17 | Каталог, текущее состояние, история, сессии |
 | Телеметрия | otelcol-contrib 0.162.0 на узлах и gateway | Метрики хостов, контейнеров, kubelet, DCGM |
@@ -109,7 +109,7 @@ flowchart LR
 разрыва потока событий — полная сверка. Пропущенные во время разрыва короткие события не
 восстанавливаются.
 
-Kubernetes `--watch` (KubeWatcher в agent/gman_agent/watch.py): три потока — pods, Events pod-ов и Events
+Kubernetes `--watch` (KubeWatcher в agent/src/watching/services/kube_watcher.py): три потока — pods, Events pod-ов и Events
 узлов (field selector involvedObject.kind не умеет «или», а список всех Events принес бы весь
 шум Normal). Каждый
 делает list (`kubectl get --raw`, чтобы сохранить resourceVersion списка; без kubectl — API с
@@ -189,7 +189,7 @@ kube-state-metrics читает Collector DaemonSet-а на узле его pod-
 (причины, рестарты) по-прежнему берется из inventory, состояние workloads (реплики,
 rollout, Pending, Job) — из kube-state-metrics.
 
-Состояние workloads в портале (backend/app/workloads.py, `GET /api/workloads?service_id=&environment=`
+Состояние workloads в портале (backend/src/telemetry/services/workload_templates.py, `GET /api/workloads?service_id=&environment=`
 или `?cluster=`, роль «Просмотр»): шаблоны по Deployment, StatefulSet, DaemonSet и Job приводят
 ряды kube_* к ключу recording rules группы gman-workloads (source_id, namespace, workload_kind,
 workload) и соединяются с gman:kube_workload_service:info, в селектор которой подставляются
@@ -215,7 +215,7 @@ API /metrics ──┘                                                   │
 
 Через OTel gateway приходят и метрики хостов и DCGM, и kube-state-metrics кластеров.
 
-API отдает на `/metrics` состояние inventory (backend/app/exposition.py): время последнего
+API отдает на `/metrics` состояние inventory (backend/src/exposition): время последнего
 снимка источника, число ошибок сбора, Ready узлов, рестарты и причины состояния экземпляров
 (только из фиксированного списка), температуру/ECC/причины троттлинга GPU из nvidia-smi
 (не старше 5 минут), а также сроки TLS-файлов nginx из GMAN_TLS_WATCH_FILES: notAfter каждого
@@ -249,7 +249,7 @@ Grafana открывает дашборды анонимно с ролью Viewe
 
 ### Bamboo
 
-Script task `agent/bamboo_event.py` в deployment job отправляет `POST /api/deployments`
+Script task `agent/src/bamboo_event.py` в deployment job отправляет `POST /api/deployments`
 (started/succeeded/failed): build, release, environment, commit, image digest, инициатор,
 build URL, а также deployment_id (deploymentResultId), version и image для сверки.
 Значения по умолчанию берутся из документированных переменных `bamboo_*` (см. README).
@@ -363,7 +363,7 @@ plane, а не Events. Ни то, ни другое не реализовано:
 
 ### Релизы: сверка Bamboo и runtime
 
-Реализовано в backend/app/releases.py, таблица `releases` (миграция 0004_releases),
+Реализовано в backend/src/releases, таблица `releases` (миграция 0004_releases),
 ссылка `events.release_id`. Релиз — один прогон deployment Bamboo для пары
 сервис/окружение: версия и релиз Bamboo, image ref и digest, commit, сборка,
 инициатор из Bamboo, время начала, статус и причина, прогресс экземпляров.
@@ -546,8 +546,9 @@ host.id = CN сертификата хоста; для сертификата к
 
 Данные: агент отправляет allowlist полей inspect/Pod spec, включая все переменные окружения
 со значениями (Kubernetes valueFrom/envFrom — ссылкой на источник). Они хранятся и показываются
-без маскирования и могут содержать секреты. Команды, args и команды проверок здоровья не
-собираются и отвергаются схемой API; labels — только allowlist происхождения. Ссылки каталога — только HTTP(S) без учетных
+без маскирования и могут содержать секреты. Параметры запуска (Docker ENTRYPOINT/CMD, Kubernetes
+command/args из Pod) собираются и показываются так же, как есть; команды проверок здоровья не собираются
+и отвергаются схемой API; labels — только allowlist происхождения. Ссылки каталога — только HTTP(S) без учетных
 данных; токены не помещаются в URL. Ошибки API не раскрывают параметры SQL и inventory.
 
 Привилегии на узлах: агент и Collector Docker-хоста получают Docker socket через группу

@@ -4,7 +4,7 @@
 #                        DCGM fields as enabled in deploy/dcgm-counters.csv; counters carry the suffix _total.
 #   kube_*               kube-state-metrics (deploy/kube-state-metrics.yaml) through the cluster's node Collector;
 #                        source_id = cluster (K8S_CLUSTER_NAME), no host_id.
-#   gman_*               inventory state from the API's /metrics (backend/app/exposition.py).
+#   gman_*               inventory state from the API's /metrics (backend/src/exposition).
 #   nvidia_smi_*         nvidia_gpu_exporter (github.com/utkuozdemir/nvidia_gpu_exporter) scraped by the node Collector;
 #                        GPUs are labelled uuid without the "GPU-" prefix, rules below add it as UUID like DCGM.
 #   vllm:*               vLLM /metrics scraped by the node Collector, names as vLLM exports them;
@@ -396,13 +396,13 @@ groups:
           sum by (gman_service, model_name) (rate(vllm:prefix_cache_hits_total[5m]))
           / sum by (gman_service, model_name) (rate(vllm:prefix_cache_queries_total[5m])) > -1
 
-      # `up` of the Collector's vllm scrape, re-exported by the gateway with exported_job.
+      # `up` of the Collector's vllm and triton scrapes, re-exported by the gateway with exported_job.
       - alert: GManLlmEndpointDown
-        expr: max by (host_id, gman_service, exported_instance) (up{job="otel", exported_job="vllm"}) == 0
+        expr: max by (host_id, gman_service, exported_job, exported_instance) (up{job="otel", exported_job=~"vllm|triton"}) == 0
         for: 3m
         labels: {severity: critical, scope: instance}
         annotations:
-          summary: 'vLLM {{ $labels.gman_service }} на {{ $labels.host_id }} не отвечает'
+          summary: 'Сервер модели {{ $labels.gman_service }} ({{ $labels.exported_job }}) на {{ $labels.host_id }} не отвечает'
           description: 'Collector не может прочитать {{ $labels.exported_instance }}/metrics три минуты: сервер модели остановлен или завис.'
           runbook_url: '{{ $externalLabels.gman_portal }}/#alerts/GManLlmEndpointDown'
       - alert: GManLlmSlowFirstToken
@@ -740,7 +740,7 @@ groups:
             работают на узлах, где по nodeSelector/affinity/taints их быть не должно.
           runbook_url: '{{ $externalLabels.gman_portal }}/#alerts/GManDaemonSetMisscheduled'
 
-  # Releases (backend/app/releases.py): gman_release_status has one series per service/environment for its
+  # Releases (backend/src/releases): gman_release_status has one series per service/environment for its
   # latest release. The alert stays while that release is failed and resolves with the next release.
   - name: gman-releases
     rules:
@@ -754,7 +754,7 @@ groups:
             в статусе failed: ошибка в Bamboo, сбой новых экземпляров или тайм-аут выката. Причина — на вкладке «Релизы» сервиса.
           runbook_url: '{{ $externalLabels.gman_portal }}/#alerts/GManReleaseFailed'
 
-  # TLS files of nginx (backend/app/exposition.py, GMAN_TLS_WATCH_FILES): one series per watched file (and per
+  # TLS files of nginx (backend/src/exposition, GMAN_TLS_WATCH_FILES): one series per watched file (and per
   # certificate of a bundle). nginx verifies OTLP client certificates against crl.pem: past its nextUpdate every
   # client is rejected and telemetry stops from all servers, so the CRL has its own alerts.
   - name: gman-tls

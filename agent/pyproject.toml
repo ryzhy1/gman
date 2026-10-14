@@ -1,0 +1,23 @@
+[project]
+name = "gman-agent"
+version = "0.8.0"
+description = "GMan inventory agent: Docker, Kubernetes and GPU snapshots (stdlib only at runtime)"
+requires-python = ">=3.10"
+# Хостам нужен только python3: агент ставится одним файлом gman-agent.pyz без сторонних пакетов.
+dependencies = []
+
+[tool.poetry]
+package-mode = false
+
+[tool.poetry.group.dev.dependencies]
+pytest = "9.1.1"
+# Проверка контракта: вывод агента разбирается HTTP-моделями GMan API (backend/src/api/schemas).
+pydantic = "2.14.1"
+
+[build-system]
+requires = ["poetry-core>=2.0.0"]
+build-backend = "poetry.core.masonry.api"
+
+[tool.pytest.ini_options]
+pythonpath = ["src", "tests"]
+testpaths = ["tests"]

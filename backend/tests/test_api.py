@@ -1,32 +1,4 @@
-import importlib
-from datetime import datetime, timedelta, timezone
-
-import pytest
-from fastapi.testclient import TestClient
-
-from backend.tests.database import database_url
-
-
-@pytest.fixture
-def client(tmp_path, monkeypatch):
-    monkeypatch.setenv("DATABASE_URL", database_url(tmp_path))
-    from backend.app import main
-    importlib.reload(main)
-    with TestClient(main.app, raise_server_exceptions=False) as c:
-        yield c
-    main.engine.dispose()
-
-
-def snapshot(offset=0):
-    return {"source_id": "node-1", "source_type": "docker-host", "hostname": "host",
-            "observed_at": (datetime.now(timezone.utc) + timedelta(seconds=offset)).isoformat(),
-            "instances": [{"id": "container-1", "name": "api", "runtime": "docker", "status": "running",
-                           "service_id": "api", "started_at": "2026-10-10T10:00:00.123456789Z",
-                           "config": {"image": "api:v1"}}]}
-
-
-def post(client, value):
-    return client.post("/api/inventory", json=value)
+from snapshot_factory import post, snapshot
 
 
 def test_no_credentials_needed(client):

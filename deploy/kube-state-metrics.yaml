@@ -78,7 +78,7 @@ spec:
             - --port=8080
             - --telemetry-port=8081
             - --resources=daemonsets,deployments,jobs,nodes,pods,replicasets,statefulsets
-            # Keep in sync with deploy/alerts/rules.yaml, deploy/grafana/dashboards/gman-k8s.json and backend/app/workloads.py.
+            # Keep in sync with deploy/alerts/rules.yaml, deploy/grafana/dashboards/gman-k8s.json and backend/src/telemetry/services/workload_templates.py.
             - >-
               --metric-allowlist=kube_deployment_spec_replicas,kube_deployment_spec_paused,kube_deployment_metadata_generation,
               kube_deployment_status_observed_generation,kube_deployment_status_condition,

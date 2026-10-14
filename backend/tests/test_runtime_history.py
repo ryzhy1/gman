@@ -1,7 +1,7 @@
 """Kubernetes Events, OOM time and history gaps in the API (ingest, history, /metrics)."""
 from datetime import datetime, timedelta, timezone
 
-from backend.tests.test_api import client, post  # noqa: F401  (pytest fixture)
+from snapshot_factory import post
 
 T0 = datetime.now(timezone.utc) - timedelta(hours=2)
 
@@ -27,12 +27,12 @@ def kube_event(count=1, last=60, uid="e1", reason="BackOff"):
             "detail": "restarting failed container"}
 
 
-def events(client, service_id=None):  # noqa: F811
+def events(client, service_id=None):
     query = f"?service_id={service_id}" if service_id is not None else ""
     return client.get("/api/events" + query).json()["events"]
 
 
-def test_kubernetes_events_are_recorded_once_per_occurrence(client):  # noqa: F811
+def test_kubernetes_events_are_recorded_once_per_occurrence(client):
     assert post(client, snapshot(0, [instance()], events=[kube_event()])).json()["accepted"]
     # Relisted after a reconnect: same uid, count and time -> nothing new.
     post(client, snapshot(30, [instance()], events=[kube_event()]))
@@ -47,12 +47,12 @@ def test_kubernetes_events_are_recorded_once_per_occurrence(client):  # noqa: F8
     assert "events" not in source
 
 
-def test_event_reason_outside_allowlist_is_rejected(client):  # noqa: F811
+def test_event_reason_outside_allowlist_is_rejected(client):
     assert post(client, snapshot(0, events=[kube_event(reason="Pulled")])).status_code == 422
     assert post(client, snapshot(0, events=[{**kube_event(), "message": "secret"}])).status_code == 422
 
 
-def test_oom_time_survives_docker_restart_and_is_exported(client):  # noqa: F811
+def test_oom_time_survives_docker_restart_and_is_exported(client):
     post(client, snapshot(0, [instance()]))
     post(client, snapshot(30, [instance(last_oom_at=at(20))]))
     # Agent restarted (watch state lost) and the container was restarted by its policy: no OOM reported.
@@ -68,7 +68,7 @@ def test_oom_time_survives_docker_restart_and_is_exported(client):  # noqa: F811
     assert float(line.rsplit(" ", 1)[1]) == (T0 + timedelta(seconds=20)).timestamp()
 
 
-def test_silent_source_leaves_a_gap_per_service(client):  # noqa: F811
+def test_silent_source_leaves_a_gap_per_service(client):
     instances = [instance("c1", "api"), instance("c2", "web"), instance("c3", "")]
     post(client, snapshot(0, instances))
     post(client, snapshot(60, instances))
@@ -81,12 +81,28 @@ def test_silent_source_leaves_a_gap_per_service(client):  # noqa: F811
     assert [e["type"] for e in events(client, "web")][0] == "history-gap"
 
 
-def test_spool_overflow_is_a_gap(client, monkeypatch):  # noqa: F811
+def test_spool_overflow_is_a_gap(client, make_client):
     post(client, snapshot(0, [instance()]))
     post(client, snapshot(10, [instance()], errors=["agent spool overflow: dropped 7 oldest unsent snapshot(s)"]))
     [gap] = [e for e in events(client) if e["type"] == "history-gap"]
     assert (gap["reasons"], gap["dropped_snapshots"], gap["service_id"]) == (["spool-overflow"], 7, "api")
-    monkeypatch.setenv("GMAN_HISTORY_GAP_SECONDS", "5")
+    client = make_client(history_gap_seconds=5)
     post(client, snapshot(20, []))
     gaps = [e for e in events(client) if e["type"] == "history-gap"]
     assert len(gaps) == 2 and gaps[0]["reasons"] == ["source-silent"] and gaps[0]["service_id"] == "api"
+
+
+def test_replayed_and_ephemeral_snapshots_are_accepted(client):
+    """--watch агента: промежуточный снимок с исчезнувшим контейнером, через 1 мс — настоящий; повтор — no-op."""
+    first = snapshot(0, [])
+    eph = {"id": "eph", "name": "job", "runtime": "docker", "status": "exited", "exit_code": 0, "service_id": "",
+           "config": {"image": "busybox"}}
+    kept = {"id": "kept", "name": "api", "runtime": "docker", "status": "running", "config": {"image": "api"}}
+    interim = snapshot(1, [kept, eph])
+    final = {**interim, "instances": [kept],
+             "observed_at": (datetime.fromisoformat(interim["observed_at"]) + timedelta(milliseconds=1)).isoformat()}
+    responses = [post(client, value).json()["accepted"] for value in (first, interim, final, first)]
+    # Повтор уже доставленного (более старого) снимка безвреден, это не ошибка.
+    assert responses == [True, True, True, False]
+    types = [e["type"] for e in events(client)]
+    assert types.count("instance-appeared") == 2 and types.count("instance-removed") == 1

@@ -30,7 +30,7 @@ def test_dcgm_names_match_counters_csv():
     # Through the OTel pipeline a DCGM counter gains the suffix _total (verified on otelcol-contrib 0.162.0);
     # gauges keep the field name. Every DCGM name used by rules, API and dashboards must be enabled.
     fields = dcgm_fields()
-    sources = [DEPLOY / "alerts/rules.yaml", DEPLOY.parent / "backend/app/metrics.py",
+    sources = [DEPLOY / "alerts/rules.yaml", DEPLOY.parent / "backend/src/telemetry/services/promql_templates.py",
                *sorted((DEPLOY / "grafana/dashboards").glob("*.json"))]
     # Field 112 before DCGM 3.3: the rules and the host dashboard accept both names.
     legacy = {"DCGM_FI_DEV_CLOCK_THROTTLE_REASONS": "DCGM_FI_DEV_CLOCKS_EVENT_REASONS"}
@@ -75,7 +75,7 @@ def test_kube_state_metrics_allowlist_covers_rules_dashboards_and_portal():
     manifest = (DEPLOY / "kube-state-metrics.yaml").read_text()
     allow = set(re.findall(r"kube_\w+", manifest[manifest.index("--metric-allowlist"):manifest.index("--metric-labels")]))
     used = set()
-    for path in [DEPLOY / "alerts/rules.yaml", DEPLOY.parent / "backend/app/workloads.py",
+    for path in [DEPLOY / "alerts/rules.yaml", DEPLOY.parent / "backend/src/telemetry/services/workload_templates.py",
                  *(DEPLOY / "grafana/dashboards").glob("*.json")]:
         # Not the gman:kube_* recording rules.
         used |= set(re.findall(r"(?<![:\w])kube_[a-z_]+", path.read_text()))

@@ -1,0 +1,27 @@
+# Переменные окружения GMan API (читаются pydantic-settings, src/config/settings.py).
+# В Compose их задает deploy/compose.yaml; здесь — для локального запуска (scripts/run.sh).
+
+# PostgreSQL в работе; SQLite — только тесты и локальная разработка.
+DATABASE_URL=sqlite:///./gman.db
+# Prometheus (метрики ресурсов, workloads) и Alertmanager (активные алерты); пусто — разделы выключены.
+PROMETHEUS_URL=
+ALERTMANAGER_URL=
+# Адрес Grafana, как его видит браузер (ссылки на дашборды в портале).
+GMAN_GRAFANA_URL=
+# Секунды между точками метрик; портал обновляется в том же темпе.
+GMAN_METRICS_INTERVAL=5
+# Источник, молчащий дольше, оставляет разрыв в истории.
+GMAN_HISTORY_GAP_SECONDS=300
+# Срок хранения истории; 0 — хранить вечно.
+GMAN_RETENTION_DAYS=180
+# Релизы: тайм-аут раскатки, запас окна до начала деплоя, перезапусков до «падает».
+GMAN_RELEASE_TIMEOUT_MINUTES=30
+GMAN_RELEASE_LEAD_MINUTES=10
+GMAN_RELEASE_CRASH_RESTARTS=3
+# Ссылки на поиск Splunk; пустой адрес их выключает (README, «Splunk»).
+GMAN_SPLUNK_URL=
+GMAN_SPLUNK_SEARCH=
+GMAN_SPLUNK_INDEXES=
+# TLS-файлы nginx для алертов GManTls* (через запятую; файлы с "key" в пути не читаются).
+GMAN_TLS_WATCH_FILES=
+GMAN_LOG_LEVEL=INFO

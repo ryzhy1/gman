@@ -1,8 +1,9 @@
 import httpx
 
-from backend.app import workloads
-from backend.tests.test_api import client  # noqa: F401  (fixture)
-from backend.tests.test_metrics import configured, prometheus, vector  # noqa: F401  (fixture)
+from prometheus_stub import vector
+from telemetry.entity import Workload, WorkloadAlert
+from telemetry.services.workload_classifier import WorkloadClassifier
+from telemetry.services.workload_templates import TEMPLATES
 
 KEY = {"source_id": "cluster-01", "namespace": "shop"}
 
@@ -46,7 +47,7 @@ ANSWERS = {
 }
 
 
-def test_workloads_state_per_service(client, configured):
+def test_workloads_state_per_service(configured):
     seen = []
     def handler(request):
         query = request.url.params["query"]
@@ -55,11 +56,11 @@ def test_workloads_state_per_service(client, configured):
             if marker in query:
                 return httpx.Response(200, json=vector(*series))
         return httpx.Response(200, json=vector())
-    prometheus(handler)
+    client = configured(handler)
     params = {"service_id": "api", "environment": "prod"}
     data = client.get("/api/workloads", params=params).json()
     assert data["enabled"] and data["error"] is None
-    assert len(seen) == len(workloads.TEMPLATES) + 1
+    assert len(seen) == len(TEMPLATES) + 1
     # Every query is filtered through the join table, never by client-supplied PromQL.
     assert all('gman:kube_workload_service:info{' in q and 'service_id="api",environment="prod"}' in q for q in seen)
     assert any('workload_kind=~"Deployment|StatefulSet|DaemonSet|Job",service_id="api"' in q for q in seen)
@@ -88,12 +89,12 @@ def test_workloads_state_per_service(client, configured):
     assert [w["status"] for w in data["workloads"]] == ["stuck", "stuck", "degraded", "rolling", "ok", "ok"]
 
 
-def test_workloads_filters_and_errors(client, configured, monkeypatch):
+def test_workloads_filters_and_errors(configured, make_client):
     seen = []
     def handler(request):
         seen.append(request.url.params["query"])
         return httpx.Response(200, json=vector())
-    prometheus(handler)
+    client = configured(handler)
     data = client.get("/api/workloads", params={"cluster": "cluster-01"}).json()
     assert data == {"enabled": True, "error": None, "workloads": []}
     assert all('source_id="cluster-01"}' in q and "service_id=" not in q for q in seen)
@@ -101,10 +102,10 @@ def test_workloads_filters_and_errors(client, configured, monkeypatch):
         assert client.get("/api/workloads", params=bad).status_code == 422, bad
     def down(request):
         raise httpx.ConnectError("refused")
-    prometheus(down)
+    client = configured(down)
     data = client.get("/api/workloads", params={"service_id": "api"}).json()
     assert data["enabled"] and data["error"].startswith("Metrics store unavailable") and data["workloads"] == []
-    monkeypatch.delenv("PROMETHEUS_URL")
+    client = make_client()
     assert client.get("/api/workloads", params={"service_id": "api"}).json() == {
         "enabled": False, "error": "PROMETHEUS_URL is not configured", "workloads": []}
 
@@ -117,28 +118,36 @@ def base(**over):
     return {**w, **over}
 
 
+def classify(fields):
+    """Статус workload-а, заданного полями как в ответе API."""
+    alerts = [WorkloadAlert(**alert) for alert in fields.pop("alerts")]
+    workload = Workload(cluster="cluster-01", namespace="shop", name="api", service_id="api", environment="prod",
+                        alerts=alerts, **fields)
+    return WorkloadClassifier().classify(workload)
+
+
 def test_classify():
-    assert workloads.classify(base()) == ("ok", [])
-    assert workloads.classify(base(updated=1))[0] == "rolling"
-    assert workloads.classify(base(progressing_reason="ReplicaSetUpdated"))[0] == "rolling"
-    assert workloads.classify(base(generation=3))[0] == "rolling"
+    assert classify(base()) == ("ok", [])
+    assert classify(base(updated=1))[0] == "rolling"
+    assert classify(base(progressing_reason="ReplicaSetUpdated"))[0] == "rolling"
+    assert classify(base(generation=3))[0] == "rolling"
     # A paused Deployment with a pending change is not rolling.
-    assert workloads.classify(base(generation=3, updated=1, paused=True)) == ("ok", ["rollout приостановлен (paused)"])
-    assert workloads.classify(base(available=2)) == ("degraded", ["доступно 2 из 3"])
-    assert workloads.classify(base(available=0, updated=1))[0] == "degraded"
-    assert workloads.classify(base(pending_pods=2))[0] == "degraded"
-    assert workloads.classify(base(alerts=[{"name": "GManDaemonSetMisscheduled", "severity": "warning", "reason": ""}])) \
+    assert classify(base(generation=3, updated=1, paused=True)) == ("ok", ["rollout приостановлен (paused)"])
+    assert classify(base(available=2)) == ("degraded", ["доступно 2 из 3"])
+    assert classify(base(available=0, updated=1))[0] == "degraded"
+    assert classify(base(pending_pods=2))[0] == "degraded"
+    assert classify(base(alerts=[{"name": "GManDaemonSetMisscheduled", "severity": "warning", "reason": ""}])) \
         == ("degraded", ["GManDaemonSetMisscheduled"])
-    assert workloads.classify(base(progressing=False, progressing_reason="ProgressDeadlineExceeded"))[0] == "stuck"
-    assert workloads.classify(base(desired=None)) == ("unknown", ["нет метрик kube-state-metrics"])
-    assert workloads.classify(base(desired=0, available=0, updated=0)) == ("ok", [])
+    assert classify(base(progressing=False, progressing_reason="ProgressDeadlineExceeded"))[0] == "stuck"
+    assert classify(base(desired=None)) == ("unknown", ["нет метрик kube-state-metrics"])
+    assert classify(base(desired=0, available=0, updated=0)) == ("ok", [])
     sts = dict(kind="StatefulSet", progressing=None, progressing_reason="")
-    assert workloads.classify(base(**sts, updated=1, current_revision="a", update_revision="b"))[0] == "rolling"
+    assert classify(base(**sts, updated=1, current_revision="a", update_revision="b"))[0] == "rolling"
     # Same revision: no rollout, whatever the updated count says.
-    assert workloads.classify(base(**sts, updated=1, current_revision="a", update_revision="a"))[0] == "ok"
+    assert classify(base(**sts, updated=1, current_revision="a", update_revision="a"))[0] == "ok"
     ds = dict(kind="DaemonSet", progressing=None, progressing_reason="")
-    assert workloads.classify(base(**ds, updated=2, unavailable=1, available=2))[0] == "rolling"
-    assert workloads.classify(base(**ds, unavailable=1, available=2))[0] == "degraded"
+    assert classify(base(**ds, updated=2, unavailable=1, available=2))[0] == "rolling"
+    assert classify(base(**ds, unavailable=1, available=2))[0] == "degraded"
     job = dict(kind="Job", desired=None, failed=False, active=1)
-    assert workloads.classify(base(**job)) == ("ok", ["выполняется, pod-ов — 1"])
-    assert workloads.classify(base(**{**job, "failed": True}))[0] == "degraded"
+    assert classify(base(**job)) == ("ok", ["выполняется, pod-ов — 1"])
+    assert classify(base(**{**job, "failed": True}))[0] == "degraded"

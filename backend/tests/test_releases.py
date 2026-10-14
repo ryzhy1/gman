@@ -3,8 +3,9 @@ from datetime import datetime, timedelta, timezone
 from sqlalchemy import select, update
 from sqlalchemy.orm import Session
 
-from backend.app import db as store
-from backend.tests.test_api import client, post  # noqa: F401  (fixture)
+from conftest import orchestrators
+from database.tables import DeploymentRecord, ReleaseRecord
+from snapshot_factory import post
 
 OLD = "sha256:" + "a" * 64
 NEW = "sha256:" + "b" * 64
@@ -137,16 +138,16 @@ def test_bamboo_failure_fails_release(client):
 
 
 def test_timeout_in_periodic_job(client):
-    from backend.app import main, releases as module
+    modules = orchestrators(client)
     agent = Agent(client)
     agent.send(instance("old"))
     deploy(client, image_digest=NEW, occurred_at=ago(minutes=20))
     assert releases(client)[0]["status"] == "started"
-    module.expire(main.engine, datetime.now(timezone.utc))
+    modules.releases.expire(datetime.now(timezone.utc))
     assert releases(client)[0]["status"] == "started"
     # The housekeeping run after snapshots checks timeouts once a minute.
     assert releases(client, status="started")
-    main.retention.run(main.engine, datetime.now(timezone.utc) + timedelta(minutes=11))
+    modules.inventory.run_housekeeping(datetime.now(timezone.utc) + timedelta(minutes=11))
     [release] = releases(client)
     assert release["status"] == "failed" and release["status_reason"].startswith("Тайм-аут 30 мин")
     assert "ни один экземпляр" in release["status_reason"]
@@ -196,8 +197,7 @@ def test_replays_are_idempotent(client):
     [release] = releases(client)
     assert release["id"] == first["release_id"] and release["status"] == "succeeded"
     before = detail(client, release["id"])
-    from backend.app import main, releases as module
-    module.expire(main.engine, datetime.now(timezone.utc) + timedelta(hours=2))
+    orchestrators(client).releases.expire(datetime.now(timezone.utc) + timedelta(hours=2))
     assert detail(client, release["id"]) == before
     # Without a deployment ID, a new run of the same build/release is a redeploy, not a replay.
     legacy = {"service_id": "api", "environment": "prod", "build_id": "API-PLAN-7", "release": "release-7"}
@@ -206,14 +206,13 @@ def test_replays_are_idempotent(client):
     assert len(releases(client)) == 3
 
 
-def test_stored_request_without_new_fields_is_still_a_duplicate(client):
+def test_stored_request_without_new_fields_is_still_a_duplicate(client, engine):
     value = {"event_id": "legacy:1", "service_id": "api", "environment": "prod", "status": "started",
              "build_id": "B-1"}
     deploy_response = client.post("/api/deployments", json=value)
     assert deploy_response.json()["accepted"]
-    from backend.app import main
-    with Session(main.engine) as session:
-        row = session.get(store.Deployment, "legacy:1")
+    with Session(engine) as session:
+        row = session.get(DeploymentRecord, "legacy:1")
         row.request = {k: v for k, v in row.request.items() if k not in ("image", "version", "deployment_id")}
         session.commit()
     assert client.post("/api/deployments", json=value).json()["reason"] == "duplicate"
@@ -242,20 +241,19 @@ def test_reader_access_and_paging(client):
     assert releases(client, environment="stage") == []
 
 
-def test_retention_keeps_open_releases(client, monkeypatch):
-    from backend.app import main
-    monkeypatch.setenv("GMAN_RETENTION_DAYS", "30")
+def test_retention_keeps_open_releases(make_client, engine):
+    client = make_client(retention_days=30)
     deploy(client)
     deploy(client, run="bamboo-deploy-2")
     old = datetime.now(timezone.utc) - timedelta(days=31)
-    with Session(main.engine) as session:
-        session.execute(update(store.Release).values(started_at=old, window_start=old))
-        session.execute(update(store.Release).where(store.Release.status == "started")
+    with Session(engine) as session:
+        session.execute(update(ReleaseRecord).values(started_at=old, window_start=old))
+        session.execute(update(ReleaseRecord).where(ReleaseRecord.status == "started")
                         .values(status="rolling-out", started_at=datetime.now(timezone.utc)))
         session.commit()
-    assert main.retention.run(main.engine)
-    with Session(main.engine) as session:
-        assert [r.status for r in session.scalars(select(store.Release))] == ["rolling-out"]
+    assert orchestrators(client).inventory.run_housekeeping(datetime.now(timezone.utc))
+    with Session(engine) as session:
+        assert [r.status for r in session.scalars(select(ReleaseRecord))] == ["rolling-out"]
 
 
 def test_metrics_expose_latest_release_status(client):

@@ -96,8 +96,8 @@ const RUNBOOKS: [string, string, string[]][] = [
     'hw_slowdown/hw_power_brake: внешний сигнал от платформы — питание (PSU), перегрев шасси.',
     'Проверить журнал BMC/IPMI и блоки питания сервера.']],
   ['GManLlmEndpointDown', 'Сервер модели не отвечает', [
-    'docker ps / kubectl get pod: контейнер vLLM запущен? Логи — docker logs или kubectl logs (часто CUDA out of memory при загрузке модели).',
-    'curl http://127.0.0.1:<gman.metrics.port>/metrics на хосте: порт из метки gman.metrics.port (Docker) или аннотации gman.io/metrics-port (Kubernetes).',
+    'docker ps / kubectl get pod: контейнер vLLM или Triton (exported_job в алерте) запущен? Логи — docker logs или kubectl logs (часто CUDA out of memory при загрузке модели).',
+    'curl http://127.0.0.1:<gman.metrics.port>/metrics на хосте: порт из метки gman.metrics.port (Docker) или аннотации gman.io/metrics-port (Kubernetes); у Triton это порт метрик (8002), не HTTP API.',
     'Если сервер работает, а метрики не читаются — проверить, что порт опубликован на хосте и совпадает с меткой.']],
   ['GManLlmSlowFirstToken', 'Долгий первый токен (TTFT)', [
     'Дашборд GMan · LLM, «Фазы запроса»: если растет очередь — не хватает реплик или KV-кэша; если prefill — длинные промпты.',

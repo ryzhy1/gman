@@ -1,5 +1,5 @@
 # GMan inventory agent: one collection + submission per activation (started by gman-collect.timer).
-# Install: agent/dist/gman-agent.pyz (python3 agent/build.py) -> /opt/gman/agent/gman-agent.pyz, deploy/systemd/agent.env.example ->
+# Install: agent/dist/gman-agent.pyz (python3 agent/scripts/build_pyz.py) -> /opt/gman/agent/gman-agent.pyz, deploy/systemd/agent.env.example ->
 # /etc/gman/agent.env (mode 0600, root). See README «Production-развертывание».
 [Unit]
 Description=GMan inventory snapshot

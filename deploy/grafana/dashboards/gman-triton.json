@@ -1,0 +1,923 @@
+{
+ "uid": "gman-triton",
+ "title": "GMan · Triton",
+ "description": "Серверы NVIDIA Triton Inference Server: сводка по запросам, задержкам, очереди, батчингу и GPU, затем все метрики nv_*, которые есть в Prometheus, без списка имен.",
+ "tags": [
+  "gman"
+ ],
+ "timezone": "browser",
+ "schemaVersion": 39,
+ "version": 1,
+ "editable": true,
+ "refresh": "30s",
+ "time": {
+  "from": "now-1h",
+  "to": "now"
+ },
+ "templating": {
+  "list": [
+   {
+    "name": "service",
+    "label": "Сервис",
+    "type": "query",
+    "datasource": {
+     "type": "prometheus",
+     "uid": "prometheus"
+    },
+    "query": {
+     "query": "label_values({__name__=~\"nv_.+\"}, gman_service)",
+     "refId": "service"
+    },
+    "definition": "label_values({__name__=~\"nv_.+\"}, gman_service)",
+    "refresh": 2,
+    "sort": 1,
+    "includeAll": true,
+    "multi": true,
+    "current": {
+     "text": "All",
+     "value": "$__all"
+    },
+    "allValue": ".*"
+   },
+   {
+    "name": "model",
+    "label": "Модель",
+    "type": "query",
+    "datasource": {
+     "type": "prometheus",
+     "uid": "prometheus"
+    },
+    "query": {
+     "query": "label_values({__name__=~\"nv_.+\", gman_service=~\"$service\"}, model)",
+     "refId": "model"
+    },
+    "definition": "label_values({__name__=~\"nv_.+\", gman_service=~\"$service\"}, model)",
+    "refresh": 2,
+    "sort": 1,
+    "includeAll": true,
+    "multi": true,
+    "current": {
+     "text": "All",
+     "value": "$__all"
+    },
+    "allValue": ".*"
+   },
+   {
+    "name": "gauge",
+    "label": "Gauges",
+    "type": "query",
+    "datasource": {
+     "type": "prometheus",
+     "uid": "prometheus"
+    },
+    "query": {
+     "query": "metrics(nv_.+)",
+     "refId": "gauge"
+    },
+    "definition": "metrics(nv_.+)",
+    "refresh": 2,
+    "sort": 1,
+    "includeAll": true,
+    "multi": true,
+    "current": {
+     "text": "All",
+     "value": "$__all"
+    },
+    "regex": "/^(?!.*_(?:total|bucket|sum|count|created|info)$)(nv_.+)$/"
+   },
+   {
+    "name": "counter",
+    "label": "Счетчики",
+    "type": "query",
+    "datasource": {
+     "type": "prometheus",
+     "uid": "prometheus"
+    },
+    "query": {
+     "query": "metrics(nv_.+_total)",
+     "refId": "counter"
+    },
+    "definition": "metrics(nv_.+_total)",
+    "refresh": 2,
+    "sort": 1,
+    "includeAll": true,
+    "multi": true,
+    "current": {
+     "text": "All",
+     "value": "$__all"
+    }
+   },
+   {
+    "name": "histogram",
+    "label": "Гистограммы",
+    "type": "query",
+    "datasource": {
+     "type": "prometheus",
+     "uid": "prometheus"
+    },
+    "query": {
+     "query": "metrics(nv_.+_bucket)",
+     "refId": "histogram"
+    },
+    "definition": "metrics(nv_.+_bucket)",
+    "refresh": 2,
+    "sort": 1,
+    "includeAll": true,
+    "multi": true,
+    "current": {
+     "text": "All",
+     "value": "$__all"
+    },
+    "regex": "/^(nv_.+)_bucket$/"
+   }
+  ]
+ },
+ "links": [
+  {
+   "title": "Дашборды GMan",
+   "type": "dashboards",
+   "tags": [
+    "gman"
+   ],
+   "asDropdown": false,
+   "keepTime": true,
+   "includeVars": false,
+   "targetBlank": false,
+   "icon": "external link"
+  }
+ ],
+ "panels": [
+  {
+   "type": "row",
+   "title": "Серверы и модели",
+   "collapsed": false,
+   "panels": [],
+   "gridPos": {
+    "x": 0,
+    "w": 24,
+    "h": 1,
+    "y": 0
+   },
+   "id": 1
+  },
+  {
+   "type": "table",
+   "title": "Серверы",
+   "description": "Все серверы Triton, которые опрашивают Collector-ы, и отвечает ли их /metrics.",
+   "datasource": {
+    "type": "prometheus",
+    "uid": "prometheus"
+   },
+   "fieldConfig": {
+    "defaults": {
+     "noValue": "—"
+    },
+    "overrides": [
+     {
+      "matcher": {
+       "id": "byName",
+       "options": "Состояние"
+      },
+      "properties": [
+       {
+        "id": "mappings",
+        "value": [
+         {
+          "type": "value",
+          "options": {
+           "1": {
+            "text": "отвечает",
+            "color": "green"
+           },
+           "0": {
+            "text": "не отвечает",
+            "color": "red"
+           }
+          }
+         }
+        ]
+       },
+       {
+        "id": "custom.cellOptions",
+        "value": {
+         "type": "color-text"
+        }
+       }
+      ]
+     }
+    ]
+   },
+   "options": {
+    "showHeader": true,
+    "cellHeight": "sm",
+    "footer": {
+     "show": false
+    }
+   },
+   "targets": [
+    {
+     "datasource": {
+      "type": "prometheus",
+      "uid": "prometheus"
+     },
+     "refId": "A",
+     "expr": "max by (gman_service, gman_environment, host_id, container_name, namespace, pod, exported_instance) (up{job=\"otel\", exported_job=\"triton\", gman_service=~\"$service\"})",
+     "legendFormat": "",
+     "instant": true,
+     "range": false,
+     "format": "table"
+    }
+   ],
+   "transformations": [
+    {
+     "id": "organize",
+     "options": {
+      "excludeByName": {
+       "Time": true
+      },
+      "renameByName": {
+       "Value": "Состояние"
+      }
+     }
+    }
+   ],
+   "gridPos": {
+    "x": 0,
+    "w": 12,
+    "h": 8,
+    "y": 1
+   },
+   "id": 2
+  },
+  {
+   "type": "table",
+   "title": "Модели",
+   "description": "Модели (и версии) по сервисам и число реплик, которые сейчас отдают метрики.",
+   "datasource": {
+    "type": "prometheus",
+    "uid": "prometheus"
+   },
+   "fieldConfig": {
+    "defaults": {
+     "noValue": "—"
+    },
+    "overrides": []
+   },
+   "options": {
+    "showHeader": true,
+    "cellHeight": "sm",
+    "footer": {
+     "show": false
+    }
+   },
+   "targets": [
+    {
+     "datasource": {
+      "type": "prometheus",
+      "uid": "prometheus"
+     },
+     "refId": "A",
+     "expr": "count by (gman_service, gman_environment, model, version) (group by (gman_service, gman_environment, model, version, host_id, container_name, pod) ({__name__=~\"nv_.+\", model!=\"\", gman_service=~\"$service\", model=~\"$model\"}))",
+     "legendFormat": "",
+     "instant": true,
+     "range": false,
+     "format": "table"
+    }
+   ],
+   "transformations": [
+    {
+     "id": "organize",
+     "options": {
+      "excludeByName": {
+       "Time": true
+      },
+      "renameByName": {
+       "Value": "Реплик"
+      }
+     }
+    }
+   ],
+   "gridPos": {
+    "x": 12,
+    "w": 12,
+    "h": 8,
+    "y": 1
+   },
+   "id": 3
+  },
+  {
+   "type": "row",
+   "title": "Сводка",
+   "collapsed": false,
+   "panels": [],
+   "gridPos": {
+    "x": 0,
+    "w": 24,
+    "h": 1,
+    "y": 9
+   },
+   "id": 4
+  },
+  {
+   "type": "timeseries",
+   "title": "Запросы/с",
+   "description": "Успешные и неуспешные запросы инференса в секунду по моделям.",
+   "datasource": {
+    "type": "prometheus",
+    "uid": "prometheus"
+   },
+   "fieldConfig": {
+    "defaults": {
+     "custom": {
+      "fillOpacity": 5,
+      "stacking": {
+       "mode": "none"
+      },
+      "showPoints": "never",
+      "lineWidth": 1,
+      "spanNulls": false
+     },
+     "unit": "reqps"
+    },
+    "overrides": []
+   },
+   "options": {
+    "legend": {
+     "displayMode": "list",
+     "placement": "bottom",
+     "calcs": []
+    },
+    "tooltip": {
+     "mode": "multi",
+     "sort": "desc"
+    }
+   },
+   "targets": [
+    {
+     "datasource": {
+      "type": "prometheus",
+      "uid": "prometheus"
+     },
+     "refId": "A",
+     "expr": "sum by (gman_service, model) (rate(nv_inference_request_success_total{gman_service=~\"$service\", model=~\"$model\"}[$__rate_interval]))",
+     "legendFormat": "успешно {{gman_service}} {{model}}"
+    },
+    {
+     "datasource": {
+      "type": "prometheus",
+      "uid": "prometheus"
+     },
+     "refId": "B",
+     "expr": "sum by (gman_service, model, reason) (rate(nv_inference_request_failure_total{gman_service=~\"$service\", model=~\"$model\"}[$__rate_interval]))",
+     "legendFormat": "ошибка {{reason}} {{gman_service}} {{model}}"
+    }
+   ],
+   "gridPos": {
+    "x": 0,
+    "w": 8,
+    "h": 8,
+    "y": 10
+   },
+   "id": 5
+  },
+  {
+   "type": "timeseries",
+   "title": "Среднее время запроса по фазам",
+   "description": "Накопленная длительность (мкс) / успешные запросы за интервал: весь запрос, ожидание в очереди, подготовка входа, инференс, выдача результата.",
+   "datasource": {
+    "type": "prometheus",
+    "uid": "prometheus"
+   },
+   "fieldConfig": {
+    "defaults": {
+     "custom": {
+      "fillOpacity": 5,
+      "stacking": {
+       "mode": "none"
+      },
+      "showPoints": "never",
+      "lineWidth": 1,
+      "spanNulls": false
+     },
+     "unit": "ms"
+    },
+    "overrides": []
+   },
+   "options": {
+    "legend": {
+     "displayMode": "list",
+     "placement": "bottom",
+     "calcs": []
+    },
+    "tooltip": {
+     "mode": "multi",
+     "sort": "desc"
+    }
+   },
+   "targets": [
+    {
+     "datasource": {
+      "type": "prometheus",
+      "uid": "prometheus"
+     },
+     "refId": "A",
+     "expr": "sum by (gman_service, model) (rate(nv_inference_request_duration_us_total{gman_service=~\"$service\", model=~\"$model\"}[$__rate_interval])) / 1000 / sum by (gman_service, model) (rate(nv_inference_request_success_total{gman_service=~\"$service\", model=~\"$model\"}[$__rate_interval]))",
+     "legendFormat": "весь запрос {{gman_service}} {{model}}"
+    },
+    {
+     "datasource": {
+      "type": "prometheus",
+      "uid": "prometheus"
+     },
+     "refId": "B",
+     "expr": "sum by (gman_service, model) (rate(nv_inference_queue_duration_us_total{gman_service=~\"$service\", model=~\"$model\"}[$__rate_interval])) / 1000 / sum by (gman_service, model) (rate(nv_inference_request_success_total{gman_service=~\"$service\", model=~\"$model\"}[$__rate_interval]))",
+     "legendFormat": "очередь {{gman_service}} {{model}}"
+    },
+    {
+     "datasource": {
+      "type": "prometheus",
+      "uid": "prometheus"
+     },
+     "refId": "C",
+     "expr": "sum by (gman_service, model) (rate(nv_inference_compute_input_duration_us_total{gman_service=~\"$service\", model=~\"$model\"}[$__rate_interval])) / 1000 / sum by (gman_service, model) (rate(nv_inference_request_success_total{gman_service=~\"$service\", model=~\"$model\"}[$__rate_interval]))",
+     "legendFormat": "вход {{gman_service}} {{model}}"
+    },
+    {
+     "datasource": {
+      "type": "prometheus",
+      "uid": "prometheus"
+     },
+     "refId": "D",
+     "expr": "sum by (gman_service, model) (rate(nv_inference_compute_infer_duration_us_total{gman_service=~\"$service\", model=~\"$model\"}[$__rate_interval])) / 1000 / sum by (gman_service, model) (rate(nv_inference_request_success_total{gman_service=~\"$service\", model=~\"$model\"}[$__rate_interval]))",
+     "legendFormat": "инференс {{gman_service}} {{model}}"
+    },
+    {
+     "datasource": {
+      "type": "prometheus",
+      "uid": "prometheus"
+     },
+     "refId": "E",
+     "expr": "sum by (gman_service, model) (rate(nv_inference_compute_output_duration_us_total{gman_service=~\"$service\", model=~\"$model\"}[$__rate_interval])) / 1000 / sum by (gman_service, model) (rate(nv_inference_request_success_total{gman_service=~\"$service\", model=~\"$model\"}[$__rate_interval]))",
+     "legendFormat": "выход {{gman_service}} {{model}}"
+    }
+   ],
+   "gridPos": {
+    "x": 8,
+    "w": 8,
+    "h": 8,
+    "y": 10
+   },
+   "id": 6
+  },
+  {
+   "type": "timeseries",
+   "title": "Запросов в очереди",
+   "description": "nv_inference_pending_request_count: запросы, принятые сервером и еще не отданные на исполнение.",
+   "datasource": {
+    "type": "prometheus",
+    "uid": "prometheus"
+   },
+   "fieldConfig": {
+    "defaults": {
+     "custom": {
+      "fillOpacity": 5,
+      "stacking": {
+       "mode": "none"
+      },
+      "showPoints": "never",
+      "lineWidth": 1,
+      "spanNulls": false
+     }
+    },
+    "overrides": []
+   },
+   "options": {
+    "legend": {
+     "displayMode": "list",
+     "placement": "bottom",
+     "calcs": []
+    },
+    "tooltip": {
+     "mode": "multi",
+     "sort": "desc"
+    }
+   },
+   "targets": [
+    {
+     "datasource": {
+      "type": "prometheus",
+      "uid": "prometheus"
+     },
+     "refId": "A",
+     "expr": "sum by (gman_service, model) (nv_inference_pending_request_count{gman_service=~\"$service\", model=~\"$model\"})",
+     "legendFormat": "{{gman_service}} {{model}}"
+    }
+   ],
+   "gridPos": {
+    "x": 16,
+    "w": 8,
+    "h": 8,
+    "y": 10
+   },
+   "id": 7
+  },
+  {
+   "type": "timeseries",
+   "title": "Батчинг: инференсов на исполнение",
+   "description": "nv_inference_count / nv_inference_exec_count: сколько запросов в среднем объединяется в один запуск модели (1 — батчинг не работает).",
+   "datasource": {
+    "type": "prometheus",
+    "uid": "prometheus"
+   },
+   "fieldConfig": {
+    "defaults": {
+     "custom": {
+      "fillOpacity": 5,
+      "stacking": {
+       "mode": "none"
+      },
+      "showPoints": "never",
+      "lineWidth": 1,
+      "spanNulls": false
+     }
+    },
+    "overrides": []
+   },
+   "options": {
+    "legend": {
+     "displayMode": "list",
+     "placement": "bottom",
+     "calcs": []
+    },
+    "tooltip": {
+     "mode": "multi",
+     "sort": "desc"
+    }
+   },
+   "targets": [
+    {
+     "datasource": {
+      "type": "prometheus",
+      "uid": "prometheus"
+     },
+     "refId": "A",
+     "expr": "sum by (gman_service, model) (rate(nv_inference_count_total{gman_service=~\"$service\", model=~\"$model\"}[$__rate_interval])) / sum by (gman_service, model) (rate(nv_inference_exec_count_total{gman_service=~\"$service\", model=~\"$model\"}[$__rate_interval]))",
+     "legendFormat": "{{gman_service}} {{model}}"
+    }
+   ],
+   "gridPos": {
+    "x": 0,
+    "w": 8,
+    "h": 8,
+    "y": 18
+   },
+   "id": 8
+  },
+  {
+   "type": "timeseries",
+   "title": "Загрузка GPU (по данным Triton)",
+   "description": "nv_gpu_utilization по GPU сервера.",
+   "datasource": {
+    "type": "prometheus",
+    "uid": "prometheus"
+   },
+   "fieldConfig": {
+    "defaults": {
+     "custom": {
+      "fillOpacity": 5,
+      "stacking": {
+       "mode": "none"
+      },
+      "showPoints": "never",
+      "lineWidth": 1,
+      "spanNulls": false
+     },
+     "unit": "percentunit"
+    },
+    "overrides": []
+   },
+   "options": {
+    "legend": {
+     "displayMode": "list",
+     "placement": "bottom",
+     "calcs": []
+    },
+    "tooltip": {
+     "mode": "multi",
+     "sort": "desc"
+    }
+   },
+   "targets": [
+    {
+     "datasource": {
+      "type": "prometheus",
+      "uid": "prometheus"
+     },
+     "refId": "A",
+     "expr": "max by (gman_service, host_id, gpu_uuid) (nv_gpu_utilization{gman_service=~\"$service\"})",
+     "legendFormat": "{{gman_service}} {{host_id}} {{gpu_uuid}}"
+    }
+   ],
+   "gridPos": {
+    "x": 8,
+    "w": 8,
+    "h": 8,
+    "y": 18
+   },
+   "id": 9
+  },
+  {
+   "type": "timeseries",
+   "title": "VRAM (по данным Triton)",
+   "description": "nv_gpu_memory_used_bytes и общий объем по GPU сервера.",
+   "datasource": {
+    "type": "prometheus",
+    "uid": "prometheus"
+   },
+   "fieldConfig": {
+    "defaults": {
+     "custom": {
+      "fillOpacity": 5,
+      "stacking": {
+       "mode": "none"
+      },
+      "showPoints": "never",
+      "lineWidth": 1,
+      "spanNulls": false
+     },
+     "unit": "bytes"
+    },
+    "overrides": []
+   },
+   "options": {
+    "legend": {
+     "displayMode": "list",
+     "placement": "bottom",
+     "calcs": []
+    },
+    "tooltip": {
+     "mode": "multi",
+     "sort": "desc"
+    }
+   },
+   "targets": [
+    {
+     "datasource": {
+      "type": "prometheus",
+      "uid": "prometheus"
+     },
+     "refId": "A",
+     "expr": "max by (gman_service, host_id, gpu_uuid) (nv_gpu_memory_used_bytes{gman_service=~\"$service\"})",
+     "legendFormat": "занято {{gman_service}} {{host_id}} {{gpu_uuid}}"
+    },
+    {
+     "datasource": {
+      "type": "prometheus",
+      "uid": "prometheus"
+     },
+     "refId": "B",
+     "expr": "max by (gman_service, host_id, gpu_uuid) (nv_gpu_memory_total_bytes{gman_service=~\"$service\"})",
+     "legendFormat": "всего {{gman_service}} {{host_id}} {{gpu_uuid}}"
+    }
+   ],
+   "gridPos": {
+    "x": 16,
+    "w": 8,
+    "h": 8,
+    "y": 18
+   },
+   "id": 10
+  },
+  {
+   "type": "row",
+   "title": "Текущие значения (gauges)",
+   "collapsed": false,
+   "panels": [],
+   "gridPos": {
+    "x": 0,
+    "w": 24,
+    "h": 1,
+    "y": 26
+   },
+   "id": 11
+  },
+  {
+   "type": "timeseries",
+   "title": "$gauge",
+   "description": "Значение как экспортирует сервер, каждая серия отдельно.",
+   "datasource": {
+    "type": "prometheus",
+    "uid": "prometheus"
+   },
+   "fieldConfig": {
+    "defaults": {
+     "custom": {
+      "fillOpacity": 5,
+      "stacking": {
+       "mode": "none"
+      },
+      "showPoints": "never",
+      "lineWidth": 1,
+      "spanNulls": false
+     }
+    },
+    "overrides": []
+   },
+   "options": {
+    "legend": {
+     "displayMode": "list",
+     "placement": "bottom",
+     "calcs": []
+    },
+    "tooltip": {
+     "mode": "multi",
+     "sort": "desc"
+    }
+   },
+   "targets": [
+    {
+     "datasource": {
+      "type": "prometheus",
+      "uid": "prometheus"
+     },
+     "refId": "A",
+     "expr": "max without (job, instance, exported_job, exported_instance, otel_scope_name, otel_scope_version, server_address, server_port, service_instance_id, service_name, url_scheme) ($gauge{gman_service=~\"$service\", model=~\"$model\"})",
+     "legendFormat": "__auto"
+    }
+   ],
+   "repeat": "gauge",
+   "repeatDirection": "h",
+   "maxPerRow": 3,
+   "gridPos": {
+    "x": 0,
+    "w": 8,
+    "h": 8,
+    "y": 27
+   },
+   "id": 12
+  },
+  {
+   "type": "row",
+   "title": "Счетчики: скорость в секунду",
+   "collapsed": false,
+   "panels": [],
+   "gridPos": {
+    "x": 0,
+    "w": 24,
+    "h": 1,
+    "y": 35
+   },
+   "id": 13
+  },
+  {
+   "type": "timeseries",
+   "title": "$counter",
+   "description": "rate() за интервал графика, каждая серия отдельно.",
+   "datasource": {
+    "type": "prometheus",
+    "uid": "prometheus"
+   },
+   "fieldConfig": {
+    "defaults": {
+     "custom": {
+      "fillOpacity": 5,
+      "stacking": {
+       "mode": "none"
+      },
+      "showPoints": "never",
+      "lineWidth": 1,
+      "spanNulls": false
+     }
+    },
+    "overrides": []
+   },
+   "options": {
+    "legend": {
+     "displayMode": "list",
+     "placement": "bottom",
+     "calcs": []
+    },
+    "tooltip": {
+     "mode": "multi",
+     "sort": "desc"
+    }
+   },
+   "targets": [
+    {
+     "datasource": {
+      "type": "prometheus",
+      "uid": "prometheus"
+     },
+     "refId": "A",
+     "expr": "sum without (job, instance, exported_job, exported_instance, otel_scope_name, otel_scope_version, server_address, server_port, service_instance_id, service_name, url_scheme) (rate($counter{gman_service=~\"$service\", model=~\"$model\"}[$__rate_interval]))",
+     "legendFormat": "__auto"
+    }
+   ],
+   "repeat": "counter",
+   "repeatDirection": "h",
+   "maxPerRow": 3,
+   "gridPos": {
+    "x": 0,
+    "w": 8,
+    "h": 8,
+    "y": 36
+   },
+   "id": 14
+  },
+  {
+   "type": "row",
+   "title": "Гистограммы: перцентили и среднее",
+   "collapsed": false,
+   "panels": [],
+   "gridPos": {
+    "x": 0,
+    "w": 24,
+    "h": 1,
+    "y": 44
+   },
+   "id": 15
+  },
+  {
+   "type": "timeseries",
+   "title": "$histogram",
+   "description": "Перцентили по бакетам и среднее (sum/count) за интервал графика по сервису и модели.",
+   "datasource": {
+    "type": "prometheus",
+    "uid": "prometheus"
+   },
+   "fieldConfig": {
+    "defaults": {
+     "custom": {
+      "fillOpacity": 5,
+      "stacking": {
+       "mode": "none"
+      },
+      "showPoints": "never",
+      "lineWidth": 1,
+      "spanNulls": false
+     }
+    },
+    "overrides": []
+   },
+   "options": {
+    "legend": {
+     "displayMode": "list",
+     "placement": "bottom",
+     "calcs": []
+    },
+    "tooltip": {
+     "mode": "multi",
+     "sort": "desc"
+    }
+   },
+   "targets": [
+    {
+     "datasource": {
+      "type": "prometheus",
+      "uid": "prometheus"
+     },
+     "refId": "A",
+     "expr": "histogram_quantile(0.5, sum by (gman_service, model, le) (rate(${histogram}_bucket{gman_service=~\"$service\", model=~\"$model\"}[$__rate_interval])))",
+     "legendFormat": "p50 {{gman_service}} {{model}}"
+    },
+    {
+     "datasource": {
+      "type": "prometheus",
+      "uid": "prometheus"
+     },
+     "refId": "B",
+     "expr": "histogram_quantile(0.95, sum by (gman_service, model, le) (rate(${histogram}_bucket{gman_service=~\"$service\", model=~\"$model\"}[$__rate_interval])))",
+     "legendFormat": "p95 {{gman_service}} {{model}}"
+    },
+    {
+     "datasource": {
+      "type": "prometheus",
+      "uid": "prometheus"
+     },
+     "refId": "C",
+     "expr": "histogram_quantile(0.99, sum by (gman_service, model, le) (rate(${histogram}_bucket{gman_service=~\"$service\", model=~\"$model\"}[$__rate_interval])))",
+     "legendFormat": "p99 {{gman_service}} {{model}}"
+    },
+    {
+     "datasource": {
+      "type": "prometheus",
+      "uid": "prometheus"
+     },
+     "refId": "D",
+     "expr": "sum by (gman_service, model) (rate(${histogram}_sum{gman_service=~\"$service\", model=~\"$model\"}[$__rate_interval])) / sum by (gman_service, model) (rate(${histogram}_count{gman_service=~\"$service\", model=~\"$model\"}[$__rate_interval]))",
+     "legendFormat": "среднее {{gman_service}} {{model}}"
+    }
+   ],
+   "repeat": "histogram",
+   "repeatDirection": "h",
+   "maxPerRow": 2,
+   "gridPos": {
+    "x": 0,
+    "w": 12,
+    "h": 8,
+    "y": 45
+   },
+   "id": 16
+  }
+ ]
+}

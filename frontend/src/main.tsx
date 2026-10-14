@@ -342,7 +342,7 @@ function App() {
                 <h2>Текущая конфигурация</h2>
                 {own.map(i => <ConfigView key={i.source.source_id + i.id} instance={i} />)}
                 {!own.length && <div className="empty">Конфигурации еще не получены.</div>}
-                <p className="note">Значения переменных окружения, команды и команды проверок здоровья не собираются.</p>
+                <p className="note">Переменные окружения и параметры запуска показаны как есть и могут содержать секреты; команды проверок здоровья не собираются.</p>
                 <h2 className="subheading">История версий</h2>
                 <ConfigHistory key={service.id} serviceId={service.id}
                   instances={all.filter(i => i.service_id === service.id)} refreshKey={data.server_time} />

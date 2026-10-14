@@ -1,0 +1,70 @@
+---
+description: При создании/изменении facade или orchestrator — markdown со схемой функций (Mermaid + русские приписки в узлах)
+globs: "**/facade.py,**/orchestrator.py,**/docs/facade_flow.md,**/docs/orchestrator_flow.md"
+alwaysApply: false
+---
+
+# Схема функций facade / orchestrator
+
+При **создании** или **существенном изменении** `facade.py` / `orchestrator.py` сразу создать или обновить:
+
+`<microservice>/docs/facade_flow.md` — если файл `facade.py`  
+`<microservice>/docs/orchestrator_flow.md` — если файл `orchestrator.py`
+
+Правило самодостаточное: не ссылаться на файлы другого сервиса/репозитория.
+
+## Обязательное содержание
+
+1. **Карта методов** — таблица: метод, видимость (public/private), назначение по-русски.
+2. **Граф вызовов** — Mermaid `flowchart`: entrypoint → public → private; ветки fail / retry.
+3. **Последовательность главного use-case** — Mermaid шагов публичного метода.
+4. **Ветки commit/success/fail** (если есть) — отдельные subgraph.
+5. **Внешние зависимости** — text-tree: какие mappers / services / adapters зовутся.
+
+## Шаблон узла Mermaid
+
+```text
+method_name["method_name<br/>краткая русская приписка: что делает"]
+```
+
+- В каждом узле: **имя метода/символа** + `<br/>` + **краткая русская приписка**.
+- Подписи рёбер — по-русски или короткие доменные термины из кода.
+- Без жаргона; формулировки должны быть понятны без знания внутренних сленгов.
+
+## Каркас файла
+
+```markdown
+# <ИмяКласса> — схема функций
+
+Источник: `src/<domain>/facade.py` (или orchestrator.py).
+
+## Карта методов
+| Метод | Видимость | Назначение |
+| --- | --- | --- |
+| ... | public/private | ... |
+
+## Граф вызовов
+Кто кого вызывает…
+\`\`\`mermaid
+flowchart TB
+  ...
+\`\`\`
+
+## `<main_method>` — последовательность шагов
+\`\`\`mermaid
+flowchart TD
+  ...
+\`\`\`
+
+## Внешние зависимости
+\`\`\`text
+main_method
+  ├─ mappers / services / adapters
+\`\`\`
+```
+
+## Когда обновлять
+
+- Добавили / удалили / переименовали метод фасада или оркестратора.
+- Изменили порядок шагов use-case или ветвления fail/retry.
+- Не обновлять при правках только docstring/комментариев без смены потока.

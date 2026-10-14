@@ -10,7 +10,7 @@
    отдельно от health, происхождение по allowlist меток, история изменений по снимкам,
    retention. Исправлены баги из ревью (race `docker ps`/`inspect`, нулевое время старта,
    повторы Bamboo, молчаливый сбой nvidia-smi, 500 на не-ASCII токене и др.).
-2. Надежность агента (agent/gman_agent, только stdlib): ограниченный spool на диске,
+2. Надежность агента (agent/src, только stdlib): ограниченный spool на диске,
    повторы с backoff и jitter, неблокирующий flock, режим `--watch` по `docker events`
    с debounce и промежуточным снимком для исчезнувших контейнеров.
 3. История конфигураций: версии сервиса и экземпляра, версия целиком, структурный diff
@@ -79,7 +79,7 @@
     GManTlsCertExpired, GManTlsFileError; runbook в портале, unit-тесты promtool.
 
 16. Состояние workloads в портале: `GET /api/workloads?service_id=&environment=` или `?cluster=`
-    (роль «Просмотр», фиксированные шаблоны PromQL в backend/app/workloads.py с ключом и
+    (роль «Просмотр», фиксированные шаблоны PromQL в backend/src/telemetry/services/workload_templates.py с ключом и
     join-таблицей recording rules gman-workloads): desired/ready/available/updated/unavailable,
     generation/observedGeneration, Progressing, ревизии StatefulSet, Pending-pod-ы, Failed/active
     у Job, сработавшие алерты workload и статус «ок / раскатывается / деградирован / застрял».
@@ -182,14 +182,13 @@
 
 ```sh
 git clone <url> && cd GMan
-python3 -m venv .venv
-.venv/bin/pip install -r backend/requirements-dev.txt
-.venv/bin/python -m pytest backend/tests -q
+(cd backend && poetry install --no-root && poetry run pytest -q)
+(cd agent && poetry install --no-root && poetry run pytest -q)
 cd frontend && npm ci && npm run build && cd ..
 ```
 
 Проверка на PostgreSQL: задайте `GMAN_TEST_DATABASE_URL=postgresql+psycopg://...`
-для пустой тестовой базы — тесты пересоздают схему (см. backend/tests/database.py).
+для пустой тестовой базы — тесты пересоздают схему (см. backend/tests/conftest.py).
 
 Стенд: `docker compose up --build -d` из корня (портал :8080 с Grafana на /grafana/;
 Prometheus :9090 и Alertmanager :9093 на 127.0.0.1). .env необязателен (GMAN_SPLUNK_*,

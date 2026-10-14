@@ -70,7 +70,35 @@ function splitGpu(items: string[], docker: boolean) {
 const KNOWN = new Set(['image', 'image_id', 'runtime', 'cpu_request', 'cpu_limit', 'cpuset', 'memory_request_bytes',
   'memory_limit_bytes', 'shm_size_bytes', 'gpu_requests', 'ports', 'networks', 'network_mode', 'mounts',
   'restart_policy', 'probes', 'user', 'log_driver', 'privileged', 'readonly_rootfs', 'cap_add', 'cap_drop',
-  'pid_mode', 'ipc_mode', 'ulimits', 'env', 'env_files']);
+  'pid_mode', 'ipc_mode', 'ulimits', 'env', 'env_files', 'command', 'args']);
+
+/** A token as it would be typed in a shell: quoted when it has spaces, quotes or is empty. */
+const shellWord = (s: string) => /^[\w@%+=:,./-]+$/.test(s) ? s : `'${s.replace(/'/g, `'\\''`)}'`;
+
+/** argv as parameter rows: "--name=value", "--name value", a bare flag, or a positional argument.
+ *  The program itself (a first token that is not an option) is not a parameter. */
+function parseArgs(argv: string[]): [string, string][] {
+  const rows: [string, string][] = [];
+  for (let n = argv.length && !argv[0].startsWith('-') ? 1 : 0; n < argv.length; n++) {
+    const token = argv[n];
+    if (!token.startsWith('-') || token === '-' || token === '--') rows.push(['', token]);
+    else if (token.includes('=')) rows.push([token.slice(0, token.indexOf('=')), token.slice(token.indexOf('=') + 1)]);
+    else if (n + 1 < argv.length && !argv[n + 1].startsWith('-')) rows.push([token, argv[++n]]);
+    else rows.push([token, '']);
+  }
+  return rows;
+}
+
+function LaunchTable({ rows }: { rows: [string, string][] }) {
+  if (!rows.length) return null;
+  return <div className="table-wrap"><Table className="dense">
+    <TableHeader><TableRow><TableHead>Параметр</TableHead><TableHead>Значение</TableHead></TableRow></TableHeader>
+    <TableBody>{rows.map(([k, v], n) => <TableRow key={n}>
+      <TableCell className="align-top">{k ? <code className="break-all">{k}</code> : <span className="muted">аргумент</span>}</TableCell>
+      <TableCell className="whitespace-normal">{v ? <code className="break-all">{v}</code> : <span className="muted">флаг</span>}</TableCell>
+    </TableRow>)}</TableBody>
+  </Table></div>;
+}
 
 /** "NAME=value" split at the first "="; Kubernetes references (valueFrom, envFrom) arrive as "<...>" values. */
 function parseEnv(items: string[]): [string, string][] {
@@ -110,6 +138,9 @@ export function ConfigSections({ instance }: { instance: Placed }) {
     return { name, soft, hard };
   });
   const probes = list(c.probes);
+  // Launch parameters: Docker ENTRYPOINT + CMD, Kubernetes command/args overrides; absent from agents before 0.8.
+  const launched = Array.isArray(c.command) || Array.isArray(c.args);
+  const argv = [...list(c.command), ...list(c.args)];
   const networks = list(c.networks);
   const extra = Object.entries(c).filter(([k, v]) => !KNOWN.has(k) && v != null && v !== '' && !(Array.isArray(v) && !v.length));
   const host = (mode: unknown) => mode === 'host' ? <span className={badge('warn')}>host</span> : text(mode);
@@ -121,6 +152,17 @@ export function ConfigSections({ instance }: { instance: Placed }) {
         ['Image ID', text(c.image_id) && <code className="break-all text-muted-foreground">{text(c.image_id)}</code>],
         ['Runtime', text(c.runtime)],
       ]} />
+    </Group>
+
+    <Group title="Параметры запуска" count={argv.length ? parseArgs(argv).length : undefined}>
+      {argv.length > 0 && <>
+        <pre className="launch-line"><code>{argv.map(shellWord).join(' ')}</code></pre>
+        <LaunchTable rows={parseArgs(argv)} />
+      </>}
+      {launched && !argv.length && <p className="muted">{docker ? 'Команда не задана.'
+        : 'Pod не переопределяет команду и аргументы: используются ENTRYPOINT и CMD образа.'}</p>}
+      {launched && !docker && argv.length > 0 && !list(c.command).length && <p className="note">Команда (ENTRYPOINT) — из образа, показаны аргументы из Pod.</p>}
+      {!launched && <p className="note">Снимок от агента старше 0.8: параметры запуска не собирались.</p>}
     </Group>
 
     <Group title="Ресурсы">

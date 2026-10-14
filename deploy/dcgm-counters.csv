@@ -1,5 +1,5 @@
 # DCGM Exporter counters for GMan: what the alert rules (deploy/alerts/rules.yaml), the API
-# (backend/app/metrics.py) and the dashboards (deploy/grafana/dashboards) read. Pass to the exporter with
+# (backend/src/telemetry/services/promql_templates.py) and the dashboards (deploy/grafana/dashboards) read. Pass to the exporter with
 # -f / DCGM_EXPORTER_COLLECTORS (README «Телеметрия», «DCGM Exporter»). backend/tests/test_deploy.py checks that
 # every DCGM_FI_* name used in the repository is enabled here.
 #

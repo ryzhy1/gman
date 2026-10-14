@@ -13,4 +13,4 @@ receivers:
 service:
   pipelines:
     metrics:
-      receivers: [host_metrics, docker_stats, prometheus/gpu]
+      receivers: [host_metrics, docker_stats, prometheus/llm, prometheus/gpu]

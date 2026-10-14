@@ -24,7 +24,7 @@ scrape_configs:
         regex: 'kube_.+;(.+)'
         target_label: source_id
         replacement: '$1'
-  # Inventory state for alerts (backend/app/exposition.py). Internal network only: nginx does not proxy /metrics.
+  # Inventory state for alerts (backend/src/exposition). Internal network only: nginx does not proxy /metrics.
   - job_name: gman-api
     static_configs:
       - targets: ['api:8000']

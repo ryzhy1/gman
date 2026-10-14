@@ -1,5 +1,7 @@
-from backend.app.configs import diff, summary
-from backend.tests.test_api import client, post, snapshot  # noqa: F401  (fixture)
+from dataclasses import asdict
+
+from config_history.services.config_diff import ConfigDiff
+from snapshot_factory import post, snapshot
 
 
 def read(client, path, **params):
@@ -86,6 +88,25 @@ def test_version_and_diff(client):
     assert same["identical"] and same["changes"] == []
 
 
+def test_launch_parameters_are_versioned_only_once_reported(client):
+    # An agent before 0.8 does not report command/args: no new version after the API upgrade.
+    post(client, snapshot(-40))
+    old = snapshot(-30)
+    old["instances"][0]["config"] = {"image": "api:v1", "command": None, "args": None}
+    post(client, old)
+    versions = read(client, "/api/services/api/configs").json()["versions"]
+    assert len(versions) == 1
+    assert "command" not in read(client, f"/api/configs/{versions[0]['id']}").json()["config"]
+    # The upgraded agent reports them: one new version whose diff shows the added parameters.
+    new = snapshot(-20)
+    new["instances"][0]["config"] = {"image": "api:v1", "command": ["vllm", "serve"], "args": ["--model", "llama"]}
+    post(client, new)
+    newest, oldest = read(client, "/api/services/api/configs").json()["versions"]
+    data = read(client, "/api/configs/diff", **{"from": oldest["id"], "to": newest["id"]}).json()
+    assert [(c["path"], c["op"], c["after"]) for c in data["changes"]] == [
+        ("args", "added", ["--model", "llama"]), ("command", "added", ["vllm", "serve"])]
+
+
 def test_reads_and_not_found(client):
     history(client)
     for path in ("/api/services/api/configs", "/api/instances/node-1/container-1/configs", "/api/configs/1",
@@ -111,8 +132,8 @@ def test_diff_structure():
               "old": True}
     after = {"image": "a", "ports": ["80", "8443"], "caps": ["B", "A"], "nested": {"x": 2, "y": [1], "z": None},
              "new": ""}
-    result = diff(before, after)
-    assert result == [
+    changes = ConfigDiff().diff(before, after)
+    assert [asdict(change) for change in changes] == [
         {"path": "caps", "op": "changed", "before": ["A", "B"], "after": ["B", "A"]},
         {"path": "nested.x", "op": "changed", "before": 1, "after": 2},
         {"path": "nested.z", "op": "added", "before": None, "after": None},
@@ -122,5 +143,5 @@ def test_diff_structure():
         {"path": "ports[]", "op": "removed", "before": "443", "after": None},
         {"path": "ports[]", "op": "added", "before": None, "after": "8443"},
     ]
-    assert summary(result) == {"added": 3, "removed": 3, "changed": 2}
-    assert diff(before, before) == []
+    assert ConfigDiff().summary(changes) == {"added": 3, "removed": 3, "changed": 2}
+    assert ConfigDiff().diff(before, before) == []

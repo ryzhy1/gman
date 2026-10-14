@@ -5,7 +5,7 @@
 #
 # Before applying (namespace gman-gpu):
 #   kubectl create namespace gman-gpu
-#   python3 agent/build.py   # -> agent/dist/gman-agent.pyz, the agent as one file
+#   python3 agent/scripts/build_pyz.py   # -> agent/dist/gman-agent.pyz, the agent as one file
 #   kubectl -n gman-gpu create configmap gman-agent --from-file=gman-agent.pyz=agent/dist/gman-agent.pyz
 # Set GMAN_URL and GMAN_CLUSTER (the cluster agent's --source-id) below.
 apiVersion: v1

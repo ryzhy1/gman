@@ -22,7 +22,9 @@ services:
       retries: 20
     restart: unless-stopped
   api:
-    build: ../backend
+    # Dependencies are downloaded while building (Poetry, npm): host network, so that a Docker bridge without
+    # working DNS (firewall, VPN, rootless Docker) does not break `docker compose up --build`.
+    build: {context: ../backend, network: host}
     environment:
       DATABASE_URL: postgresql+psycopg://gman:${POSTGRES_PASSWORD:-gman}@db/gman
       PROMETHEUS_URL: http://prometheus:9090
@@ -46,7 +48,7 @@ services:
       start_period: 30s
     restart: unless-stopped
   portal:
-    build: ../frontend
+    build: {context: ../frontend, network: host}
     # Portal, API (/api/) and Grafana (/grafana/). Remote agents send inventory to http://<server>:<GMAN_PORT>.
     ports: ["${GMAN_BIND_ADDRESS:-0.0.0.0}:${GMAN_PORT:-8080}:80"]
     depends_on:
@@ -82,6 +84,9 @@ services:
     environment:
       GMAN_HOST_ID: ${GMAN_SOURCE_ID:-gman-server}
       GMAN_METRICS_INTERVAL: ${GMAN_METRICS_INTERVAL:-5}
+      # vLLM/Triton ports published on this host (otel-node.yaml, prometheus/llm), reached through the host gateway.
+      GMAN_INFERENCE_HOST: host.docker.internal
+    extra_hosts: ["host.docker.internal:host-gateway"]
     # Root for the Docker socket; everything from the host is mounted read-only.
     user: "0:0"
     volumes:

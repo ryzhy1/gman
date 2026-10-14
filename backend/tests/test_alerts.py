@@ -3,27 +3,11 @@ import time
 import httpx
 import pytest
 
-from backend.app import alerts, exposition
-from backend.tests.test_api import client, post, snapshot  # noqa: F401  (fixture)
-
-
-def samples(text):
-    """{(name, frozenset(labels)): value} from the text exposition format."""
-    result = {}
-    for line in text.splitlines():
-        if not line or line.startswith("#"):
-            continue
-        head, value = line.rsplit(" ", 1)
-        name, _, rest = head.partition("{")
-        labels = frozenset(tuple(pair.split("=", 1)) for pair in rest.rstrip("}").split('",') if pair)
-        result[(name, frozenset((k, v.strip('"')) for k, v in labels))] = float(value)
-    return result
-
-
-def find(data, name, **labels):
-    found = [v for (n, ls), v in data.items() if n == name and set(labels.items()) <= set(ls)]
-    assert len(found) == 1, (name, labels, found)
-    return found[0]
+from exposition import container as exposition_container
+from exposition.entity import MetricSample
+from exposition.services.text_format import TextFormat
+from metric_text import find, samples
+from snapshot_factory import post, snapshot
 
 
 def cluster():
@@ -72,12 +56,12 @@ def test_metrics_expose_inventory_state(client):
     assert not any(n == "gman_instance_state_reason" and ("instance_id", "uid-2:web") in ls for n, ls in data)
 
 
-def test_stale_gpu_readings_are_dropped(client, monkeypatch):
+def test_stale_gpu_readings_are_dropped(client, make_client, monkeypatch):
     host = snapshot()
     host["gpus"] = [{"id": "GPU-1", "vendor": "NVIDIA", "temperature_c": 95}]
     post(client, host)
-    monkeypatch.setattr(exposition, "GPU_FRESH_SECONDS", -1)
-    text = client.get("/metrics").text
+    monkeypatch.setattr(exposition_container, "GPU_FRESH_SECONDS", -1)
+    text = make_client().get("/metrics").text
     assert "gman_gpu_temperature_celsius{" not in text
     assert 'gman_instance_restarts_total{source_id="node-1"' in text
 
@@ -98,23 +82,23 @@ def test_node_gpu_source_is_labelled_with_its_node(client, monkeypatch):
 
 
 def test_label_values_are_escaped():
-    assert exposition.line("m", {"a": 'x"y\\z\nw'}, 1) == 'm{a="x\\"y\\\\z\\nw"} 1.0'
+    sample = MetricSample(name="m", labels={"a": 'x"y\\z\nw'}, value=1)
+    assert TextFormat().line(sample) == 'm{a="x\\"y\\\\z\\nw"} 1.0'
 
 
 @pytest.fixture
-def alertmanager(monkeypatch):
-    monkeypatch.setenv("ALERTMANAGER_URL", "http://alertmanager:9093/")
-    yield lambda handler: setattr(alerts, "client", httpx.Client(transport=httpx.MockTransport(handler), timeout=1))
-    alerts.client = httpx.Client(timeout=5)
+def alertmanager(make_client):
+    """Фабрика клиентов с настроенным Alertmanager, который отвечает функцией handler(request)."""
+    return lambda handler: make_client(transport=httpx.MockTransport(handler),
+                                       alertmanager_url="http://alertmanager:9093/")
 
 
-def test_alerts_disabled_without_alertmanager(client, monkeypatch):
-    monkeypatch.delenv("ALERTMANAGER_URL", raising=False)
+def test_alerts_disabled_without_alertmanager(client):
     assert client.get("/api/alerts").json() == {
         "enabled": False, "error": "ALERTMANAGER_URL is not configured", "alerts": []}
 
 
-def test_active_alerts_are_read_from_alertmanager(client, alertmanager):
+def test_active_alerts_are_read_from_alertmanager(alertmanager):
     seen = []
 
     def handler(request):
@@ -129,7 +113,7 @@ def test_active_alerts_are_read_from_alertmanager(client, alertmanager):
             # The always-firing dead man's switch is not shown.
             {"labels": {"alertname": "GManWatchdog", "severity": "none", "scope": "heartbeat"},
              "annotations": {"summary": "heartbeat"}, "startsAt": "2026-10-11T09:00:00Z"}])
-    alertmanager(handler)
+    client = alertmanager(handler)
     data = client.get("/api/alerts").json()
     assert data["error"] is None
     assert [a["name"] for a in data["alerts"]] == ["GManSourceSilent", "GManGpuOverheating"]
@@ -139,9 +123,9 @@ def test_active_alerts_are_read_from_alertmanager(client, alertmanager):
     assert dict(seen[0].params) == {"active": "true", "silenced": "false", "inhibited": "false"}
 
 
-def test_unavailable_alertmanager_is_reported(client, alertmanager):
+def test_unavailable_alertmanager_is_reported(alertmanager):
     def handler(request):
         raise httpx.ConnectError("refused")
-    alertmanager(handler)
+    client = alertmanager(handler)
     data = client.get("/api/alerts").json()
     assert data["enabled"] and data["alerts"] == [] and data["error"].startswith("Alertmanager unavailable")

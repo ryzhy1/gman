@@ -1,0 +1,82 @@
+---
+description: При создании сервиса или изменении состава модулей / DI — markdown docs/service_structure.md (дерево + граф компонентов)
+globs: "**/container.py,**/celery_worker.py,**/main.py,**/docs/service_structure.md"
+alwaysApply: false
+---
+
+# Документ структуры сервиса
+
+При **создании** микросервиса или **существенном изменении** состава модулей / графа DI сразу создать или обновить:
+
+`<microservice>/docs/service_structure.md`
+
+Правило самодостаточное: не ссылаться на файлы другого сервиса/репозитория.
+
+## Обязательное содержание
+
+1. **Дерево репозитория** — text-tree корня сервиса: `docs/`, `tests/`, `scripts/`, `src/` (entrypoint, config, domain: container, facade/orchestrator, entity, mappers, adapters, services). У файлов — краткая русская приписка.
+2. **Граф компонентов** — два простых Mermaid `flowchart` без пересечения слоёв:
+   - сборка DI: entrypoint → container → settings / фасад;
+   - runtime: фасад → сервисы → адаптеры.
+3. **Поток данных runtime** — Mermaid: вход → сервис → хранилища / очереди / соседи (если есть).
+4. **Запрещённые зависимости** — кратко: `facade → container`, `services → mappers`, `adapters → services` (и прочие из @architecture_rules.mdc, если затронуты).
+
+## Шаблон узла Mermaid
+
+```text
+file.py["file.py<br/>роль: что делает"]
+```
+
+- Роль слоя (`контроллер` / `фасад` / `сервис` / `адаптер`) — **в подписи узла**, без общих рамок-subgraph: так не ломаются стрелки.
+- Подписи рёбер — по-русски или короткие доменные термины из кода.
+
+## Каркас файла
+
+```markdown
+# <microservice> — схема структуры сервиса
+
+Источник: корень `<microservice>/` (см. также `README.md`).
+
+## Дерево репозитория
+\`\`\`text
+<microservice>/
+├── Dockerfile
+├── docs/
+│   ├── service_structure.md
+│   ├── facade_flow.md
+│   └── retry_policy.md
+└── src/
+    ├── celery_worker.py   # контроллер
+    └── <domain>/
+        ├── container.py
+        ├── facade.py
+        ├── services/
+        └── adapters/
+\`\`\`
+
+## Граф компонентов
+### 1. Сборка зависимостей
+\`\`\`mermaid
+flowchart LR
+  ...
+\`\`\`
+
+### 2. Runtime
+\`\`\`mermaid
+flowchart LR
+  ...
+\`\`\`
+
+## Поток данных runtime
+\`\`\`mermaid
+flowchart LR
+  ...
+\`\`\`
+```
+
+## Когда обновлять
+
+- Добавили / удалили / переименовали модуль (entrypoint, container, facade/orchestrator, service, adapter, config).
+- Изменили DI или стрелки слоёв.
+- Изменили внешние волюмы / очереди / соседей в runtime-потоке.
+- Не обновлять при правках только логов, комментариев или алгоритма внутри файла без смены состава и связей.

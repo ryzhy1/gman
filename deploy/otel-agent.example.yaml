@@ -62,8 +62,9 @@ receivers:
           scrape_timeout: 5s
           static_configs:
             - targets: ['127.0.0.1:9835']
-  # vLLM servers in Docker containers on this host, found by labels (README, «Метрики LLM»):
-  #   gman.metrics=vllm, gman.metrics.port=<host port of the OpenAI API>, gman.service=<catalog id>.
+  # Model servers in Docker containers on this host, found by labels (README, «Метрики LLM», «Метрики Triton»):
+  #   gman.metrics=vllm|triton, gman.metrics.port=<host port of /metrics: vLLM's OpenAI API port, Triton's 8002>,
+  #   gman.service=<catalog id>. One job per server kind: exported_job tells them apart.
   # The port is the published one (or the container's own with network_mode: host): this Collector runs on the host.
   prometheus/llm:
     config:
@@ -76,7 +77,7 @@ receivers:
               filters:
                 - name: label
                   values: ['gman.metrics=vllm']
-          relabel_configs:
+          relabel_configs: &model_server_targets
             # $$ is a literal $ (regex group): the Collector expands $ as environment variables.
             # One target per container (Docker SD yields one per network port; equal targets are merged).
             - source_labels: [__meta_docker_container_label_gman_metrics_port]
@@ -93,6 +94,15 @@ receivers:
             - source_labels: [__meta_docker_container_name]
               regex: '/?(.+)'
               target_label: container_name
+        - job_name: triton
+          scrape_interval: 5s
+          scrape_timeout: 5s
+          docker_sd_configs:
+            - host: ${env:DOCKER_SOCKET:-unix:///var/run/docker.sock}
+              filters:
+                - name: label
+                  values: ['gman.metrics=triton']
+          relabel_configs: *model_server_targets
 extensions:
   # Persistent sending queue: batches the gateway has not accepted survive a restart of this Collector or
   # of the host and are sent when the gateway is back (README, «Очередь Collector на диске»).

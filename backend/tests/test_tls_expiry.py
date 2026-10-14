@@ -1,4 +1,4 @@
-"""TLS expiry metrics on /metrics (exposition.py, GMAN_TLS_WATCH_FILES): files made with cryptography in tmp_path."""
+"""TLS expiry metrics on /metrics (exposition, GMAN_TLS_WATCH_FILES): files made with cryptography in tmp_path."""
 import os
 from datetime import datetime, timedelta, timezone
 
@@ -8,9 +8,8 @@ from cryptography.hazmat.primitives import hashes, serialization
 from cryptography.hazmat.primitives.asymmetric import ec
 from cryptography.x509.oid import NameOID
 
-from backend.app import exposition
-from backend.tests.test_alerts import find, samples
-from backend.tests.test_api import client  # noqa: F401  (fixture)
+from exposition.services.tls_parser import TlsParser
+from metric_text import find, samples
 
 NOW = datetime.now(timezone.utc).replace(microsecond=0)
 PEM = serialization.Encoding.PEM
@@ -59,18 +58,18 @@ def pki(tmp_path):
     }
     for file, data in files.items():
         (tmp_path / file).write_bytes(data)
-    exposition._tls_cache.clear()
     return {"dir": tmp_path, "ca": ca, "portal": portal, "expired": expired}
 
 
-def watch(monkeypatch, pki, *files):
+def watch(make_client, pki, *files):
+    """Клиент API, наблюдающий за файлами, и их пути."""
     paths = [str(pki["dir"] / file) for file in files]
-    monkeypatch.setenv("GMAN_TLS_WATCH_FILES", " , ".join(paths) + ",")
-    return paths
+    client = make_client(tls_watch_files=" , ".join(paths) + ",")
+    return client, paths
 
 
-def test_certificate_and_crl_expiry_are_exposed(client, monkeypatch, pki):
-    ca, portal, old, crl_pem, crl_der = watch(monkeypatch, pki, "ca.pem", "portal.pem", "old.pem", "crl.pem",
+def test_certificate_and_crl_expiry_are_exposed(make_client, pki):
+    client, (ca, portal, old, crl_pem, crl_der) = watch(make_client, pki, "ca.pem", "portal.pem", "old.pem", "crl.pem",
                                               "crl-expired.der")
     data = samples(client.get("/metrics").text)
 
@@ -92,11 +91,12 @@ def test_certificate_and_crl_expiry_are_exposed(client, monkeypatch, pki):
     assert not any(n == cert and ("file", crl_pem) in labels for n, labels in data)
 
 
-def test_unreadable_files_and_keys_are_errors(client, monkeypatch, pki):
+def test_unreadable_files_and_keys_are_errors(make_client, monkeypatch, pki):
     opened = []
     real_open = open
     monkeypatch.setattr("builtins.open", lambda path, *a, **k: opened.append(str(path)) or real_open(path, *a, **k))
-    bad, empty, missing, key = watch(monkeypatch, pki, "bad.pem", "empty.pem", "missing.pem", "portal-key.pem")
+    client, (bad, empty, missing, key) = watch(make_client, pki, "bad.pem", "empty.pem", "missing.pem",
+                                               "portal-key.pem")
     data = samples(client.get("/metrics").text)
     for path in (bad, empty, missing, key):
         assert find(data, "gman_tls_file_error", file=path) == 1
@@ -105,11 +105,11 @@ def test_unreadable_files_and_keys_are_errors(client, monkeypatch, pki):
     assert not any(n.startswith("gman_tls_cert") or n.startswith("gman_tls_crl") for n, _ in data)
 
 
-def test_parsed_files_are_cached_until_replaced(client, monkeypatch, pki):
-    (path,) = watch(monkeypatch, pki, "crl.pem")
+def test_parsed_files_are_cached_until_replaced(make_client, monkeypatch, pki):
+    client, (path,) = watch(make_client, pki, "crl.pem")
     calls = []
-    real_parse = exposition.parse_tls
-    monkeypatch.setattr(exposition, "parse_tls", lambda data: calls.append(1) or real_parse(data))
+    real_parse = TlsParser.parse
+    monkeypatch.setattr(TlsParser, "parse", lambda self, data: calls.append(1) or real_parse(self, data))
     client.get("/metrics")
     client.get("/metrics")
     assert len(calls) == 1
@@ -129,6 +129,5 @@ def test_parsed_files_are_cached_until_replaced(client, monkeypatch, pki):
     assert find(samples(client.get("/metrics").text), "gman_tls_file_error", file=path) == 1
 
 
-def test_nothing_is_watched_by_default(client, monkeypatch):
-    monkeypatch.delenv("GMAN_TLS_WATCH_FILES", raising=False)
+def test_nothing_is_watched_by_default(client):
     assert "gman_tls_file_error{" not in client.get("/metrics").text

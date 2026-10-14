@@ -1,33 +1,15 @@
 import httpx
-import pytest
 
-from backend.app import metrics
-from backend.tests.test_api import client  # noqa: F401  (fixture)
-
-
-def prometheus(handler):
-    metrics.client = httpx.Client(transport=httpx.MockTransport(handler), timeout=1)
+from prometheus_stub import vector
+from telemetry.services.promql_templates import LabelSelector
 
 
-def vector(*items):
-    return {"status": "success", "data": {"resultType": "vector",
-            "result": [{"metric": labels, "value": [0, value]} for labels, value in items]}}
-
-
-@pytest.fixture
-def configured(monkeypatch):
-    monkeypatch.setenv("PROMETHEUS_URL", "http://prom:9090/")
-    yield
-    metrics.client = httpx.Client(timeout=10)
-
-
-def test_disabled_without_prometheus(client, monkeypatch):
-    monkeypatch.delenv("PROMETHEUS_URL", raising=False)
+def test_disabled_without_prometheus(client):
     assert client.get("/api/metrics/current").json() == {
         "enabled": False, "error": "PROMETHEUS_URL is not configured"}
 
 
-def test_current_groups_by_object(client, configured):
+def test_current_groups_by_object(configured):
     def handler(request):
         query = request.url.params["query"]
         if "container_cpu_usage" in query:
@@ -37,7 +19,7 @@ def test_current_groups_by_object(client, configured):
         if "system_cpu_utilization_ratio" in query and "idle" in query:
             return httpx.Response(200, json=vector(({"host_id": "h"}, "NaN")))
         return httpx.Response(200, json=vector())
-    prometheus(handler)
+    client = configured(handler)
     data = client.get("/api/metrics/current").json()
     assert data["error"] is None
     assert data["container"] == {"h/c1": {"cpu_cores": 0.5}}
@@ -45,23 +27,23 @@ def test_current_groups_by_object(client, configured):
     assert data["host"] == {"h": {"cpu_utilization": None}}
 
 
-def test_unavailable_store_is_reported(client, configured):
+def test_unavailable_store_is_reported(configured):
     def handler(request):
         raise httpx.ConnectError("refused")
-    prometheus(handler)
+    client = configured(handler)
     data = client.get("/api/metrics/current").json()
     assert data["enabled"] and data["error"].startswith("Metrics store unavailable")
     params = {"scope": "host", "metric": "load_1m", "host_id": "h"}
     assert client.get("/api/metrics/range", params=params).status_code == 503
 
 
-def test_range_uses_fixed_templates_and_escapes(client, configured):
+def test_range_uses_fixed_templates_and_escapes(configured):
     seen = []
     def handler(request):
         seen.append(dict(request.url.params))
         return httpx.Response(200, json={"status": "success", "data": {"resultType": "matrix", "result": [
             {"metric": {}, "values": [[1, "0.25"], [2, "0.5"]]}]}})
-    prometheus(handler)
+    client = configured(handler)
     params = {"scope": "container", "metric": "cpu_cores", "range": "24h", "host_id": "h", "container_id": "c1"}
     data = client.get("/api/metrics/range", params=params).json()
     assert data["points"] == [[1.0, 0.25], [2.0, 0.5]] and data["step"] == 360
@@ -71,13 +53,13 @@ def test_range_uses_fixed_templates_and_escapes(client, configured):
     for value in bad:
         assert client.get("/api/metrics/range", params=value).status_code == 422
     assert len(seen) == 1
-    assert metrics.selector({"host_id": 'a"b\\'})() == '{host_id="a\\"b\\\\"}'
+    assert LabelSelector({"host_id": 'a"b\\'})() == '{host_id="a\\"b\\\\"}'
 
 
 POD = "6515dd0c-1f3d-45c4-a644-84204c46d898"
 
 
-def test_current_keys_kubernetes_objects_like_inventory(client, configured):
+def test_current_keys_kubernetes_objects_like_inventory(configured):
     def handler(request):
         query = request.url.params["query"]
         if "container_cpu_time_seconds_total" in query:
@@ -87,19 +69,19 @@ def test_current_keys_kubernetes_objects_like_inventory(client, configured):
         if "k8s_pod_network_io_bytes_total" in query and '"receive"' in query:
             return httpx.Response(200, json=vector(({"k8s_pod_uid": POD}, "+Inf")))
         return httpx.Response(200, json=vector())
-    prometheus(handler)
+    client = configured(handler)
     data = client.get("/api/metrics/current").json()
     assert data["k8s_container"] == {f"{POD}:api": {"cpu_cores": 0.25, "memory_bytes": 1048576.0}}
     assert data["k8s_pod"] == {POD: {"network_rx_bytes_per_second": None}}
     assert data["container"] == {} and data["host"] == {} and data["gpu"] == {}
 
 
-def test_range_kubernetes_scopes(client, configured):
+def test_range_kubernetes_scopes(configured):
     seen = []
     def handler(request):
         seen.append(request.url.params["query"])
         return httpx.Response(200, json={"status": "success", "data": {"resultType": "matrix", "result": []}})
-    prometheus(handler)
+    client = configured(handler)
     params = {"scope": "k8s_container", "metric": "cpu_cores", "pod_uid": POD, "container_name": "api"}
     data = client.get("/api/metrics/range", params=params).json()
     assert data["points"] == [] and data["scope"] == "k8s_container" and data["range"] == "1h"
@@ -117,7 +99,7 @@ def test_range_kubernetes_scopes(client, configured):
     assert len(seen) == 2
 
 
-def test_llm_scope_by_service_and_model(client, configured):
+def test_llm_scope_by_service_and_model(configured):
     seen = []
 
     def handler(request):
@@ -128,7 +110,7 @@ def test_llm_scope_by_service_and_model(client, configured):
         if request.url.path.endswith("/query_range"):
             return httpx.Response(200, json={"status": "success", "data": {"resultType": "matrix", "result": []}})
         return httpx.Response(200, json=vector())
-    prometheus(handler)
+    client = configured(handler)
     data = client.get("/api/metrics/current").json()
     assert data["llm"] == {"chat/meta-llama/Llama-3.1-8B": {"ttft_p95_seconds": 0.42}}
     params = {"scope": "llm", "metric": "ttft_p95_seconds", "service_id": "chat", "model": "meta-llama/Llama-3.1-8B"}

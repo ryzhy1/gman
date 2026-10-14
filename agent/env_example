@@ -1,0 +1,19 @@
+# Переменные окружения агента GMan (читаются в src/config/settings.py).
+
+# Адрес GMan API для --send (у API нет аутентификации: доступ ограничивается сетью).
+GMAN_URL=http://gman.example.org:8080
+# Каталог spool и блокировок; по умолчанию /var/lib/gman-agent под root, иначе ~/.local/state/gman-agent.
+GMAN_AGENT_STATE_DIR=
+# Адрес хоста в портале вместо адреса маршрута по умолчанию.
+GMAN_HOST_IP=
+# /proc хоста (в контейнере нужен hostPID: nvidia-smi сообщает PID своего пространства).
+GMAN_PROC_ROOT=/proc
+# --runtime kubernetes-node: имя узла и source_id агента кластера, если не переданы аргументами.
+NODE_NAME=
+GMAN_CLUSTER=
+
+# bamboo_event.py: переменные GMAN_* переопределяют переменные Bamboo (см. src/deployment_report/mappers.py).
+GMAN_SERVICE_ID=
+GMAN_DEPLOYMENT_STATUS=
+# true — неудачная отправка события деплоя валит шаг Bamboo; иначе только предупреждение.
+GMAN_REQUIRED=

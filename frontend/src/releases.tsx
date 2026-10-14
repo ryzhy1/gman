@@ -74,7 +74,7 @@ export function Releases({ serviceId, environment, refreshKey, selected, onSelec
     </Table></div>
     {!releases.length && !error && <div className="empty">
       <h3>Релизов пока нет</h3>
-      <p>Релиз появляется после события Bamboo (agent/bamboo_event.py) для этого сервиса.</p>
+      <p>Релиз появляется после события Bamboo (agent/src/bamboo_event.py) для этого сервиса.</p>
     </div>}
     {next && <button className={outlineButton('mt-4')} onClick={more}>Показать еще</button>}
     <p className="note">Статус выводится из наблюдений: «Успешно» — все экземпляры целевого образа в окружении запущены с целевым digest или версией и здоровы. Ошибка — сбой в Bamboo, падения или OOM новых экземпляров либо тайм-аут раскатки.</p>
