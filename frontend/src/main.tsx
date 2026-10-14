@@ -2,17 +2,17 @@ import React, { useEffect, useState } from 'react';
 import { createRoot } from 'react-dom/client';
 import { get, type CurrentMetrics, type Overview, type SplunkLinks } from './api';
 import { Alerts } from './alerts';
-import { ConfigView, History, InstanceTable, instanceHref, placeInstances, serverAddress, servicePorts, type Placed } from './components';
+import { ConfigView, History, InstanceTable, instanceHref, placeInstances, serverAddress, serverHref, servicePorts, type Placed } from './components';
 import { ConfigHistory } from './configs';
 import { ServiceEditor } from './edit';
 import { ClusterCard, HostCard } from './hardware';
-import { date, grafanaLink, stale, syncServerClock } from './format';
+import { date, describeStatus, grafanaLink, stale, syncServerClock } from './format';
 import { Releases } from './releases';
 import { Resources } from './resources';
 import { Workloads } from './workloads';
 import { LaunchDetails } from './launch';
 import { LlmCharts, LlmSummary } from './llm';
-import { Activity, AlertTriangle, ArrowLeft, ArrowRight, Boxes, ChevronRight, ExternalLink, History as HistoryIcon, Menu, Moon, Search, Server, Sun, X } from 'lucide-react';
+import { Activity, AlertTriangle, ArrowLeft, ArrowRight, Boxes, ChevronRight, ExternalLink, History as HistoryIcon, Menu, Moon, Search, Server, Sun } from 'lucide-react';
 import { cn } from '@/lib/utils';
 import { Badge } from '@/ui/badge';
 import { Button, buttonVariants } from '@/ui/button';
@@ -29,6 +29,12 @@ const ALL = 'Все окружения';
 const PAGES = [['Сервисы', Boxes], ['Серверы и GPU', Server], ['Алерты', AlertTriangle], ['Аудит', HistoryIcon]] as const;
 const TABS = ['Обзор', 'Ресурсы', 'Экземпляры', 'Конфигурация', 'Релизы', 'История'];
 const LINKS = [['repository', 'Репозиторий'], ['grafana', 'Grafana'], ['splunk', 'Логи в Splunk'], ['bamboo', 'Bamboo']] as const;
+const SERVERS_ALL = '#services';
+const STATE_ALL = 'all';
+const STATES = [[STATE_ALL, 'Все состояния'], ['running', 'Запущенные'], ['stopped', 'Остановленные']] as const;
+
+/** When the instance last changed state: start of a running one, otherwise its stop (creation if it never ran). */
+const changedAt = (i: Placed) => i.status === 'running' ? i.started_at : i.finished_at ?? i.started_at ?? i.created_at;
 
 function route() {
   try { return location.hash.slice(1).split('/').map(decodeURIComponent); }
@@ -52,8 +58,8 @@ function useTheme() {
 
 function Brand() {
   return <div className="flex items-center gap-2.5">
-    <span className="grid size-8 place-items-center rounded-lg bg-primary text-sm font-bold text-primary-foreground">G</span>
-    <span className="text-lg font-semibold tracking-tight">GMan</span>
+    <span className="grid size-8 place-items-center rounded-lg bg-primary text-sm font-bold text-primary-foreground">Ч</span>
+    <span className="text-lg font-semibold tracking-tight">Человек-паук</span>
     <Badge variant="muted" className="text-[10px] tracking-wider">PLATFORM</Badge>
   </div>;
 }
@@ -68,6 +74,7 @@ function App() {
   const [page, setPage] = useState<string>(() => route()[0] === 'alerts' ? 'Алерты'
     : route()[0] === 'hosts' ? 'Серверы и GPU' : route()[0] === 'audit' ? 'Аудит' : 'Сервисы');
   const [query, setQuery] = useState('');
+  const [state, setState] = useState<string>(STATE_ALL);
   const [selected, setSelected] = useState(() => route()[0] === 'services' ? route()[1] ?? '' : '');
   const [instanceRoute, setInstanceRoute] = useState<string[]>(() => route()[0] === 'instances' ? route().slice(1) : []);
   // #server/<source_id>[/<node>]: the services page limited to one Docker host or Kubernetes node.
@@ -126,33 +133,47 @@ function App() {
 
   const all: Placed[] = placeInstances(data?.sources ?? []);
   const instances = all.filter(i => environment === ALL || i.environment === environment);
-  // One row per server and ports of a service's running instances in the chosen environment; running
+  // One row per server, ports and state (running or stopped) of a service's instances in the chosen environment;
   // containers and pods without a catalog entry follow, each opening its own instance page. The search matches
   // the service (name, ID, team, owner) or a row's ports and server address, e.g. "8080" or ":8080".
-  type Row = { key: string; name: string; href: string; address: string; ports: string; first: boolean; unbound?: boolean };
+  type Row = { key: string; name: string; href: string; address: string; ports: string; first: boolean; unbound?: boolean;
+    running: boolean; changedAt: string | null; status: string };
   const onServer = (i: Placed) => !server.length || (i.source.source_id === server[0] && (!server[1] || i.node === server[1]));
-  const listed = instances.filter(i => i.status === 'running' && onServer(i));
+  const listed = instances.filter(i => onServer(i) && (state === STATE_ALL || (i.status === 'running') === (state === 'running')));
   const needle = query.trim().toLowerCase().replace(/^:/, '');
   const found = (...texts: string[]) => !needle || texts.some(t => t.toLowerCase().includes(needle));
-  const running: Row[] = (data?.services ?? []).flatMap(service => {
+  const place = (i: Placed) => ({ address: serverAddress(i), ports: servicePorts(i).join(', '), running: i.status === 'running',
+    changedAt: changedAt(i), status: describeStatus(i) });
+  const rows: Row[] = (data?.services ?? []).flatMap(service => {
     const named = found(service.name, service.id, service.team, service.owner);
-    const rows = new Map<string, { address: string; ports: string }>();
+    // Instances of one row: the latest change of any of them is shown.
+    const groups = new Map<string, ReturnType<typeof place>>();
     for (const i of listed) if (i.service_id === service.id) {
-      const row = { address: serverAddress(i), ports: servicePorts(i).join(', ') };
-      if (named || found(row.ports, row.address)) rows.set(`${row.address}|${row.ports}`, row);
+      const row = place(i);
+      if (!named && !found(row.ports, row.address)) continue;
+      const key = `${row.address}|${row.ports}|${row.running}`;
+      const seen = groups.get(key);
+      if (!seen || (row.changedAt ?? '') > (seen.changedAt ?? '')) groups.set(key, row);
     }
-    return [...rows.values()].sort((a, b) => a.address.localeCompare(b.address)).map((r, n) =>
-      ({ ...r, key: `${service.id}/${r.address}/${r.ports}`, name: service.name, href: serviceHref(service.id), first: n === 0 }));
+    return [...groups.values()].sort((a, b) => Number(b.running) - Number(a.running) || a.address.localeCompare(b.address))
+      .map((r, n) => ({ ...r, key: `${service.id}/${r.address}/${r.ports}/${r.running}`, name: service.name,
+        href: serviceHref(service.id), first: n === 0 }));
   }).concat(listed
     .filter(i => !data?.services.some(s => s.id === i.service_id))
-    .map(i => ({ i, address: serverAddress(i), ports: servicePorts(i).join(', ') }))
+    .map(i => ({ i, ...place(i) }))
     .filter(({ i, address, ports }) => found(i.name, i.service_id, i.controller, ports, address))
     .sort((a, b) => a.i.name.localeCompare(b.i.name))
-    .map(({ i, address, ports }) => ({ key: `${i.source.source_id}/${i.id}`, name: i.name, href: instanceHref(i), first: true,
-      unbound: true, address, ports })));
-  const serverSource = data?.sources.find(s => s.source_id === server[0]);
-  const serverName = server[1] ? `${server[1]} (${serverSource?.hostname ?? server[0]})` : serverSource?.hostname ?? server[0];
-  const runningCount = new Set(running.filter(r => r.first).map(r => r.key)).size;
+    .map(({ i, ...r }) => ({ ...r, key: `${i.source.source_id}/${i.id}`, name: i.name, href: instanceHref(i), first: true, unbound: true })));
+  // Servers to filter by: Docker hosts, Kubernetes clusters as a whole and their nodes.
+  const servers = (data?.sources ?? []).flatMap(s => s.source_type === 'docker-host'
+    ? [{ href: serverHref(s.source_id), label: s.ip && s.ip !== s.hostname ? `${s.hostname} · ${s.ip}` : s.hostname }]
+    : s.source_type === 'kubernetes-cluster'
+      ? [{ href: serverHref(s.source_id), label: `${s.hostname} · все узлы` },
+        ...(s.nodes ?? []).map(n => ({ href: serverHref(s.source_id, n.name), label: `${s.hostname} / ${n.name}${n.internal_ip ? ` · ${n.internal_ip}` : ''}` }))]
+      : []);
+  const serverValue = server.length ? serverHref(server[0], server[1]) : SERVERS_ALL;
+  if (server.length && !servers.some(s => s.href === serverValue)) servers.push({ href: serverValue, label: server.join(' / ') });
+  const shownCount = rows.filter(r => r.first).length;
   const service = data?.services.find(s => s.id === selected);
   const selectedInstance = all.find(i => i.source.source_id === instanceRoute[0] && i.id === instanceRoute[1]);
   const own = instances.filter(i => i.service_id === selected);
@@ -216,7 +237,7 @@ function App() {
           <span className="truncate font-medium text-foreground">{page}</span>
         </nav>
         <div className="ml-auto flex items-center gap-2">
-          <span className="hidden text-xs text-muted-foreground sm:inline">GMan · foundation</span>
+          <span className="hidden text-xs text-muted-foreground sm:inline">Человек-паук · foundation</span>
           <Button variant="ghost" size="icon-sm" onClick={toggleTheme} aria-label={dark ? 'Светлая тема' : 'Тёмная тема'}>
             {dark ? <Sun /> : <Moon />}
           </Button>
@@ -254,27 +275,37 @@ function App() {
           </div>
 
           {page === 'Сервисы' && !selected && !instanceRoute.length && <Card>
-            <CardHeader className="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
+            <CardHeader className="flex flex-col gap-3 xl:flex-row xl:items-start xl:justify-between">
               <div className="space-y-1.5">
-                <CardTitle className="flex items-center gap-2">Запущенные сервисы <Badge variant="muted">{runningCount}</Badge></CardTitle>
+                <CardTitle className="flex items-center gap-2">Сервисы <Badge variant="muted">{shownCount}</Badge></CardTitle>
                 <CardDescription>Нажмите на строку, чтобы открыть страницу сервиса</CardDescription>
-                {server.length > 0 && <Badge variant="secondary" className="gap-1.5 py-1 pr-1 font-normal">
-                  <Server className="size-3.5" /> {server[1] ? 'Узел' : 'Сервер'}: <b className="font-medium">{serverName}</b>
-                  <a href="#services" className="rounded-sm p-0.5 hover:bg-background" title="Показать сервисы всех серверов" aria-label="Сбросить фильтр по серверу"><X className="size-3.5" /></a>
-                </Badge>}
               </div>
-              <div className="relative w-full sm:w-72">
-                <Search className="pointer-events-none absolute top-1/2 left-2.5 size-4 -translate-y-1/2 text-muted-foreground" />
-                <Input aria-label="Поиск сервисов" placeholder="Сервис, команда, порт или IP…" className="pl-8"
-                  value={query} onChange={e => setQuery(e.target.value)} />
+              <div className="flex w-full flex-col gap-2 sm:flex-row xl:w-auto">
+                <Select value={serverValue} onValueChange={v => { location.hash = v; }}>
+                  <SelectTrigger aria-label="Сервер" className="w-full sm:w-64"><Server className="text-muted-foreground" /><SelectValue /></SelectTrigger>
+                  <SelectContent>
+                    <SelectItem value={SERVERS_ALL}>Все серверы</SelectItem>
+                    {servers.map(s => <SelectItem key={s.href} value={s.href}>{s.label}</SelectItem>)}
+                  </SelectContent>
+                </Select>
+                <Select value={state} onValueChange={setState}>
+                  <SelectTrigger aria-label="Состояние" className="w-full sm:w-44"><SelectValue /></SelectTrigger>
+                  <SelectContent>{STATES.map(([v, label]) => <SelectItem key={v} value={v}>{label}</SelectItem>)}</SelectContent>
+                </Select>
+                <div className="relative w-full sm:w-64">
+                  <Search className="pointer-events-none absolute top-1/2 left-2.5 size-4 -translate-y-1/2 text-muted-foreground" />
+                  <Input aria-label="Поиск сервисов" placeholder="Сервис, команда, порт или IP…" className="pl-8"
+                    value={query} onChange={e => setQuery(e.target.value)} />
+                </div>
               </div>
             </CardHeader>
             <CardContent>
-              {running.length > 0 && <div className="rounded-md border"><Table>
+              {rows.length > 0 && <div className="rounded-md border"><Table>
                 <TableHeader><TableRow className="bg-muted/50 hover:bg-muted/50">
-                  <TableHead>Сервис</TableHead><TableHead>IP сервера</TableHead><TableHead>Порт</TableHead><TableHead className="w-8" />
+                  <TableHead>Сервис</TableHead><TableHead>IP сервера</TableHead><TableHead>Порт</TableHead>
+                  <TableHead>Состояние</TableHead><TableHead>Последнее изменение</TableHead><TableHead className="w-8" />
                 </TableRow></TableHeader>
-                <TableBody>{running.map(r =>
+                <TableBody>{rows.map(r =>
                   <TableRow key={r.key} tabIndex={0} title={r.unbound ? 'Открыть экземпляр' : 'Открыть сервис'}
                     className={cn('group cursor-pointer focus-visible:bg-muted focus-visible:outline-none', !r.first && 'border-t-0')}
                     onClick={() => { if (!window.getSelection()?.toString()) location.hash = r.href; }}
@@ -283,13 +314,15 @@ function App() {
                       {r.unbound && <Badge variant="muted" className="ml-2 font-normal" title="Нет записи в каталоге и метки gman.service">не в каталоге</Badge>}</>}</TableCell>
                     <TableCell className="font-mono text-xs">{r.address || '—'}</TableCell>
                     <TableCell className="font-mono text-xs">{r.ports || '—'}</TableCell>
+                    <TableCell><Badge variant={r.running ? 'success' : 'danger'} title={r.status}>{r.running ? 'Запущен' : 'Остановлен'}</Badge></TableCell>
+                    <TableCell className="text-xs text-muted-foreground tabular-nums">{date(r.changedAt)}</TableCell>
                     <TableCell><ChevronRight className="size-4 text-muted-foreground opacity-0 transition-opacity group-hover:opacity-100 group-focus-visible:opacity-100" /></TableCell>
                   </TableRow>)}</TableBody>
               </Table></div>}
-              {!running.length && <div className="empty">
-                <h3>{query ? 'Сервисы не найдены' : server.length ? 'На этом сервере нет запущенных сервисов' : 'Нет запущенных сервисов'}</h3>
+              {!rows.length && <div className="empty">
+                <h3>{query ? 'Сервисы не найдены' : server.length ? 'На этом сервере нет сервисов' : 'Нет сервисов'}{state !== STATE_ALL && ' в выбранном состоянии'}</h3>
                 {query ? <p>Поиск идет по названию, идентификатору, команде, ответственному, порту и IP сервера.</p>
-                  : !server.length && <p>Зарегистрируйте сервис через API и задайте gman.service в Docker labels или labels шаблона Pod.</p>}
+                  : !server.length && state === STATE_ALL && <p>Зарегистрируйте сервис через API и задайте gman.service в Docker labels или labels шаблона Pod.</p>}
               </div>}
             </CardContent>
           </Card>}
